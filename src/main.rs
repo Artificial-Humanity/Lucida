@@ -1,18 +1,26 @@
-//! Lucida — image generation via the Google Gemini API.
+//! Lucida — image and video generation.
 //!
 //! Named for the camera lucida, the optical device that let artists trace what
 //! they saw onto paper.
 //!
 //! One binary, two front ends: a plain CLI for shell and script use, and an MCP
 //! server (`lucida mcp`) so agents can call it as a first-class tool.
+//!
+//! Images come from one of two providers — Google's Gemini models, or a local
+//! ComfyUI — chosen from the model id unless `--provider` says otherwise. Video
+//! is Google-only for now.
 
+mod comfy;
+mod config;
 mod genai;
 mod mcp;
+mod provider;
 mod video;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use genai::{Client, DEFAULT_MODEL, ImageRequest};
+use clap::{Args, Parser, Subcommand};
+use genai::DEFAULT_MODEL;
+use provider::{Aspect, Backend, ImageProvider, ImageRequest, Size, infer_backend};
 use std::path::{Path, PathBuf};
 use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 
@@ -20,15 +28,57 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 #[command(
     name = "lucida",
     version,
-    about = "Generate and edit images with Google's Gemini models",
-    long_about = "Generate and edit images with Google's Gemini models.\n\n\
-                  Reads GOOGLE_API_KEY (or GEMINI_API_KEY) from the environment.\n\
-                  Image generation requires billing to be enabled on the project \
-                  behind the key; free-tier keys report a quota of zero."
+    about = "Generate and edit images with Google Gemini or a local ComfyUI",
+    long_about = "Generate and edit images with Google Gemini or a local ComfyUI.\n\n\
+                  Google reads GOOGLE_API_KEY (or GEMINI_API_KEY) from the \
+                  environment, and image generation requires billing to be enabled \
+                  on the project behind the key; free-tier keys report a quota of \
+                  zero.\n\n\
+                  ComfyUI needs no credential. It is found at \
+                  http://127.0.0.1:8188 unless LUCIDA_COMFYUI_URL says otherwise."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Options shared by `generate` and `edit`.
+///
+/// Flattened rather than repeated, because the two commands differ only in how
+/// they treat the leading image — every knob applies to both.
+#[derive(Args, Clone, Default)]
+struct ImageOptions {
+    /// Aspect ratio, e.g. 16:9, 1:1, 4:5
+    #[arg(short, long)]
+    aspect: Option<String>,
+
+    /// Long edge: a tier (1K, 2K, 4K) or a pixel count
+    #[arg(short, long)]
+    size: Option<String>,
+
+    /// Model id or alias. Defaults per provider.
+    #[arg(short, long)]
+    model: Option<String>,
+
+    /// Which provider to use: google or comfyui. Inferred from the model when omitted.
+    #[arg(short, long)]
+    provider: Option<String>,
+
+    /// What to keep out of the picture (comfyui only)
+    #[arg(short, long)]
+    negative: Option<String>,
+
+    /// Seed, for a reproducible render (comfyui only)
+    #[arg(long)]
+    seed: Option<u64>,
+
+    /// Sampling steps (comfyui only)
+    #[arg(long)]
+    steps: Option<u32>,
+
+    /// Guidance scale (comfyui only)
+    #[arg(short, long)]
+    guidance: Option<f32>,
 }
 
 #[derive(Subcommand)]
@@ -42,22 +92,13 @@ enum Command {
         #[arg(short, long, default_value = "image.png")]
         out: PathBuf,
 
-        /// Aspect ratio, e.g. 16:9, 1:1, 4:5
-        #[arg(short, long)]
-        aspect: Option<String>,
-
-        /// Render resolution: 1K, 2K or 4K
-        #[arg(short, long)]
-        size: Option<String>,
-
-        /// Model id
-        #[arg(short, long, default_value = DEFAULT_MODEL)]
-        model: String,
-
         /// Existing image to condition on; repeat for several. Prefer the
         /// `edit` subcommand, which reads better for the common case.
         #[arg(short, long = "ref")]
         reference: Vec<String>,
+
+        #[command(flatten)]
+        opts: ImageOptions,
     },
 
     /// Edit an existing image with a prompt
@@ -72,21 +113,12 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
 
-        /// Aspect ratio, e.g. 16:9, 1:1, 4:5
-        #[arg(short, long)]
-        aspect: Option<String>,
-
-        /// Render resolution: 1K, 2K or 4K
-        #[arg(short, long)]
-        size: Option<String>,
-
-        /// Model id
-        #[arg(short, long, default_value = DEFAULT_MODEL)]
-        model: String,
-
         /// Additional images for style or subject reference
         #[arg(short, long = "ref")]
         reference: Vec<String>,
+
+        #[command(flatten)]
+        opts: ImageOptions,
     },
 
     /// Generate a video with Veo. Renders take minutes and bill per second.
@@ -129,8 +161,19 @@ enum Command {
         out: PathBuf,
     },
 
-    /// List image-capable models this API key can see (free, spends nothing)
-    Models,
+    /// List the image models a provider can reach, and what it can be asked for
+    Models {
+        /// Which provider to interrogate: google or comfyui
+        #[arg(short, long, default_value = "google")]
+        provider: String,
+    },
+
+    /// Show what settings this process can see, and where they came from
+    Config {
+        /// Write a starter config file and print its path
+        #[arg(long)]
+        init: bool,
+    },
 
     /// Run as an MCP server over stdio
     Mcp,
@@ -147,56 +190,46 @@ fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Mcp => mcp::serve(),
 
-        Command::Models => {
-            let models = Client::from_env()?.list_image_models()?;
-            if models.is_empty() {
-                println!("No image-capable models visible to this key.");
-                return Ok(());
-            }
-            println!("Image models available to this key:");
-            for model in &models {
-                let mut notes: Vec<&str> = Vec::new();
-                if model == DEFAULT_MODEL {
-                    notes.push("default");
-                }
-                if model.starts_with("imagen") {
-                    notes.push("Imagen family — different endpoint, retires 2026-08-17");
-                }
-                let suffix = if notes.is_empty() {
-                    String::new()
-                } else {
-                    format!("  ({})", notes.join("; "))
-                };
-                println!("  {model}{suffix}");
-            }
+        Command::Models { provider } => list_models(Backend::parse(&provider)?),
 
-            println!("\nAliases (\"Nano Banana\" is Google's codename for these):");
-            for (alias, target) in genai::MODEL_ALIASES {
-                println!("  {alias:<16} -> {target}");
+        Command::Config { init } => {
+            if init {
+                init_config()
+            } else {
+                show_config();
+                Ok(())
             }
-            Ok(())
         }
 
         Command::Generate {
             prompt,
             out,
-            aspect,
-            size,
-            model,
             reference,
-        } => execute(
-            ImageRequest {
-                prompt,
-                model,
-                aspect_ratio: aspect,
-                image_size: size,
-                references: reference,
-            },
+            opts,
+        } => {
+            let (request, backend) = opts.into_request(prompt, reference)?;
+            execute(request, backend, out)
+        }
+
+        Command::Edit {
+            image,
+            prompt,
             out,
-        ),
+            reference,
+            opts,
+        } => {
+            // The edited image leads, so it is the primary subject rather than
+            // one reference among several.
+            let mut references = vec![image.clone()];
+            references.extend(reference);
+
+            let destination = out.unwrap_or_else(|| PathBuf::from(&image));
+            let (request, backend) = opts.into_request(prompt, references)?;
+            execute(request, backend, destination)
+        }
 
         Command::Check { operation, out } => {
-            match Client::from_env()?.poll_video(&operation)? {
+            match genai::Client::from_env()?.poll_video(&operation)? {
                 video::VideoStatus::Pending => {
                     eprintln!("Still rendering. Try again in half a minute.");
                     Ok(())
@@ -234,7 +267,7 @@ fn run() -> Result<()> {
             let resolved = video::resolve_video_model(&request.model);
             eprintln!("Rendering with {resolved}…");
 
-            let bytes = Client::from_env()?.generate_video(&request)?;
+            let bytes = genai::Client::from_env()?.generate_video(&request)?;
             let written = write_image(&out, &bytes)?;
             eprintln!(
                 "Wrote {} ({} MB)",
@@ -244,51 +277,232 @@ fn run() -> Result<()> {
             println!("{}", written.display());
             Ok(())
         }
+    }
+}
 
-        Command::Edit {
-            image,
+impl ImageOptions {
+    /// Turns raw CLI strings into a normalized request, and works out which
+    /// provider serves it.
+    ///
+    /// Provider selection is inferred from the model id so `--provider` stays
+    /// optional in the common case; naming it explicitly wins, and also supplies
+    /// the model default, so `--provider comfyui` alone does the right thing
+    /// rather than sending a Gemini model id to a local server.
+    fn into_request(
+        self,
+        prompt: String,
+        references: Vec<String>,
+    ) -> Result<(ImageRequest, Backend)> {
+        let backend = match (&self.provider, &self.model) {
+            (Some(name), _) => Backend::parse(name)?,
+            (None, Some(model)) => infer_backend(model),
+            (None, None) => Backend::Google,
+        };
+
+        let model = self.model.unwrap_or_else(|| default_model(backend).to_string());
+
+        let request = ImageRequest {
             prompt,
-            out,
-            aspect,
-            size,
             model,
-            reference,
-        } => {
-            // The edited image leads, so it is the primary subject rather than
-            // one reference among several.
-            let mut references = vec![image.clone()];
-            references.extend(reference);
+            aspect: self.aspect.as_deref().map(Aspect::parse).transpose()?,
+            size: self.size.as_deref().map(Size::parse).transpose()?,
+            references,
+            negative_prompt: self.negative,
+            seed: self.seed,
+            steps: self.steps,
+            guidance: self.guidance,
+        };
 
-            let destination = out.unwrap_or_else(|| PathBuf::from(&image));
-            execute(
-                ImageRequest {
-                    prompt,
-                    model,
-                    aspect_ratio: aspect,
-                    image_size: size,
-                    references,
-                },
-                destination,
-            )
+        Ok((request, backend))
+    }
+}
+
+/// Reports what this process can actually see.
+///
+/// The point is diagnostic rather than informational. When an MCP server cannot
+/// find a key that is demonstrably exported in a shell profile, the useful
+/// question is "what does *that* process see", and the answer differs from what
+/// the same command shows in a terminal. Running it through the same binary is
+/// the only way to get a truthful answer.
+///
+/// Values are never printed — only whether each setting is set and where it came
+/// from. That is what diagnoses the problem, and it is safe to paste.
+fn show_config() {
+    match config::source() {
+        Some(path) => println!("Config file: {}", path.display()),
+        None => println!("Config file: none found"),
+    }
+
+    println!("\nLooked for it at:");
+    for path in config::search_paths() {
+        let mark = if path.is_file() { "found" } else { "not found" };
+        println!("  {}  ({mark})", path.display());
+    }
+
+    println!("\nSettings visible to this process:");
+    for (key, purpose) in config::KNOWN_KEYS {
+        // The environment is reported separately from the file, because "set in
+        // both" and "set only in the file" behave differently and the whole
+        // class of bug here is about which one a process can reach.
+        let in_env = std::env::var(key).is_ok_and(|v| !v.trim().is_empty());
+        let source = match (in_env, config::var(key).is_some()) {
+            (true, _) => "set (environment)",
+            (false, true) => "set (config file)",
+            (false, false) => "not set",
+        };
+        println!("  {key:<22} {source:<20} {purpose}");
+    }
+
+    if config::source().is_none() {
+        println!(
+            "\nNo config file yet. `lucida config --init` writes one — useful when \
+             a GUI-launched\napp cannot see your shell's environment."
+        );
+    }
+}
+
+fn init_config() -> Result<()> {
+    let path = config::preferred_path()
+        .context("could not determine a config location: neither HOME nor XDG_CONFIG_HOME is set")?;
+
+    if path.exists() {
+        // Never clobber a file that may hold the only copy of a key.
+        eprintln!("{} already exists; leaving it alone.", path.display());
+        println!("{}", path.display());
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    std::fs::write(&path, config::template())
+        .with_context(|| format!("writing {}", path.display()))?;
+    restrict_permissions(&path)?;
+
+    eprintln!(
+        "Wrote {}.\n\nEvery line is commented out, so nothing changed yet. \
+         Uncomment GOOGLE_API_KEY\nand set it, then check with `lucida config`.",
+        path.display()
+    );
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// Creates the file readable only by its owner.
+///
+/// Done at creation rather than left to the umask, because the file is intended
+/// to hold an API key and the default umask on most systems leaves it readable
+/// by the whole group.
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn default_model(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Google => DEFAULT_MODEL,
+        Backend::ComfyUi => "klein",
+    }
+}
+
+fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
+    Ok(match backend {
+        Backend::Google => Box::new(genai::Client::from_env()?),
+        Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
+    })
+}
+
+fn list_models(backend: Backend) -> Result<()> {
+    let provider = open(backend)?;
+    let caps = provider.capabilities();
+    let models = provider.list_models()?;
+
+    if models.is_empty() {
+        println!("No image models visible to the {} provider.", caps.provider);
+    } else {
+        println!("Image models available to the {} provider:", caps.provider);
+        for model in &models {
+            let mut notes: Vec<&str> = Vec::new();
+            if backend == Backend::Google && model == DEFAULT_MODEL {
+                notes.push("default");
+            }
+            if model.starts_with("imagen") {
+                notes.push("Imagen family — different endpoint, retires 2026-08-17");
+            }
+            let suffix = if notes.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", notes.join("; "))
+            };
+            println!("  {model}{suffix}");
+        }
+    }
+
+    let aliases: &[(&str, &str)] = match backend {
+        Backend::Google => genai::MODEL_ALIASES,
+        Backend::ComfyUi => comfy::MODEL_ALIASES,
+    };
+    if !aliases.is_empty() {
+        println!("\nAliases:");
+        for (alias, target) in aliases {
+            println!("  {alias:<16} -> {target}");
+        }
+    }
+
+    // Printed because it is the question users otherwise answer by trial and
+    // error, one rejected flag at a time.
+    println!("\nThis provider supports:");
+    println!("  aspect ratio    {}", describe_aspect(caps.aspect));
+    println!("  seed            {}", yes_no(caps.seed));
+    println!("  negative prompt {}", yes_no(caps.negative_prompt));
+    println!("  reference image {}", yes_no(caps.references));
+    println!("  steps           {}", yes_no(caps.steps));
+    println!("  guidance        {}", yes_no(caps.guidance));
+    println!("  output carries  {}", caps.provenance.describe());
+
+    Ok(())
+}
+
+fn yes_no(supported: bool) -> &'static str {
+    if supported { "yes" } else { "no" }
+}
+
+fn describe_aspect(support: provider::AspectSupport) -> String {
+    match support {
+        provider::AspectSupport::Named(ratios) => ratios.join(", "),
+        provider::AspectSupport::Free { multiple_of } => {
+            format!("any, rounded to {multiple_of} pixels")
         }
     }
 }
 
-fn execute(request: ImageRequest, out: PathBuf) -> Result<()> {
+fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> {
+    // Before a client is even constructed: reject what this provider cannot
+    // express, rather than dropping it and returning an image that quietly
+    // ignored half the request. Checked first so that asking Google for a seed
+    // says so even with no API key set — the key was never the problem.
+    let caps = provider::capabilities_for(backend);
+    caps.check(&request)?;
+
+    let provider = open(backend)?;
+
     let verb = if request.references.is_empty() {
         "Generating"
     } else {
         "Editing"
     };
-    // Report the resolved id, not the alias, so it is obvious what actually ran.
-    let resolved = genai::resolve_model(&request.model);
-    if resolved == request.model {
-        eprintln!("{verb} with {resolved}…");
-    } else {
-        eprintln!("{verb} with {resolved} (via \"{}\")…", request.model);
-    }
+    eprintln!("{verb} via {}…", caps.provider);
 
-    let image = Client::from_env()?.generate(&request)?;
+    let image = provider.generate(&request)?;
 
     let destination = correct_extension(&out, &image.mime_type);
     if destination != out {
@@ -306,6 +520,9 @@ fn execute(request: ImageRequest, out: PathBuf) -> Result<()> {
             eprintln!("{commentary}");
         }
     }
+    if let Some(seed) = image.seed {
+        eprintln!("Seed {seed} — pass `--seed {seed}` to render this again.");
+    }
     eprintln!("Wrote {} ({} KB)", written.display(), image.bytes.len() / 1024);
 
     // The path alone on stdout, so this composes in a pipeline.
@@ -313,7 +530,8 @@ fn execute(request: ImageRequest, out: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Corrects a file extension that disagrees with what the API actually returned.
+/// Corrects a file extension that disagrees with what the provider actually
+/// returned.
 ///
 /// Gemini decides the output format itself — usually JPEG, whatever the request
 /// asked for — so `-o icon.png` would otherwise leave a file named `.png` holding

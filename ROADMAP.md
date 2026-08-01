@@ -1,63 +1,154 @@
 # Roadmap
 
-Lucida currently speaks to exactly one provider: Google, for images via Gemini
-and video via Veo. That was the right place to start and is the wrong place to
-stop. This records where it goes next and, more usefully, what has to be true
-first.
+Lucida speaks to two providers: Google, for images via Gemini and video via Veo,
+and a local ComfyUI for images. This records where it goes next and, more
+usefully, what has to be true first.
 
-Nothing here is committed work. Items are ordered by what unblocks what, not by
-enthusiasm.
+Nothing below the "Done" section is committed work. Items are ordered by what
+unblocks what, not by enthusiasm.
 
 ---
 
-## 1. The prerequisite: a provider abstraction
+## 0. Done
 
-Every provider item below is blocked on the same piece of work, so it comes
-first.
+### The provider abstraction
 
-Today `genai::Client` is Google's REST client, and `main.rs`, `mcp.rs` and
-`video.rs` call it directly. A second provider means introducing a trait —
-roughly `generate(&ImageRequest) -> GeneratedImage`, plus a `capabilities()`
-describing what the provider actually supports — and moving the Google
-implementation behind it.
+`ImageProvider` in `provider.rs` — `generate`, `capabilities`, `list_models` —
+with Google and ComfyUI behind it. Resolved as planned, by all three routes:
 
-The hard part is not the trait. It is that **providers disagree about what an
-image request even is**, and the current `ImageRequest` quietly encodes Google's
-answer:
+1. **Normalized what genuinely maps.** `Aspect` holds a `W:H` pair and `Size`
+   holds a long edge in pixels. `ImageRequest::pixels` resolves them onto a
+   provider's grid; Google translates back to its named ratios and tier names.
+   `--aspect 16:9 --size 1K` means the same thing on both and becomes `1024×576`
+   locally.
+2. **Declared capabilities and failed early.** `Capabilities::check` runs before
+   anything is spent, and every message names a provider that supports what was
+   asked for. This carried more weight than expected: it is what lets the local
+   lane add seed, negative prompt, steps and guidance without those parameters
+   silently evaporating when the request goes to Google.
+3. **No typed escape hatch was needed.** The union stayed small enough that a
+   flat `ImageRequest` with capability-guarded optional fields is honest. Revisit
+   if a provider arrives with a parameter that genuinely has no analogue —
+   OpenAI's mask is the likeliest candidate, and it is a shape problem rather
+   than a naming one.
 
-| | Google | Others |
-|---|---|---|
-| Aspect ratio | 10 named ratios | OpenAI takes explicit pixel sizes; ComfyUI takes width/height nodes |
-| Resolution | `1K`/`2K`/`4K` | Mostly pixel dimensions |
-| Editing | Reference images in the prompt | OpenAI uses an explicit mask; ComfyUI uses an inpainting graph |
-| Output format | The model decides (usually JPEG) | Often selectable |
-| Negative prompt | Video only, and not on every model | First-class on Flux and local models |
-| Seed / determinism | Not exposed | Central to Flux and local workflows |
+Provider selection is inferred from the model id, with `--provider` overriding
+and also supplying the model default.
 
-Three ways to resolve that, in rough order of preference:
+### The config file
 
-1. **Normalize what genuinely maps.** Aspect ratio and resolution can be
-   expressed as target dimensions and translated per provider. Most of the
-   surface fits here.
-2. **Declare capabilities and fail early.** `capabilities()` lets the CLI reject
-   `--seed` against a provider that has no such concept, with a message naming
-   one that does — the same shape as the existing `veo-lite` negative-prompt
-   guard, which is the pattern worth copying.
-3. **Allow a typed escape hatch** for genuinely provider-specific parameters,
-   rather than pretending a union type is a common interface.
+Anticipated here as "a config file for keys once there is more than one to
+hold". It arrived for a different and better reason, which is worth recording
+because the original framing would have deferred it indefinitely.
 
-**The MCP schema is the constraint that matters most.** `generate_image` today
-advertises Google's aspect-ratio enum and `1K`/`2K`/`4K` sizes. An agent reads
-that schema and believes it. Whatever the abstraction becomes, the tool
-description has to stay honest about what the *selected* provider can do, or the
-model will confidently pass parameters that get silently dropped. Options are a
-generic schema plus a capabilities probe, or regenerating the schema per
-configured provider. This needs deciding before the second provider lands, not
-after.
+**Reading credentials from the environment alone is correct for a CLI and
+quietly broken for an MCP server.** A GUI-launched application on macOS — from
+the Dock, Finder or Spotlight — inherits no login shell, so a key exported in
+`~/.zshenv` is invisible to it and to every server it spawns. The same binary
+works perfectly from a terminal, which makes the failure look like anything
+except what it is.
 
-Provider selection should probably be inferred from the model id where possible
-(the alias table already does this) with an explicit `--provider` override, and
-a config file for keys once there is more than one to hold.
+Neither obvious workaround is good. `launchctl setenv` exports the secret to
+every process in the login session and does not survive a reboot. Passing
+`--env GOOGLE_API_KEY='${GOOGLE_API_KEY}'` to `claude mcp add` does not work at
+all, because the reference is expanded from the client's own environment — the
+empty one. The README previously recommended that, and was wrong.
+
+So: an optional file of `KEY=value` lines at `~/.config/lucida/config.env`
+(with the native macOS location as a fallback, and `LUCIDA_CONFIG` overriding
+both), read only when a variable is unset. Deliberately not TOML — the keys
+*are* environment variable names, and any other format would invent a second
+vocabulary for the same settings plus a mapping to keep in sync. It also keeps
+the parser to a few lines and adds no dependency, the same reasoning that kept a
+JSON-RPC crate out of `mcp.rs`.
+
+`lucida config` reports what the *running process* can see and where each
+setting came from, never a value. That distinction is the whole diagnostic: the
+answer differs between a terminal and a GUI-launched server, and no other tool
+can tell you which one you are looking at.
+
+**The general lesson, which applies to every provider still to come:** a
+credential mechanism has to work in the environment the program actually runs
+in, and for an MCP server that is not a shell.
+
+**The MCP schema question was decided in favour of a generic schema plus a
+capabilities probe.** The deciding argument was not on the original list: a
+single MCP server serves *both* providers, chosen per call from the model id, so
+there is no one "configured provider" whose schema could be regenerated. The
+enums for `aspect_ratio` and `size` are gone — a test now fails if either comes
+back — parameter descriptions name which providers honour them, and a new
+`image_providers` tool reports live capabilities. Unsupported parameters return
+an error as tool content, so the model can read it and retry.
+
+### ComfyUI
+
+Text-to-image against Flux.2, verified end to end on a Radeon 8060S (gfx1151):
+1024×1024, 20 steps, ~270 seconds cold. Lucida builds the API-format graph
+itself, so nothing needs importing into the UI, and it asks `/object_info` which
+model files exist rather than hardcoding this machine's install.
+
+**Determinism is real, and was measured rather than assumed.** Two separate runs
+at seed 12345 produced byte-identical PNGs. Worth stating precisely, because
+"supports a seed" is a claim several hosted providers make while returning
+something merely similar — and because reproducibility is the single capability
+Google cannot offer at any price.
+
+Two choices worth recording:
+
+- **`CFGGuider` rather than the `BasicGuider` + `FluxGuidance` pair** the
+  text-to-image blueprint uses. `CFGGuider` takes both positive and negative
+  conditioning, which is what makes the negative prompt a real input here rather
+  than a parameter accepted and ignored.
+- **Results are fetched over `/view`, not read off disk.** A ComfyUI in a
+  container or on another host works with no shared mount. Worth noting the
+  hostname trap that prompted it: `comfyui.ai-lab-0` does not resolve on the
+  machine ComfyUI runs on, while `localhost:8188` answers — the short name has no
+  record at all, only the fully qualified one does.
+
+**Remote servers are supported**, added immediately after the first version
+because "does this work over https" turned out to have three separate answers.
+TLS worked already, since the URL is used verbatim; authentication did not exist
+at all; and a private CA was rejected. All three now handled —
+`LUCIDA_COMFYUI_AUTH` (Basic, Bearer or `user:pass`, applied to every request
+including the `/view` download) and `LUCIDA_COMFYUI_CA`. Verified against
+a live TLS endpoint with a real Let's Encrypt certificate, and against test
+servers for the 401, wrong-credentials, private-CA and self-signed cases.
+
+Two details worth keeping:
+
+- **Credentials are stripped out of the base URL at construction.** The base URL
+  is printed in error messages, and `https://user:pass@host` would otherwise put
+  a password into terminal scrollback and pasted bug reports.
+- **A 401 used to be reported as "ComfyUI has no `UNETLoader` node — this build
+  may be too old".** Every non-200 from `/object_info` was read as a missing
+  node. That is the exact inverse of the truth, and the kind of message that
+  sends someone to upgrade a server that was only ever refusing them. Refusals
+  are now diagnosed separately, and told apart by whether credentials were sent.
+- **No `--insecure` flag**, deliberately. `LUCIDA_COMFYUI_CA` covers the honest
+  case; disabling verification wholesale is a different and worse thing, and is
+  not offered.
+
+**Confirmed: local output carries no provenance marking.** No SynthID string, no
+C2PA manifest, checked the same way we checked Google's. The README's flat
+watermarking claim is now per-provider.
+
+**Still open on this lane**, in the order they matter:
+
+- **Editing.** `references` is declared `false` and rejected with an
+  explanation. It needs an uploaded image (`/upload/image`, multipart) and a
+  reference-conditioning graph — `VAEEncode` into `ReferenceLatent`, which the
+  Klein edit blueprint already shows. The nodes are all present on the server;
+  this is unfinished, not blocked.
+- **`--workflow` override.** Lucida ships one opinionated graph and no way to
+  supply your own. The compromise named below — maintained templates plus an
+  override — is still the right one; only the first half exists.
+- **Non-Flux model families.** The graph hardcodes Flux.2's node types
+  (`Flux2Scheduler`, `EmptyFlux2LatentImage`, `CLIPLoader type=flux2`). A
+  different family needs a different graph, which is the `--workflow` work again
+  from the other end.
+- **Inpainting.** Mask-based editing is reachable locally via the Flux.1 Fill
+  blueprint, and would strain `references: Vec<String>` in the same way OpenAI
+  would. Still the cheapest place to discover that gap.
 
 ---
 
@@ -65,76 +156,47 @@ a config file for keys once there is more than one to hold.
 
 | Provider | Appeal | Main obstacle |
 |---|---|---|
-| **Local (ComfyUI et al.)** | Already installed and working; free, unmarked, no credential | Graph-based, not prompt-based; a different interface shape |
+| ~~Local (ComfyUI)~~ | — | **Done; see §0** |
 | **Flux (Black Forest Labs)** | Nearest substitute on quality and cost; same models, hosted | Weight licensing differs sharply per model |
 | **OpenAI** | Documented REST API, mask-based editing | None significant, but a one-off — shares little with the others |
 | **Adobe Firefly** | Licensed training data and enterprise indemnification | Entitlements and credential complexity |
 | **Midjourney** | Distinctive aesthetic | No official general API; unofficial ones breach ToS |
 
-### Local — ComfyUI and friends
+### Local — ComfyUI (delivered; what the bet was worth)
 
-**Start here.** Not because it is the tidiest entry point — it is the least
-tidy — but because it is already on the machine, already working, and costs
-nothing to iterate against.
+Implemented — see §0 for what shipped and what is still open. Kept here because
+the argument for going second-to-ComfyUI was the load-bearing decision, and it is
+worth recording whether it held.
 
-`ai-lab-0` carries a complete **FLUX.2 Klein 9B** stack under
-`/data/services/comfyui/models`: the 17 GB diffusion model, its 16 GB Qwen3 text
-encoder, and the VAE. A 1024×1024 render succeeded on the gfx1151 on 2026-07-19.
-The riskiest unknown for this lane — whether Flux runs at all on this hardware,
-given the ROCm history — is therefore already answered. It does.
+**The bet.** ComfyUI is the least representative provider on this list — a
+workflow graph rather than a prompt call — so designing the trait against it
+first looked like a way to end up with a graph-shaped abstraction. The counter
+was that Google is *already implemented*, so Google plus ComfyUI means designing
+against the two most dissimilar providers available, which is the pair most likely
+to produce an abstraction that survives the rest. Google plus OpenAI would have
+been two variations on one shape, flattering a design that had not been tested.
 
-That removes every barrier that usually delays a second provider. No credential
-to obtain, no billing to enable, no per-image cost while the abstraction is being
-reshaped daily, and no rate limit to design around. The work can start tonight
-and be thrown away twice without anyone caring.
+**It held, and for a sharper reason than expected.** The dissimilarity did not
+land where predicted. The graph-versus-prompt gap turned out to be shallow —
+graph construction is confined to one private method and never reaches the trait,
+because the *call pattern* (submit, poll, download) was already familiar from
+Veo. What genuinely strained the design was the parameter mismatch: seed and
+negative prompt exist locally and simply do not exist on Google. That is what
+forced `capabilities()` to be real rather than decorative, and it is what would
+have been missed by a tidier second provider.
 
-**The apparent objection is actually the main argument.** ComfyUI is the least
-representative provider here — a workflow graph rather than a prompt call — so
-designing the trait against it first looks like a way to end up with a
-graph-shaped abstraction. But Google is *already implemented*. Building the trait
-against Google plus ComfyUI means designing against the two most dissimilar
-providers on the list, which is exactly the pair most likely to produce an
-abstraction that survives the rest. Google plus OpenAI would be two variations on
-one shape, and would flatter a design that had not been tested.
+The one prediction that was wrong in a useful direction: **the shipped blueprints
+were not the shortcut they looked like.** They are subgraph definitions in UI
+format, not the API format `/prompt` accepts, and the Flux.2 Klein blueprint
+targets the 4B while the installed model is the 9B. They were far more valuable
+as documentation of which node types and parameters Flux.2 wants than as graphs
+to adapt — reading them, then building the graph in Rust, was cheaper than
+converting them.
 
-**Confirmed: local output carries no provenance marking.** The existing Klein
-render contains no SynthID string and no C2PA manifest, checked the same way we
-checked Google's. This is the one lane producing genuinely unmarked images — a
-real difference rather than a claimed one, and the reason the README's current
-flat statement about watermarking will need qualifying.
-
-The obstacle is real: ComfyUI's API takes a **workflow graph**, not a prompt. A
-provider implementation would hold template workflows and substitute nodes —
-prompt text, dimensions, seed, checkpoint — then poll for completion. That is
-closer to the Veo start/poll pattern than to the image path, and the existing
-long-running-operation handling is a reasonable model for it.
-
-The template question is smaller than it looks, because **ComfyUI already ships
-them**. `ComfyUI/blueprints/` currently holds six Flux workflows:
-
-```
-Text to Image     (Flux.1 Dev / Flux.1 Krea Dev / Flux.2 Dev)
-Image Edit        (Flux.2 Dev / Flux.2 Klein 4B)
-Image Inpainting  (Flux.1 Fill Dev)
-```
-
-The graphs do not need authoring, only adapting — note the Klein blueprint
-targets the 4B while the installed model is the 9B, so node parameters need
-reconciling rather than copying. Still far less work than starting from a blank
-graph.
-
-Worth noticing what the inpainting blueprint implies: **mask-based editing is
-reachable through the local lane**, not only through OpenAI. The structural gap
-in `references: Vec<String>` — which cannot express "this region of this image" —
-can therefore be discovered without adding a provider purely to find it.
-
-Worth deciding early whether Lucida ships opinionated default workflows or
-requires the user to supply their own. Shipping defaults is friendlier and ages
-badly; requiring them is honest and unwelcoming. A small set of maintained
-templates plus a `--workflow` override is probably the compromise.
-
-Also note the ROCm caveats already documented for that machine — a local provider
-inherits its host's quirks, and "it hangs" will be the first bug report.
+Two facts confirmed rather than assumed: local output carries no SynthID and no
+C2PA manifest, and Flux really does run on the gfx1151. The ROCm caveats hold —
+`--disable-mmap` is mandatory, and "it hangs" is indeed the first thing anyone
+will report, which is why elapsed time is now printed every 30 seconds.
 
 ### Flux — Black Forest Labs (hosted)
 
@@ -149,19 +211,26 @@ Google on quality and cost, which is what makes it the real substitution
 candidate rather than merely another supported name — and an abstraction is only
 proven by a real substitution.
 
-Between them, local and hosted Flux force the capability question that Google
-alone never raises. Flux exposes parameters Google simply lacks, seeds above all:
-Google never surfaces one, so nothing in Lucida can currently express "give me
-that result again." Determinism is not a parameter that bolts on afterwards, and
-meeting it early is why this pair belongs ahead of tidier options.
+The capability question this pair was meant to force has already been answered by
+the local half: seed, negative prompt, steps and guidance all exist there and
+none exist on Google, so `Capabilities` is load-bearing and determinism did not
+have to bolt on afterwards. Hosted Flux therefore inherits a design that already
+expects it, and the useful thing it tests is different — whether a provider can
+be swapped for another *with the same parameters* and a different transport.
+That is the substitution the abstraction is actually for, and it remains
+unproven.
 
-**Licensing needs checking per model, not per vendor.** The FLUX family has
-shipped under materially different terms — some permissive, some
-non-commercial-only. That distinction is exactly the "low fence" question the
+**Licensing needs checking per model, not per vendor, and is still unresolved.**
+The FLUX family has shipped under materially different terms — some permissive,
+some non-commercial-only. That distinction is exactly the "low fence" question the
 studio already has a position on, and it applies to the *weights*, not the API.
 Running Klein locally is a licence question; calling the hosted API is a
-commercial-terms question. They can have different answers. Resolve both and
-record them here rather than in someone's memory.
+commercial-terms question. They can have different answers.
+
+**This now matters more than it did**, because the local lane shipped without
+resolving it. Nothing in Lucida depends on the answer — it holds no weights and
+bundles no model — but anything published from a Klein render does. Resolve both
+and record them here rather than in someone's memory.
 
 ### OpenAI
 
@@ -208,26 +277,37 @@ every few months.
 
 Adding providers changes more than the request path.
 
-**Provenance stops being uniform.** Every Google image carries SynthID and a C2PA
-manifest. Locally generated images carry nothing. Others differ. The README makes
-a flat claim today that would become false — it needs to become per-provider, and
-Lucida should probably be able to report what marking an output carries rather
-than leaving users to grep the bytes as we did.
+**Provenance stopped being uniform — handled.** `Provenance` is part of
+`Capabilities`, the README's flat claim is now a per-provider table, and Lucida
+reports the marking on every render rather than leaving users to grep the bytes
+as we did. Each new provider has to state its own, which is the point: the type
+makes omitting it impossible rather than merely impolite.
+
+**Speed stopped being uniform — partly handled.** This was not on the original
+list and should have been. Google answers in seconds; a cold local render took
+270. The gap is large enough to change how a caller behaves, so the MCP tool
+description says so and elapsed time is reported during a render. Still open: an
+agent has no way to ask "how long will this take" before committing, and the
+answer varies by two orders of magnitude.
 
 **Cost stops being uniform.** Per-image pricing varies by an order of magnitude
 and local generation is free at the margin. Anything that estimates or warns
-about spend has to be provider-aware.
+about spend has to be provider-aware. Nothing estimates spend yet, so this is
+still ahead.
 
-**Failure modes multiply.** The troubleshooting section is currently a catalogue
-of Google's specific behaviours — free-tier quota reading as throttling,
-`IMAGE_RECITATION` punishing simple prompts. Each provider brings its own, and
-each is discovered the same way: by hitting it. Expect the section to grow faster
-than the feature list.
+**Failure modes multiply — confirmed, on schedule.** ComfyUI brought its own
+catalogue immediately: a server that is not running, a model file that is not
+installed, a graph rejected in validation with the useful sentence four levels
+down in the JSON. Each got a dedicated message, and the troubleshooting section
+grew as predicted. Expect this to continue faster than the feature list.
 
-**Testing gets harder.** Everything shipped so far was verified against the live
-API, which costs money and requires credentials. A provider matrix multiplies
-that. Some form of recorded-response testing is probably needed before the third
-provider, or coverage will quietly become aspirational.
+**Testing gets harder — now the sharpest open problem.** The unit tests cover
+what can be checked without a network: request normalization, capability
+rejection, schema honesty, error formatting. Everything else was verified by
+hand against a live server, and a single verification cycle on the local lane
+costs 2–5 minutes of wall clock. That is affordable for one provider and will not
+be for three. Recorded-response testing is needed before the next one, or
+coverage will quietly become aspirational.
 
 ---
 

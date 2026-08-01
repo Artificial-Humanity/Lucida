@@ -32,11 +32,84 @@ esac
 # --- missing credentials fail cleanly, rather than panicking ---------------
 # `|| true` because a non-zero exit is the correct behaviour here; the exit code
 # is not what is under test, the message is.
-out=$(env -u GOOGLE_API_KEY -u GEMINI_API_KEY "$BIN" models 2>&1 || true)
+# An isolated HOME, so a config file on the machine running these checks cannot
+# supply the key and turn the assertion into a no-op. Shared with the config
+# checks below.
+sandbox=$(mktemp -d)
+trap 'rm -rf "$sandbox"' EXIT
+
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" models 2>&1 || true)
 case "$out" in
   *"no API key found"*) pass "missing key reports cleanly" ;;
   *panicked*)           fail "panicked without a key: $out" ;;
   *)                    fail "unexpected no-key output: $out" ;;
+esac
+
+# The message must point at the fix for the case that actually bites: a process
+# with no shell environment.
+case "$out" in
+  *"lucida config"*) pass "no-key message names the config file" ;;
+  *)                 fail "no-key message gives no way forward: $out" ;;
+esac
+
+# --- config file resolution -----------------------------------------------
+# The regression that matters here is subtle: an MCP server launched by a GUI
+# application has no shell environment, and until 0.3.0 that made an exported key
+# invisible with no way to recover. `env -i` reproduces exactly that.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config --init 2>&1)
+case "$out" in
+  *"$sandbox"*config.env*) pass "config --init writes into a bare HOME" ;;
+  *)                       fail "config --init: $out" ;;
+esac
+
+printf 'GOOGLE_API_KEY=smoke-test-value\n' >> "$sandbox/.config/lucida/config.env"
+
+# The key must be visible with NO environment whatsoever.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config 2>&1)
+case "$out" in
+  *"GOOGLE_API_KEY"*"set (config file)"*) pass "config file is read with no environment" ;;
+  *) fail "config file was not picked up: $out" ;;
+esac
+
+# …and the environment must still take precedence over it.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GOOGLE_API_KEY=x "$BIN" config 2>&1)
+case "$out" in
+  *"GOOGLE_API_KEY"*"set (environment)"*) pass "environment beats the config file" ;;
+  *) fail "config file overrode the environment: $out" ;;
+esac
+
+# Values must never be printed — this output gets pasted into bug reports.
+case "$out" in
+  *smoke-test-value*) fail "config printed a secret value" ;;
+  *)                  pass "config never prints values" ;;
+esac
+
+# --- capability guards ----------------------------------------------------
+# Runnable with no credentials and no server, which is the point: whether Google
+# has a seed is not a fact about your API key. If this ever starts reporting a
+# missing key instead, the check has been moved back behind client construction
+# and the message has become useless.
+out=$(env -u GOOGLE_API_KEY -u GEMINI_API_KEY "$BIN" generate "x" --seed 1 2>&1 || true)
+case "$out" in
+  *"no concept of a seed"*comfyui*) pass "unsupported seed names a provider that has one" ;;
+  *"no API key found"*)             fail "capability check ran after credentials: $out" ;;
+  *)                                fail "unexpected --seed output: $out" ;;
+esac
+
+out=$(env -u GOOGLE_API_KEY -u GEMINI_API_KEY "$BIN" generate "x" --aspect 7:3 2>&1 || true)
+case "$out" in
+  *"supports only these aspect ratios"*) pass "unsupported aspect ratio is rejected" ;;
+  *)                                     fail "unexpected --aspect output: $out" ;;
+esac
+
+# --- a provider that is not there -----------------------------------------
+# The likeliest failure for the local lane by a wide margin, and it must name the
+# server and the variable rather than surfacing a raw connection error.
+out=$(LUCIDA_COMFYUI_URL="http://127.0.0.1:1" "$BIN" models --provider comfyui 2>&1 || true)
+case "$out" in
+  *"could not reach ComfyUI"*LUCIDA_COMFYUI_URL*) pass "unreachable ComfyUI explains itself" ;;
+  *panicked*)                                     fail "panicked on unreachable server: $out" ;;
+  *)                                              fail "unexpected unreachable output: $out" ;;
 esac
 
 # --- the MCP stdio transport ----------------------------------------------
@@ -46,8 +119,23 @@ handshake='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
 reply=$(printf '%s\n' "$handshake" | "$BIN" mcp 2>/dev/null)
 case "$reply" in
-  *generate_image*start_video*check_video*) pass "MCP tools/list (LF input)" ;;
-  *) fail "MCP tools/list did not list all three tools: $reply" ;;
+  *generate_image*image_providers*start_video*check_video*)
+    pass "MCP tools/list (LF input)" ;;
+  *) fail "MCP tools/list did not list all four tools: $reply" ;;
+esac
+
+# Parameters only one provider honours must say so in the schema itself, since
+# that is all an agent reads before calling.
+#
+# Note this deliberately does *not* try to assert "aspect_ratio has no enum":
+# `start_video` has a legitimate one — Veo really does accept only 16:9 and 9:16
+# — and shell globbing cannot scope a match to a single tool, so the check would
+# match the wrong object. The unit test
+# `mcp::tests::provider_specific_parameters_are_not_advertised_as_enums` makes
+# that assertion properly, against the parsed schema.
+case "$reply" in
+  *"comfyui only"*) pass "schema names which provider honours each parameter" ;;
+  *) fail "schema lost its per-provider parameter annotations: $reply" ;;
 esac
 
 # A client on Windows may terminate requests with CRLF.

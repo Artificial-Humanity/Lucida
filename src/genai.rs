@@ -5,6 +5,9 @@
 //! to REST directly also sidesteps the churn in the Python SDK, which has a
 //! breaking 3.0 on the way.
 
+use crate::provider::{
+    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, Provenance,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -17,10 +20,12 @@ const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta";
 /// it is deliberately not the default here.
 pub const DEFAULT_MODEL: &str = "gemini-3.1-flash-image";
 
+/// The only ratios Google accepts. Published as capabilities so a request for
+/// anything else fails before it is sent, naming a provider that takes free
+/// dimensions.
 pub const ASPECT_RATIOS: &[&str] = &[
     "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
 ];
-pub const IMAGE_SIZES: &[&str] = &["1K", "2K", "4K"];
 
 /// Friendly aliases for the Gemini image models.
 ///
@@ -55,37 +60,13 @@ pub struct Client {
     http: reqwest::blocking::Client,
 }
 
-#[derive(Debug, Clone)]
-pub struct ImageRequest {
-    pub prompt: String,
-    pub model: String,
-    pub aspect_ratio: Option<String>,
-    pub image_size: Option<String>,
-    /// Existing images to condition on. Supplying any turns this into an edit.
-    pub references: Vec<String>,
-}
-
-#[derive(Debug)]
-pub struct GeneratedImage {
-    pub bytes: Vec<u8>,
-    pub mime_type: String,
-    /// Models often narrate what they drew; worth surfacing, never required.
-    pub commentary: Option<String>,
-}
-
 impl Client {
     /// GOOGLE_API_KEY is checked first, then GEMINI_API_KEY, which is what the
-    /// Google SDKs themselves look for.
+    /// Google SDKs themselves look for. Both fall back to the config file.
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("GOOGLE_API_KEY")
-            .or_else(|_| std::env::var("GEMINI_API_KEY"))
-            .map_err(|_| {
-                anyhow!(
-                    "no API key found: set GOOGLE_API_KEY (or GEMINI_API_KEY).\n\
-                     If it was just added to ~/.zshenv, this process needs a fresh \
-                     shell to inherit it."
-                )
-            })?;
+        let api_key = crate::config::var("GOOGLE_API_KEY")
+            .or_else(|| crate::config::var("GEMINI_API_KEY"))
+            .ok_or_else(no_key)?;
 
         if api_key.trim().is_empty() {
             bail!("GOOGLE_API_KEY is set but empty");
@@ -109,7 +90,66 @@ impl Client {
         &self.api_key
     }
 
-    pub fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
+    /// Image-capable models this key can actually see. Free, and the quickest way
+    /// to confirm a key works without spending anything.
+    fn image_models(&self) -> Result<Vec<String>> {
+        let response = self
+            .http
+            .get(format!("{API_ROOT}/models?pageSize=200"))
+            .header("x-goog-api-key", &self.api_key)
+            .send()
+            .context("listing models")?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().unwrap_or_default();
+            bail!("{}", explain_error(status, &text));
+        }
+
+        let payload: Value = response.json().context("parsing model list")?;
+        let mut names: Vec<String> = payload["models"]
+            .as_array()
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|m| m["name"].as_str())
+                    .filter_map(|n| n.strip_prefix("models/"))
+                    .filter(|n| n.contains("image") || n.contains("imagen"))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+}
+
+pub const CAPABILITIES: Capabilities = Capabilities {
+    provider: "google",
+    // Ten named ratios and nothing between them.
+    aspect: AspectSupport::Named(ASPECT_RATIOS),
+    // Google exposes no seed on any image model, so nothing here can express
+    // "give me that result again".
+    seed: false,
+    // Veo takes one; the image models do not.
+    negative_prompt: false,
+    references: true,
+    steps: false,
+    guidance: false,
+    provenance: Provenance::SynthIdAndC2pa,
+};
+
+impl ImageProvider for Client {
+    fn capabilities(&self) -> Capabilities {
+        CAPABILITIES
+    }
+
+    fn list_models(&self) -> Result<Vec<String>> {
+        self.image_models()
+    }
+
+    fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
         let model = resolve_model(&req.model);
 
         // Imagen speaks a different endpoint entirely (`:predict`, with an
@@ -132,12 +172,14 @@ impl Client {
             parts.push(json!({ "inlineData": { "mimeType": mime, "data": data } }));
         }
 
+        // The normalized request carries a ratio and a pixel count; Google speaks
+        // named ratios and three tier names, so translate rather than pass through.
         let mut image_config = serde_json::Map::new();
-        if let Some(ratio) = &req.aspect_ratio {
-            image_config.insert("aspectRatio".into(), json!(ratio));
+        if let Some(aspect) = req.aspect {
+            image_config.insert("aspectRatio".into(), json!(aspect.to_string()));
         }
-        if let Some(size) = &req.image_size {
-            image_config.insert("imageSize".into(), json!(size));
+        if let Some(size) = req.size {
+            image_config.insert("imageSize".into(), json!(size.tier_name()));
         }
 
         let mut generation_config = serde_json::Map::new();
@@ -172,40 +214,40 @@ impl Client {
 
         extract_image(&payload)
     }
+}
 
-    /// Image-capable models this key can actually see. Free, and the quickest way
-    /// to confirm a key works without spending anything.
-    pub fn list_image_models(&self) -> Result<Vec<String>> {
-        let response = self
-            .http
-            .get(format!("{API_ROOT}/models?pageSize=200"))
-            .header("x-goog-api-key", &self.api_key)
-            .send()
-            .context("listing models")?;
+/// The missing-key message.
+///
+/// Worth writing carefully, because the most common way to hit it is also the
+/// most confusing: an MCP server launched by a GUI application inherits no login
+/// shell, so a key exported in a shell profile is genuinely absent even though
+/// the same binary works from a terminal. Telling that user to open a fresh
+/// shell — which the previous version did — sends them somewhere with no answer.
+fn no_key() -> anyhow::Error {
+    let config_hint = match crate::config::source() {
+        Some(path) => format!(
+            "A config file was read from {}, but it sets neither key.",
+            path.display()
+        ),
+        None => match crate::config::preferred_path() {
+            Some(path) => format!(
+                "No config file was found. Create one with `lucida config --init`, \
+                 which writes {}.",
+                path.display()
+            ),
+            None => "No config file was found.".to_string(),
+        },
+    };
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let text = response.text().unwrap_or_default();
-            bail!("{}", explain_error(status, &text));
-        }
-
-        let payload: Value = response.json().context("parsing model list")?;
-        let mut names: Vec<String> = payload["models"]
-            .as_array()
-            .map(|models| {
-                models
-                    .iter()
-                    .filter_map(|m| m["name"].as_str())
-                    .filter_map(|n| n.strip_prefix("models/"))
-                    .filter(|n| n.contains("image") || n.contains("imagen"))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names.dedup();
-        Ok(names)
-    }
+    anyhow!(
+        "no API key found: set GOOGLE_API_KEY (or GEMINI_API_KEY).\n\n\
+         {config_hint}\n\n\
+         If the key IS exported in your shell profile and this still fails, the \
+         process was almost certainly not started from a shell — a GUI-launched \
+         app, and any MCP server it spawns, inherits no login environment. The \
+         config file exists for exactly that case. Run `lucida config` to see \
+         what this process can actually see."
+    )
 }
 
 fn read_image_as_inline(path: &str) -> Result<(String, String)> {
@@ -266,6 +308,9 @@ fn extract_image(payload: &Value) -> Result<GeneratedImage> {
                 bytes,
                 mime_type,
                 commentary,
+                // Google never surfaces one, so there is nothing to report and no
+                // way to reproduce this result.
+                seed: None,
             });
         }
     }
