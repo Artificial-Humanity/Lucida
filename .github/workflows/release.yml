@@ -103,3 +103,52 @@ jobs:
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+
+  windows:
+    runs-on: windows-latest
+    # bash throughout, so the smoke tests read the same as the other two jobs.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Smoke test
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          BIN=target/x86_64-pc-windows-msvc/release/lucida.exe
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+
+          "$BIN" models 2>&1 | grep -q "no API key found" \
+            && echo "missing-key path OK"
+
+          # The stdio transport is the real risk on Windows: CRLF in the request
+          # stream, or CRLF written back, would break framing in a way --version
+          # can never surface.
+          printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\r\n' \
+            | "$BIN" mcp 2>/dev/null | grep -q generate_image \
+            && echo "MCP tools/list OK over CRLF input"
+
+          printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' \
+            | "$BIN" mcp 2>/dev/null | od -c | grep -q '\\r' \
+            && echo "FAIL: server emitted CR" && exit 1 || echo "output is LF-only OK"
+
+          NAME="lucida-${TAG#v}-x86_64-windows.exe"
+          cp "$BIN" "$NAME"
+          echo "ASSET=$NAME" >> "$GITHUB_ENV"
+
+      - run: sha256sum "$ASSET" > "$ASSET.sha256"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256

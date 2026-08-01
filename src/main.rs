@@ -360,5 +360,19 @@ pub fn write_image(path: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
 
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
 
-    Ok(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    Ok(std::fs::canonicalize(path)
+        .map(strip_unc_prefix)
+        .unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Removes the `\\?\` verbatim prefix that Windows `canonicalize` returns.
+///
+/// The prefix is legal and the path works, but it leaks into printed output and
+/// some tools reject it. Written without `cfg(windows)` because the prefix
+/// cannot occur on other platforms, so the check is simply inert there.
+fn strip_unc_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path,
+    }
 }
