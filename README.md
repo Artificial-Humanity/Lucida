@@ -183,6 +183,36 @@ JPEG is written as `icon.jpg`, with a note on stderr. A file named `.png` holdin
 JPEG bytes passes unnoticed until something downstream rejects it. Since the real
 path is what goes to stdout, `$(lucida generate …)` stays correct either way.
 
+## Troubleshooting
+
+**`IMAGE_RECITATION` — the model returns no image.** This filter fires when the
+output would too closely reproduce training data, and it catches *simple* prompts
+more readily than elaborate ones, which is the opposite of what most people
+expect. "A small blue circle centered on white" was refused; "a weathered brass
+compass on a folded nautical chart, warm window light, shallow depth of field"
+went straight through.
+
+The reason is that a terse prompt has one obvious rendering while a described
+scene has many. Requests like "a simple flat icon" are the most likely to hit it.
+Add material, lighting, composition, or style detail rather than reaching for
+another model.
+
+**`HTTP 429 … limit: 0`.** Not throttling — no image quota exists on the project.
+See [Setup](#setup); waiting will not help.
+
+**`negativePrompt isn't supported by this model`.** `veo-lite` rejects negative
+prompts outright. Use `veo` or `veo-standard`, or drop the flag.
+
+**The MCP tools do not appear.** Claude Code reads its server list at startup, so
+a newly added server is invisible to the session that added it — restart, then
+check `claude mcp list` reports `✔ Connected`. Note that "connected" only proves
+the binary launched and answered a handshake; it says nothing about the API key,
+because listing tools never calls the API. The first real generation is what
+proves credentials.
+
+**The written file has a different extension than requested.** Intended — see
+[Options](#options).
+
 ## Watermarking
 
 Everything generated here — images and video alike — is marked as AI-generated.

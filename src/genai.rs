@@ -234,6 +234,18 @@ fn extract_image(payload: &Value) -> Result<GeneratedImage> {
                 .as_str()
                 .or_else(|| payload["promptFeedback"]["blockReason"].as_str());
             match reason {
+                // Counterintuitive enough to be worth spelling out: recitation
+                // fires when the output would too closely reproduce training
+                // data, which *generic* prompts trigger more readily than
+                // elaborate ones. "a red circle on white" has one obvious
+                // rendering; a described scene has many.
+                Some("IMAGE_RECITATION") => anyhow!(
+                    "the model declined to return an image (IMAGE_RECITATION).\n\n\
+                     This filter fires when the result would too closely reproduce \
+                     training data, and simple, iconic prompts trip it most often — \
+                     adding detail usually clears it. Describe materials, lighting, \
+                     composition or style rather than naming the object alone."
+                ),
                 Some(r) => anyhow!("the model returned no image (finish reason: {r})"),
                 None => anyhow!("unexpected API response shape: {payload}"),
             }
