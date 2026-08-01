@@ -64,6 +64,17 @@ impl Client {
     /// Kicks off a render and returns the operation name to poll.
     pub fn start_video(&self, req: &VideoRequest) -> Result<String> {
         let model = resolve_video_model(&req.model);
+
+        // The lite model rejects negativePrompt outright. Catching it here saves
+        // a round trip and names the fix, which the API's own message does not.
+        if req.negative_prompt.is_some() && model.contains("lite") {
+            bail!(
+                "`{model}` does not support a negative prompt.\n\n\
+                 Use `veo` (fast) or `veo-standard` instead, or drop the negative \
+                 prompt to stay on lite."
+            );
+        }
+
         let body = self.build_video_body(req)?;
         self.start_operation(&model, &body)
     }
