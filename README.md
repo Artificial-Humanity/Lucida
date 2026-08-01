@@ -1,8 +1,8 @@
 # Lucida
 
 Generate and edit images and video — as a CLI, or as an MCP server so coding
-agents can make their own assets. Images come from Google's Gemini models or
-from a local ComfyUI; video comes from Veo.
+agents can make their own assets. Images come from Google's Gemini models, a
+local ComfyUI, or hosted FLUX from Black Forest Labs; video comes from Veo.
 
 Named for the [camera lucida](https://en.wikipedia.org/wiki/Camera_lucida), the
 optical device that let artists trace what they saw onto paper.
@@ -18,7 +18,9 @@ $ lucida generate "a brass astrolabe on dark slate" \
 
 $ lucida video "a red maple leaf drifting down against white" --out clip.mp4
 
-$ lucida models --provider comfyui
+$ lucida generate "a brass astrolabe on dark slate" --provider bfl --seed 7
+
+$ lucida models --provider bfl
 ```
 
 One static binary. No Python, no virtualenv, no dependency resolution at startup
@@ -86,19 +88,28 @@ from — never a value — so its output is safe to paste into a bug report.
 
 ## Providers
 
-Two, and the difference is not only quality:
+Three, and the differences are not only quality:
 
-| | `google` | `comfyui` |
-|---|---|---|
-| Models | Gemini image models | Whatever is installed locally (Flux.2 tested) |
-| Credential | API key, billing required | None |
-| Cost | Per image | Free |
-| Speed | Seconds | Minutes |
-| Aspect ratio | 10 named ratios | Any, rounded to 16px |
-| Seed | **No** — results are not reproducible | Yes |
-| Negative prompt | No | Yes |
-| Reference images / editing | Yes | Yes |
-| Output carries | SynthID + C2PA, no opt-out | **Nothing** |
+| | `google` | `comfyui` | `bfl` |
+|---|---|---|---|
+| Models | Gemini image models | Whatever is installed locally (Flux.2 tested) | Hosted FLUX |
+| Credential | API key, billing required | None | API key, paid |
+| Cost | Per image | Free | ~3 credits / image |
+| Speed | Seconds | **Minutes** | Seconds |
+| Aspect ratio | 10 named ratios | Any, /16px | Any, /32px |
+| Seed | **No** | Yes | Yes |
+| Negative prompt | No | **Yes** | No |
+| Reference images / editing | Yes | Yes | Yes (FLUX.2 + Kontext) |
+| Steps / guidance | No | Yes | Only `flux-2-flex`, `flux-dev` |
+| Output carries | SynthID + C2PA | **Nothing** | C2PA only |
+
+**Capabilities vary per *model* on `bfl`**, which no other provider does — `steps`
+and `guidance` exist on `flux-2-flex` and `flux-dev` and nowhere else in the
+family. `lucida models --provider bfl` marks which is which.
+
+Note the pattern that is easy to get backwards: the **local** lane is the one
+with a negative prompt, because ComfyUI builds the graph and can wire negative
+conditioning itself. No hosted FLUX endpoint exposes one.
 
 The provider is inferred from the model id, so `--model klein` reaches ComfyUI
 and `--model banana` reaches Google. `--provider` overrides it, and also picks
@@ -229,6 +240,29 @@ rather than a validation dump.
 > and if ComfyUI runs with `--cache-none` every render pays it rather than just
 > the first. Editing costs more on top because the encoded source adds tokens for
 > the model to attend over.
+
+### Black Forest Labs
+
+A key from [dashboard.bfl.ai](https://dashboard.bfl.ai). This is a paid API and
+every render costs credits, so `lucida models --provider bfl` checks the key
+against the free `/v1/credits` endpoint and reports the balance before you spend
+anything.
+
+```console
+$ lucida config --set BFL_API_KEY     # reads stdin; stays out of shell history
+$ lucida models --provider bfl
+Key is valid. Remaining credits: 1000
+```
+
+Measured: a 1024×576 `flux-2-pro` render took **6 seconds and 3 credits**; the
+same picture edited cost 4.5. Compare ~270 seconds for the local lane, free.
+
+Lucida prints the cost of each job before waiting for it, because this is the one
+provider where a typo in a loop spends real money.
+
+> **A malformed key comes back as HTTP 422, not 401.** Lucida recognises it
+> anyway — read by status code alone it looks like a rejected parameter, which
+> sends you to inspect your prompt.
 
 ## Use as an MCP server
 
@@ -460,10 +494,18 @@ proves credentials.
 **Provenance is per-provider, and the difference is real rather than claimed —
 both halves were verified in the raw bytes.**
 
-| Provider | Output carries |
-|---|---|
-| `google` (images and video) | SynthID watermark + C2PA manifest. No opt-out, any tier |
-| `comfyui` | Nothing |
+| Provider | Output carries | Survives a re-encode? |
+|---|---|---|
+| `google` (images and video) | SynthID watermark + C2PA manifest | **Yes** — SynthID is in the pixels |
+| `bfl` | C2PA manifest only, no pixel watermark | No — metadata only |
+| `comfyui` | Nothing | — |
+
+That middle row is the one worth reading twice. Hosted FLUX **is** marked: a
+signed C2PA manifest naming `Black Forest Labs API` as claim generator, `FLUX.2`
+as software agent, and asserting `digitalSourceType: trainedAlgorithmicMedia`.
+But it carries no pixel watermark, so re-encoding the file removes the disclosure
+entirely — which is precisely what SynthID is designed to prevent. Marked and
+*removably* marked are different claims, and both differ from unmarked.
 
 Lucida reports which you got: `lucida models --provider <name>` lists it, the MCP
 `generate_image` result states it per render, and `image_providers` reports it

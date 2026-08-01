@@ -35,10 +35,22 @@ use std::sync::OnceLock;
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("GOOGLE_API_KEY", "Google API key (GEMINI_API_KEY also accepted)"),
     ("GEMINI_API_KEY", "Alternative spelling of the above"),
+    ("BFL_API_KEY", "Black Forest Labs API key (hosted FLUX)"),
     ("LUCIDA_COMFYUI_URL", "Where ComfyUI is listening"),
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),
     ("LUCIDA_COMFYUI_CA", "PEM certificate for a private CA"),
 ];
+
+/// Setting names present in the config file, whether or not Lucida knows them.
+///
+/// Exists so `lucida config` can surface a key it does *not* recognise. A
+/// mistyped name is otherwise perfectly silent: the file looks right, the value
+/// is there, and the tool simply never reads it.
+pub fn keys_in_file() -> Vec<String> {
+    let mut names: Vec<String> = loaded().values.keys().cloned().collect();
+    names.sort();
+    names
+}
 
 struct Loaded {
     path: Option<PathBuf>,

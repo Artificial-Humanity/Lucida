@@ -6,10 +6,11 @@
 //! One binary, two front ends: a plain CLI for shell and script use, and an MCP
 //! server (`lucida mcp`) so agents can call it as a first-class tool.
 //!
-//! Images come from one of two providers — Google's Gemini models, or a local
-//! ComfyUI — chosen from the model id unless `--provider` says otherwise. Video
-//! is Google-only for now.
+//! Images come from one of three providers — Google's Gemini models, a local
+//! ComfyUI, or hosted FLUX from Black Forest Labs — chosen from the model id
+//! unless `--provider` says otherwise. Video is Google-only for now.
 
+mod bfl;
 mod comfy;
 mod config;
 mod genai;
@@ -28,14 +29,18 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 #[command(
     name = "lucida",
     version,
-    about = "Generate and edit images with Google Gemini or a local ComfyUI",
-    long_about = "Generate and edit images with Google Gemini or a local ComfyUI.\n\n\
+    about = "Generate and edit images with Google Gemini, a local ComfyUI, or hosted FLUX",
+    long_about = "Generate and edit images with Google Gemini, a local ComfyUI, or \
+                  hosted FLUX from Black Forest Labs.\n\n\
                   Google reads GOOGLE_API_KEY (or GEMINI_API_KEY) from the \
                   environment, and image generation requires billing to be enabled \
                   on the project behind the key; free-tier keys report a quota of \
                   zero.\n\n\
                   ComfyUI needs no credential. It is found at \
-                  http://127.0.0.1:8188 unless LUCIDA_COMFYUI_URL says otherwise."
+                  http://127.0.0.1:8188 unless LUCIDA_COMFYUI_URL says otherwise.\n\n\
+                  Black Forest Labs reads BFL_API_KEY and bills per image. Its \
+                  capabilities differ per model — run `lucida models --provider bfl`.\n\n\
+                  Any of these can live in a config file; see `lucida config`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -60,23 +65,23 @@ struct ImageOptions {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Which provider to use: google or comfyui. Inferred from the model when omitted.
+    /// Which provider to use: google, comfyui or bfl. Inferred from the model when omitted.
     #[arg(short, long)]
     provider: Option<String>,
 
-    /// What to keep out of the picture (comfyui only)
+    /// What to keep out of the picture (comfyui only — no FLUX or Gemini model takes one)
     #[arg(short, long)]
     negative: Option<String>,
 
-    /// Seed, for a reproducible render (comfyui only)
+    /// Seed, for a reproducible render (comfyui and bfl; google has none)
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Sampling steps (comfyui only)
+    /// Sampling steps (comfyui, and bfl on flux-2-flex / flux-dev only)
     #[arg(long)]
     steps: Option<u32>,
 
-    /// Guidance scale (comfyui only)
+    /// Guidance scale (comfyui, and bfl on flux-2-flex / flux-dev only)
     #[arg(short, long)]
     guidance: Option<f32>,
 }
@@ -163,7 +168,7 @@ enum Command {
 
     /// List the image models a provider can reach, and what it can be asked for
     Models {
-        /// Which provider to interrogate: google or comfyui
+        /// Which provider to interrogate: google, comfyui or bfl
         #[arg(short, long, default_value = "google")]
         provider: String,
     },
@@ -173,6 +178,11 @@ enum Command {
         /// Write a starter config file and print its path
         #[arg(long)]
         init: bool,
+
+        /// Set one setting, reading its value from stdin. Keeps the secret out
+        /// of your shell history: `pbpaste | lucida config --set BFL_API_KEY`
+        #[arg(long, value_name = "NAME")]
+        set: Option<String>,
     },
 
     /// Run as an MCP server over stdio
@@ -192,14 +202,14 @@ fn run() -> Result<()> {
 
         Command::Models { provider } => list_models(Backend::parse(&provider)?),
 
-        Command::Config { init } => {
-            if init {
-                init_config()
-            } else {
+        Command::Config { init, set } => match set {
+            Some(name) => set_config(&name),
+            None if init => init_config(),
+            None => {
                 show_config();
                 Ok(())
             }
-        }
+        },
 
         Command::Generate {
             prompt,
@@ -353,12 +363,95 @@ fn show_config() {
         println!("  {key:<22} {source:<20} {purpose}");
     }
 
+    // A name Lucida does not know is the silent failure worth surfacing: the
+    // file looks right, the value is there, and nothing ever reads it.
+    let unrecognised: Vec<String> = config::keys_in_file()
+        .into_iter()
+        .filter(|name| !config::KNOWN_KEYS.iter().any(|(known, _)| known == name))
+        .collect();
+    if !unrecognised.is_empty() {
+        println!("\nIn the config file but not recognised by Lucida:");
+        for name in &unrecognised {
+            println!("  {name}  (ignored — check the spelling)");
+        }
+    }
+
     if config::source().is_none() {
         println!(
             "\nNo config file yet. `lucida config --init` writes one — useful when \
              a GUI-launched\napp cannot see your shell's environment."
         );
     }
+}
+
+/// Writes one setting, taking its value from stdin.
+///
+/// From stdin rather than an argument, deliberately. A key passed as
+/// `--set KEY=value` lands in shell history, in the process table where any
+/// other user can read it with `ps`, and in any transcript of the session. A
+/// pipe avoids all three:
+///
+/// ```text
+/// pbpaste | lucida config --set BFL_API_KEY
+/// ```
+///
+/// Rewrites the named line in place if present, appends it otherwise, and never
+/// disturbs anything else in the file — including comments.
+fn set_config(name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!(
+            "`{name}` is not a valid setting name — expected something like GOOGLE_API_KEY"
+        );
+    }
+
+    let mut value = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut value)
+        .context("reading the value from stdin")?;
+    let value = value.trim();
+
+    if value.is_empty() {
+        anyhow::bail!(
+            "nothing arrived on stdin, so there is no value to set.\n\n\
+             Pipe it in, e.g. `pbpaste | lucida config --set {name}` or \
+             `printf %s \"$KEY\" | lucida config --set {name}`."
+        );
+    }
+
+    let path = config::preferred_path()
+        .context("could not determine a config location: neither HOME nor XDG_CONFIG_HOME is set")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let assignment = format!("{name}={value}");
+
+    let target = lines.iter().position(|line| {
+        let bare = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+        bare.split_once('=').is_some_and(|(key, _)| key.trim() == name)
+    });
+
+    let replaced = target.is_some();
+    match target {
+        Some(at) => lines[at] = assignment,
+        None => lines.push(assignment),
+    }
+
+    let mut body = lines.join("\n");
+    body.push('\n');
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    restrict_permissions(&path)?;
+
+    // The value is never echoed — the whole point of taking it on stdin.
+    eprintln!(
+        "{} {name} in {}.",
+        if replaced { "Updated" } else { "Added" },
+        path.display()
+    );
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn init_config() -> Result<()> {
@@ -411,6 +504,7 @@ fn default_model(backend: Backend) -> &'static str {
     match backend {
         Backend::Google => DEFAULT_MODEL,
         Backend::ComfyUi => "klein",
+        Backend::Bfl => bfl::DEFAULT_MODEL,
     }
 }
 
@@ -418,6 +512,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
     Ok(match backend {
         Backend::Google => Box::new(genai::Client::from_env()?),
         Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
+        Backend::Bfl => Box::new(bfl::Client::from_env()?),
     })
 }
 
@@ -431,12 +526,29 @@ fn list_models(backend: Backend) -> Result<()> {
     } else {
         println!("Image models available to the {} provider:", caps.provider);
         for model in &models {
-            let mut notes: Vec<&str> = Vec::new();
+            let mut notes: Vec<String> = Vec::new();
             if backend == Backend::Google && model == DEFAULT_MODEL {
-                notes.push("default");
+                notes.push("default".into());
             }
             if model.starts_with("imagen") {
-                notes.push("Imagen family — different endpoint, retires 2026-08-17");
+                notes.push("Imagen family — different endpoint, retires 2026-08-17".into());
+            }
+            // BFL's endpoints disagree with each other, so the differences are
+            // listed per model rather than once for the provider. Anything else
+            // would send someone to the wrong endpoint for `--steps`.
+            if backend == Backend::Bfl {
+                if model == bfl::DEFAULT_MODEL {
+                    notes.push("default".into());
+                }
+                let per_model = provider::capabilities_for(backend, model);
+                if per_model.steps {
+                    notes.push("steps + guidance".into());
+                }
+                notes.push(if per_model.references {
+                    "edits".into()
+                } else {
+                    "generate only".into()
+                });
             }
             let suffix = if notes.is_empty() {
                 String::new()
@@ -450,6 +562,7 @@ fn list_models(backend: Backend) -> Result<()> {
     let aliases: &[(&str, &str)] = match backend {
         Backend::Google => genai::MODEL_ALIASES,
         Backend::ComfyUi => comfy::MODEL_ALIASES,
+        Backend::Bfl => bfl::MODEL_ALIASES,
     };
     if !aliases.is_empty() {
         println!("\nAliases:");
@@ -459,7 +572,8 @@ fn list_models(backend: Backend) -> Result<()> {
     }
 
     // Printed because it is the question users otherwise answer by trial and
-    // error, one rejected flag at a time.
+    // error, one rejected flag at a time. For bfl this is the floor for the
+    // default model; the per-model differences are annotated above.
     println!("\nThis provider supports:");
     println!("  aspect ratio    {}", describe_aspect(caps.aspect));
     println!("  seed            {}", yes_no(caps.seed));
@@ -490,7 +604,7 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
     // express, rather than dropping it and returning an image that quietly
     // ignored half the request. Checked first so that asking Google for a seed
     // says so even with no API key set — the key was never the problem.
-    let caps = provider::capabilities_for(backend);
+    let caps = provider::capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
     let provider = open(backend)?;

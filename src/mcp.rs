@@ -30,6 +30,7 @@
 //!   that can — never a silent drop. That error comes back as tool content, so
 //!   the model can read it and retry rather than simply failing.
 
+use crate::bfl;
 use crate::comfy;
 use crate::genai::{self, DEFAULT_MODEL};
 use crate::provider::{
@@ -120,7 +121,11 @@ fn image_schema() -> Value {
             "C2PA manifest.\n",
             "- comfyui: a local model, free, nothing embedded in the output, and it ",
             "supports a seed and a negative prompt. Renders take minutes rather than ",
-            "seconds and it must be running locally.\n\n",
+            "seconds and it must be running locally.\n",
+            "- bfl: hosted FLUX from Black Forest Labs. Paid per image, fast, and the ",
+            "only provider whose capabilities differ per MODEL — steps and guidance ",
+            "exist on flux-2-flex and flux-dev and nowhere else, and no FLUX model ",
+            "takes a negative prompt.\n\n",
             "Both providers can edit an existing picture via reference_images.\n\n",
             "The provider is inferred from the model id; pass `provider` to be ",
             "explicit. Not every parameter works on every provider — call ",
@@ -142,14 +147,14 @@ fn image_schema() -> Value {
                 },
                 "provider": {
                     "type": "string",
-                    "enum": ["google", "comfyui"],
+                    "enum": ["google", "comfyui", "bfl"],
                     "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
                 },
                 "model": {
                     "type": "string",
                     "description": format!(
                         "Model id or alias. Defaults to {DEFAULT_MODEL} on google, \
-                         and to `klein` (local Flux.2) on comfyui."
+                         `klein` (local Flux.2) on comfyui, and flux-2-pro on bfl."
                     )
                 },
                 "aspect_ratio": {
@@ -316,6 +321,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
     Ok(match backend {
         Backend::Google => Box::new(genai::Client::from_env()?),
         Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
+        Backend::Bfl => Box::new(bfl::Client::from_env()?),
     })
 }
 
@@ -340,6 +346,7 @@ fn generate_image(args: &Value) -> Result<String> {
         .unwrap_or(match backend {
             Backend::Google => DEFAULT_MODEL,
             Backend::ComfyUi => "klein",
+            Backend::Bfl => bfl::DEFAULT_MODEL,
         })
         .to_string();
 
@@ -367,7 +374,7 @@ fn generate_image(args: &Value) -> Result<String> {
     // parameter this provider cannot honour stops here, with a message naming one
     // that can, rather than being dropped on the way to the API. Checked before a
     // client exists, so a missing credential never masks the real objection.
-    let caps = capabilities_for(backend);
+    let caps = capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
     let provider = open(backend)?;
@@ -429,7 +436,7 @@ fn generate_image(args: &Value) -> Result<String> {
 fn describe_providers() -> String {
     let mut out = String::new();
 
-    for backend in [Backend::Google, Backend::ComfyUi] {
+    for backend in Backend::ALL.iter().copied() {
         out.push_str(&format!("## {}\n", backend.name()));
 
         let provider = match open(backend) {

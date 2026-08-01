@@ -200,15 +200,42 @@ pub enum Provenance {
     /// `trainedAlgorithmicMedia`. Verified in Google's raw bytes; there is no
     /// opt-out on any tier. Paid tiers remove only the *visible* glyph.
     SynthIdAndC2pa,
+    /// A signed C2PA manifest and **no** pixel watermark.
+    ///
+    /// The distinction from `SynthIdAndC2pa` is not pedantry, it is the whole
+    /// practical difference: C2PA rides in metadata and any re-encode drops it,
+    /// while SynthID is in the pixels and is built to survive one. So this
+    /// output is marked *removably*, and Google's is not.
+    ///
+    /// Verified in a real render: a `caBX` chunk naming `Black Forest Labs API`
+    /// as claim generator, `FLUX.2` as software agent, and asserting
+    /// `digitalSourceType: trainedAlgorithmicMedia` — with no SynthID anywhere.
+    C2paOnly,
     /// Nothing embedded — verified, not assumed.
     Unmarked,
+    /// Nobody has looked yet.
+    ///
+    /// Deliberately distinct from `Unmarked`. Every other variant here was
+    /// established by grepping real output, and "we checked and found nothing"
+    /// is a materially different claim from "we assume nothing is there" — the
+    /// second is the kind of thing people repeat until it becomes folklore.
+    ///
+    /// Currently unused, and kept anyway: it is where a new provider starts
+    /// before anyone has rendered anything with it, and BFL is the case in
+    /// point. It shipped as `Unverified`, one render proved it was
+    /// [`Self::C2paOnly`], and the guess most people would have made — unmarked,
+    /// like other non-Google generators — was wrong.
+    #[allow(dead_code, reason = "the starting state for the next provider added")]
+    Unverified,
 }
 
 impl Provenance {
     pub fn describe(self) -> &'static str {
         match self {
             Self::SynthIdAndC2pa => "invisible SynthID watermark + C2PA manifest",
+            Self::C2paOnly => "C2PA manifest only — no pixel watermark, so a re-encode removes it",
             Self::Unmarked => "no watermark or provenance manifest",
+            Self::Unverified => "unverified — nobody has checked this provider's output",
         }
     }
 }
@@ -247,33 +274,42 @@ impl Capabilities {
             bail!(
                 "`{me}` has no concept of a seed, so `--seed` cannot be honoured.\n\n\
                  Google never exposes one, which means results there are not \
-                 reproducible by any means. Use the `comfyui` provider (a local \
-                 model, e.g. `--model klein`) when you need to render the same \
-                 image twice."
+                 reproducible by any means. Use `comfyui` (a local model, e.g. \
+                 `--model klein`) or `bfl` when you need to render the same image \
+                 twice."
             );
         }
 
         if req.negative_prompt.is_some() && !self.negative_prompt {
+            // The remedy differs by provider, so it cannot be one sentence. Telling
+            // a BFL user that "Gemini responds better to positive description" is
+            // the kind of near-miss advice that wastes more time than silence.
+            let remedy = match me {
+                "google" => {
+                    "Describe what you do want instead — Gemini responds to positive \
+                     description far better than to exclusions."
+                }
+                "bfl" => {
+                    "No FLUX endpoint accepts one — not flux-2-*, not flux-dev, not \
+                     flux-pro-1.1. That is a limit of the hosted API rather than of \
+                     Lucida: the local lane has a negative prompt only because \
+                     ComfyUI builds the graph and can wire the conditioning itself."
+                }
+                _ => "This provider exposes no negative conditioning.",
+            };
             bail!(
-                "`{me}` does not accept a negative prompt for images.\n\n\
-                 Describe what you do want instead — Gemini responds to positive \
-                 description far better than to exclusions — or use the `comfyui` \
-                 provider, where a negative prompt is a real conditioning input."
+                "`{me}` does not accept a negative prompt for images.\n\n{remedy}\n\n\
+                 Use the `comfyui` provider if you need one — there it is a real \
+                 conditioning input."
             );
         }
 
         if req.steps.is_some() && !self.steps {
-            bail!(
-                "`{me}` does not expose a step count; the model decides how long to \
-                 sample. `--steps` applies to the `comfyui` provider."
-            );
+            bail!("{}", self.no_sampler("--steps", "a step count"));
         }
 
         if req.guidance.is_some() && !self.guidance {
-            bail!(
-                "`{me}` does not expose a guidance scale. `--guidance` applies to \
-                 the `comfyui` provider."
-            );
+            bail!("{}", self.no_sampler("--guidance", "a guidance scale"));
         }
 
         if !req.references.is_empty() && !self.references {
@@ -300,6 +336,30 @@ impl Capabilities {
 
         Ok(())
     }
+
+    /// The message for a sampler control this provider will not accept.
+    ///
+    /// Split out because BFL made it a per-*model* fact rather than a
+    /// per-provider one: `flux-2-flex` exposes the sampler and `flux-2-pro` does
+    /// not, so saying "bfl does not expose a step count" would be false and would
+    /// send someone away from a provider that could have served them.
+    fn no_sampler(&self, flag: &str, what: &str) -> String {
+        match self.provider {
+            "bfl" => format!(
+                "this FLUX model does not expose {what}, so `{flag}` cannot be \
+                 honoured.\n\n\
+                 Within Black Forest Labs only `flux-2-flex` and `flux-dev` do — try \
+                 `--model flux-2-flex`. The others decide sampling for themselves. \
+                 `lucida models --provider bfl` marks which is which."
+            ),
+            "google" => format!(
+                "`google` does not expose {what}; the model decides how to sample.\n\n\
+                 `{flag}` applies to `comfyui`, and to `bfl` on `flux-2-flex` or \
+                 `flux-dev`."
+            ),
+            other => format!("`{other}` does not expose {what}, so `{flag}` cannot be honoured."),
+        }
+    }
 }
 
 /// A source of images.
@@ -312,15 +372,21 @@ pub trait ImageProvider {
     fn list_models(&self) -> Result<Vec<String>>;
 }
 
-/// What a backend supports, without constructing one.
+/// What a backend supports for a given model, without constructing one.
 ///
 /// This is what lets `--seed` against Google report "google has no concept of a
 /// seed" rather than "no API key found". The second message is true and useless:
 /// supplying a key would not have helped.
-pub fn capabilities_for(backend: Backend) -> Capabilities {
+///
+/// Takes the model as well as the backend because BFL forced the issue — within
+/// one provider, `steps` exists on `flux-2-flex` and not on `flux-2-pro`. Until
+/// then a provider had one answer for everyone, and publishing the union would
+/// have advertised parameters that some endpoints silently ignore.
+pub fn capabilities_for(backend: Backend, model: &str) -> Capabilities {
     match backend {
         Backend::Google => crate::genai::CAPABILITIES,
         Backend::ComfyUi => crate::comfy::CAPABILITIES,
+        Backend::Bfl => crate::bfl::capabilities(model),
     }
 }
 
@@ -329,6 +395,7 @@ pub fn capabilities_for(backend: Backend) -> Capabilities {
 pub enum Backend {
     Google,
     ComfyUi,
+    Bfl,
 }
 
 impl Backend {
@@ -336,7 +403,8 @@ impl Backend {
         match text.trim().to_ascii_lowercase().as_str() {
             "google" | "gemini" => Ok(Self::Google),
             "comfyui" | "comfy" | "local" => Ok(Self::ComfyUi),
-            other => bail!("unknown provider `{other}`. Known providers: google, comfyui"),
+            "bfl" | "flux" | "blackforestlabs" => Ok(Self::Bfl),
+            other => bail!("unknown provider `{other}`. Known providers: google, comfyui, bfl"),
         }
     }
 
@@ -344,26 +412,42 @@ impl Backend {
         match self {
             Self::Google => "google",
             Self::ComfyUi => "comfyui",
+            Self::Bfl => "bfl",
         }
     }
+
+    pub const ALL: &'static [Backend] = &[Backend::Google, Backend::ComfyUi, Backend::Bfl];
 }
 
 /// Guesses the backend from a model id, so `--provider` stays optional.
 ///
-/// The alias tables already carry the answer for every name Lucida ships. An
-/// unrecognised id falls to Google, which keeps every existing invocation working
-/// and means a model id released tomorrow still reaches the API it belongs to.
+/// Order matters here, and it is the fiddly part. A local checkpoint file and a
+/// hosted endpoint can both be called something-flux, so exact aliases are
+/// checked before any pattern, and a filename extension decides before a name
+/// does. An unrecognised id falls to Google, which keeps every existing
+/// invocation working and means a Gemini model released tomorrow works today.
 pub fn infer_backend(model: &str) -> Backend {
     let key = model.trim().to_ascii_lowercase();
-    if crate::comfy::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
-        || key.ends_with(".safetensors")
-        || key.ends_with(".gguf")
-        || key.contains("flux")
-    {
-        Backend::ComfyUi
-    } else {
-        Backend::Google
+
+    if crate::comfy::MODEL_ALIASES.iter().any(|(a, _)| *a == key) {
+        return Backend::ComfyUi;
     }
+    if crate::bfl::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
+        || crate::bfl::KNOWN_MODELS.contains(&key.as_str())
+    {
+        return Backend::Bfl;
+    }
+    // A checkpoint file is unambiguously something ComfyUI loads.
+    if key.ends_with(".safetensors") || key.ends_with(".gguf") {
+        return Backend::ComfyUi;
+    }
+    // Anything else shaped like a BFL endpoint path — this is what lets a model
+    // released tomorrow reach the right provider without a code change.
+    if key.starts_with("flux-") {
+        return Backend::Bfl;
+    }
+
+    Backend::Google
 }
 
 #[cfg(test)]
@@ -446,7 +530,26 @@ mod tests {
         assert_eq!(infer_backend("gemini-3.1-flash-image"), Backend::Google);
         assert_eq!(infer_backend("klein"), Backend::ComfyUi);
         assert_eq!(infer_backend("some-model.safetensors"), Backend::ComfyUi);
+        assert_eq!(infer_backend("flux-2-pro"), Backend::Bfl);
+        assert_eq!(infer_backend("flux-max"), Backend::Bfl);
         // Unknown ids fall to Google so new Gemini models work the day they ship.
         assert_eq!(infer_backend("gemini-9-image"), Backend::Google);
+        // …and an unknown flux-shaped id reaches BFL for the same reason.
+        assert_eq!(infer_backend("flux-3-pro"), Backend::Bfl);
+    }
+
+    /// The ambiguity worth pinning down: local checkpoints and hosted endpoints
+    /// both get called something-flux, and picking wrong sends a paid request to
+    /// the wrong place — or a local filename to a billing API.
+    #[test]
+    fn local_and_hosted_flux_names_do_not_collide() {
+        // Bare family aliases are the local lane.
+        assert_eq!(infer_backend("flux2"), Backend::ComfyUi);
+        assert_eq!(infer_backend("flux-2"), Backend::ComfyUi);
+        assert_eq!(infer_backend("flux2-klein"), Backend::ComfyUi);
+        // Endpoint-shaped names are hosted.
+        assert_eq!(infer_backend("flux-2-klein-9b"), Backend::Bfl);
+        // A file is always local, whatever it is called.
+        assert_eq!(infer_backend("flux-2-pro.safetensors"), Backend::ComfyUi);
     }
 }

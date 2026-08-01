@@ -1,8 +1,8 @@
 # Roadmap
 
-Lucida speaks to two providers: Google, for images via Gemini and video via Veo,
-and a local ComfyUI for images. This records where it goes next and, more
-usefully, what has to be true first.
+Lucida speaks to three providers: Google (images via Gemini, video via Veo), a
+local ComfyUI, and hosted FLUX from Black Forest Labs. This records where it goes
+next and, more usefully, what has to be true first.
 
 Nothing below the "Done" section is committed work. Items are ordered by what
 unblocks what, not by enthusiasm.
@@ -198,7 +198,7 @@ but untouched, and inpainting (below) is where it will finally bite.
 | Provider | Appeal | Main obstacle |
 |---|---|---|
 | ~~Local (ComfyUI)~~ | — | **Done; see §0** |
-| **Flux (Black Forest Labs)** | Nearest substitute on quality and cost; same models, hosted | Weight licensing differs sharply per model |
+| ~~Flux (Black Forest Labs)~~ | — | **Done; see below** |
 | **OpenAI** | Documented REST API, mask-based editing | None significant, but a one-off — shares little with the others |
 | **Adobe Firefly** | Licensed training data and enterprise indemnification | Entitlements and credential complexity |
 | **Midjourney** | Distinctive aesthetic | No official general API; unofficial ones breach ToS |
@@ -239,7 +239,55 @@ C2PA manifest, and Flux really does run on the gfx1151. The ROCm caveats hold �
 `--disable-mmap` is mandatory, and "it hangs" is indeed the first thing anyone
 will report, which is why elapsed time is now printed every 30 seconds.
 
-### Flux — Black Forest Labs (hosted)
+### Flux — Black Forest Labs (hosted) — DELIVERED
+
+Implemented and verified against the live API. See the notes below for what it
+cost to learn; the section that follows is kept as the original reasoning.
+
+**The substitution worked, and that was the point.** ComfyUI proved the trait
+could hold two dissimilar shapes; BFL proves it holds a real substitution — the
+same model family, reached a different way. The call pattern is submit / poll /
+download for the third time (Veo, ComfyUI, BFL), which is fair evidence it is
+the right shape.
+
+**Three predictions in this section were wrong, all in the same direction — they
+assumed hosted Flux would be a superset of what we had.**
+
+1. **There is no negative prompt.** Not on any FLUX.2 endpoint, not `flux-dev`,
+   not `flux-pro-1.1`. This section confidently listed it. The *local* lane has
+   one only because ComfyUI builds the graph and can wire negative conditioning
+   itself — so on this axis hosted Flux is less capable than local Flux, the
+   reverse of the assumption.
+2. **Capabilities vary per model, not per provider.** `steps` and `guidance`
+   exist on `flux-2-flex` and `flux-dev` and nowhere else in the family. That is
+   a genuinely new axis: until now a provider had one answer for everyone, and
+   `capabilities_for` had to grow a model argument.
+3. **Provenance was not what anyone would have guessed.** BFL output carries a
+   signed C2PA manifest and **no** pixel watermark — a third state, distinct from
+   Google (both) and ComfyUI (neither). The practical difference is that a
+   re-encode strips C2PA and cannot strip SynthID, so BFL output is marked
+   *removably*. Shipping it as `Provenance::Unverified` and checking a real
+   render was the right call; the obvious guess (unmarked, like other non-Google
+   generators) was wrong.
+
+**Measured:** a 1024x576 `flux-2-pro` render, 6 seconds and 3 credits; the same
+picture edited, 9-12 seconds and 4.5 credits. Against ~270s and free locally.
+That speed gap is large enough to change how a caller behaves and is now stated
+in the tool description.
+
+**Two bugs the live API found that no amount of reading would have.** A malformed
+key returns **422**, not 401, so status-code dispatch reported it as a rejected
+parameter and sent the reader to inspect their prompt. And an edit sent with the
+default 1024x1024 silently reframed a 16:9 source to square — the edit itself was
+good and the composition was destroyed. Dimensions are now omitted for an edit
+unless asked for, matching the local lane.
+
+**Still open:** `flux-pro-1.1-ultra` takes `aspect_ratio` rather than
+width/height and is untested; the fill/expand and finetune endpoints are not
+implemented; and the licensing question below is unchanged and now applies to
+both lanes.
+
+### Flux — Black Forest Labs (hosted) — original reasoning
 
 **Second, and cheap once local is done.** By this point Flux is already
 understood: same model family, same parameter model — seed, steps, guidance,
