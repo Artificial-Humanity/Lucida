@@ -1,4 +1,4 @@
-//! lucida — image generation via the Google Gemini API.
+//! Lucida — image generation via the Google Gemini API.
 //!
 //! Named for the camera lucida, the optical device that let artists trace what
 //! they saw onto paper.

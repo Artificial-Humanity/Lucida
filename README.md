@@ -1,4 +1,4 @@
-# lucida
+# Lucida
 
 Generate and edit images and video with Google's Gemini and Veo models — as a
 CLI, or as an MCP server so coding agents can make their own assets.
@@ -24,11 +24,11 @@ constantly and any stray write to stdout corrupts the protocol.
 ## Install
 
 ```console
-cargo install --git https://github.com/Artificial-Humanity/lucida
+cargo install --git https://github.com/Artificial-Humanity/Lucida
 ```
 
 Or take a prebuilt binary from the
-[latest release](https://github.com/Artificial-Humanity/lucida/releases/latest):
+[latest release](https://github.com/Artificial-Humanity/Lucida/releases/latest):
 
 - **macOS** — `lucida-<version>-macos-universal`, a universal binary covering both
   Apple Silicon and Intel. It is unsigned, so on first run macOS will refuse it;
@@ -41,8 +41,8 @@ Or take a prebuilt binary from the
 Or build it locally:
 
 ```console
-git clone https://github.com/Artificial-Humanity/lucida
-cd lucida && cargo build --release
+git clone https://github.com/Artificial-Humanity/Lucida
+cd Lucida && cargo build --release
 # binary at target/release/lucida
 ```
 
