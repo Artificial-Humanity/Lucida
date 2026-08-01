@@ -65,54 +65,68 @@ a config file for keys once there is more than one to hold.
 
 | Provider | Appeal | Main obstacle |
 |---|---|---|
-| **OpenAI** | Documented REST API, mask-based editing | None significant — the natural second provider |
-| **Flux (Black Forest Labs)** | Hosted API *and* open weights; seeds and negative prompts | Weight licensing differs sharply per model |
-| **Local (ComfyUI et al.)** | No per-image cost, no provenance marking, full control | Graph-based, not prompt-based; a different interface shape |
+| **Local (ComfyUI et al.)** | Already installed and working; free, unmarked, no credential | Graph-based, not prompt-based; a different interface shape |
+| **Flux (Black Forest Labs)** | Nearest substitute on quality and cost; same models, hosted | Weight licensing differs sharply per model |
+| **OpenAI** | Documented REST API, mask-based editing | None significant, but a one-off — shares little with the others |
 | **Adobe Firefly** | Licensed training data and enterprise indemnification | Entitlements and credential complexity |
 | **Midjourney** | Distinctive aesthetic | No official general API; unofficial ones breach ToS |
 
-### OpenAI
-
-The most straightforward addition and the best first test of the abstraction,
-precisely because it is *similar but not identical* — a shakedown that will
-expose sloppy assumptions without fighting the design.
-
-Notable differences to handle: explicit pixel sizes rather than named ratios,
-mask-based inpainting rather than reference-image conditioning, and a quality
-parameter with different semantics. Editing is the piece most likely to strain
-the current `ImageRequest`, since `references: Vec<String>` cannot express "this
-region of this image."
-
-### Flux — Black Forest Labs
-
-Interesting twice over: a hosted API, and open weights runnable locally, which
-makes it the natural bridge to the local lane.
-
-**Licensing needs checking per model, not per vendor.** The FLUX family has
-shipped under materially different terms — some permissive, some
-non-commercial-only. That distinction is exactly the "low fence" question the
-studio already has a position on, and it applies to the *weights*, not the API.
-Using the hosted API is a commercial-terms question; running the weights locally
-is a licence question. Resolve both before this ships, and record the answer here
-rather than in someone's memory.
-
-Genuine capability gains: seeds (so a result is reproducible), real negative
-prompts, and step/guidance control. These are the parameters the abstraction's
-escape hatch exists for.
-
 ### Local — ComfyUI and friends
 
-The most architecturally distinct, and the most strategically interesting.
+**Start here.** Not because it is the tidiest entry point — it is the least
+tidy — but because it is already on the machine, already working, and costs
+nothing to iterate against.
 
-The lab already runs ComfyUI on `ai-lab-0`, so this is integration rather than
-provisioning. Attractions: no per-image cost, nothing leaves the network, no
-SynthID or C2PA marking, and complete control over models and samplers.
+`ai-lab-0` carries a complete **FLUX.2 Klein 9B** stack under
+`/data/services/comfyui/models`: the 17 GB diffusion model, its 16 GB Qwen3 text
+encoder, and the VAE. A 1024×1024 render succeeded on the gfx1151 on 2026-07-19.
+The riskiest unknown for this lane — whether Flux runs at all on this hardware,
+given the ROCm history — is therefore already answered. It does.
+
+That removes every barrier that usually delays a second provider. No credential
+to obtain, no billing to enable, no per-image cost while the abstraction is being
+reshaped daily, and no rate limit to design around. The work can start tonight
+and be thrown away twice without anyone caring.
+
+**The apparent objection is actually the main argument.** ComfyUI is the least
+representative provider here — a workflow graph rather than a prompt call — so
+designing the trait against it first looks like a way to end up with a
+graph-shaped abstraction. But Google is *already implemented*. Building the trait
+against Google plus ComfyUI means designing against the two most dissimilar
+providers on the list, which is exactly the pair most likely to produce an
+abstraction that survives the rest. Google plus OpenAI would be two variations on
+one shape, and would flatter a design that had not been tested.
+
+**Confirmed: local output carries no provenance marking.** The existing Klein
+render contains no SynthID string and no C2PA manifest, checked the same way we
+checked Google's. This is the one lane producing genuinely unmarked images — a
+real difference rather than a claimed one, and the reason the README's current
+flat statement about watermarking will need qualifying.
 
 The obstacle is real: ComfyUI's API takes a **workflow graph**, not a prompt. A
 provider implementation would hold template workflows and substitute nodes —
 prompt text, dimensions, seed, checkpoint — then poll for completion. That is
 closer to the Veo start/poll pattern than to the image path, and the existing
 long-running-operation handling is a reasonable model for it.
+
+The template question is smaller than it looks, because **ComfyUI already ships
+them**. `ComfyUI/blueprints/` currently holds six Flux workflows:
+
+```
+Text to Image     (Flux.1 Dev / Flux.1 Krea Dev / Flux.2 Dev)
+Image Edit        (Flux.2 Dev / Flux.2 Klein 4B)
+Image Inpainting  (Flux.1 Fill Dev)
+```
+
+The graphs do not need authoring, only adapting — note the Klein blueprint
+targets the 4B while the installed model is the 9B, so node parameters need
+reconciling rather than copying. Still far less work than starting from a blank
+graph.
+
+Worth noticing what the inpainting blueprint implies: **mask-based editing is
+reachable through the local lane**, not only through OpenAI. The structural gap
+in `references: Vec<String>` — which cannot express "this region of this image" —
+can therefore be discovered without adding a provider purely to find it.
 
 Worth deciding early whether Lucida ships opinionated default workflows or
 requires the user to supply their own. Shipping defaults is friendlier and ages
@@ -121,6 +135,47 @@ templates plus a `--workflow` override is probably the compromise.
 
 Also note the ROCm caveats already documented for that machine — a local provider
 inherits its host's quirks, and "it hangs" will be the first bug report.
+
+### Flux — Black Forest Labs (hosted)
+
+**Second, and cheap once local is done.** By this point Flux is already
+understood: same model family, same parameter model — seed, steps, guidance,
+negative prompt. The hosted API becomes a second *transport* for a provider
+already integrated, rather than a first encounter with a new vendor and a new
+shape at once.
+
+It is also the provider genuinely worth being able to switch *to*. Closest to
+Google on quality and cost, which is what makes it the real substitution
+candidate rather than merely another supported name — and an abstraction is only
+proven by a real substitution.
+
+Between them, local and hosted Flux force the capability question that Google
+alone never raises. Flux exposes parameters Google simply lacks, seeds above all:
+Google never surfaces one, so nothing in Lucida can currently express "give me
+that result again." Determinism is not a parameter that bolts on afterwards, and
+meeting it early is why this pair belongs ahead of tidier options.
+
+**Licensing needs checking per model, not per vendor.** The FLUX family has
+shipped under materially different terms — some permissive, some
+non-commercial-only. That distinction is exactly the "low fence" question the
+studio already has a position on, and it applies to the *weights*, not the API.
+Running Klein locally is a licence question; calling the hosted API is a
+commercial-terms question. They can have different answers. Resolve both and
+record them here rather than in someone's memory.
+
+### OpenAI
+
+Demoted from second to third, not dismissed. The reasoning is only about
+ordering: it is a one-off. Its parameter model shares little with Flux, with the
+local lane, or with Google, so implementing it teaches the abstraction less per
+unit of work than Flux does.
+
+It still earns a place. Mask-based inpainting is the one editing model nothing
+else here uses, and it is the piece most likely to strain `ImageRequest` —
+`references: Vec<String>` cannot express "this region of this image." That is a
+structural gap worth discovering deliberately rather than late. Also handles
+explicit pixel sizes rather than named ratios, and a quality parameter with its
+own semantics.
 
 ### Adobe Firefly
 
