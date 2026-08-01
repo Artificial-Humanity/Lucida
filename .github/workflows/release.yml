@@ -1,0 +1,94 @@
+name: release
+
+# Runs on a tag push, and can be dispatched manually to attach binaries to an
+# existing release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    # A universal binary rather than two downloads. Apple Silicon runners carry
+    # both SDKs, so one job covers Intel and ARM.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Add both Apple targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Fuse into a universal binary
+        run: |
+          lipo -create -output lucida-macos-universal \
+            target/aarch64-apple-darwin/release/lucida \
+            target/x86_64-apple-darwin/release/lucida
+          lipo -info lucida-macos-universal
+          chmod +x lucida-macos-universal
+
+      - name: Smoke test
+        run: |
+          ./lucida-macos-universal --version
+          ./lucida-macos-universal --help > /dev/null
+          # Must fail cleanly without a key rather than panicking.
+          if ./lucida-macos-universal models 2>&1 | grep -q "no API key found"; then
+            echo "missing-key path OK"
+          else
+            echo "unexpected behaviour without an API key" && exit 1
+          fi
+          # The MCP handshake must answer on a machine that has never seen a key.
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            | ./lucida-macos-universal mcp 2>/dev/null | grep -q generate_image \
+            && echo "MCP tools/list OK"
+
+      - run: shasum -a 256 lucida-macos-universal > lucida-macos-universal.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            lucida-macos-universal
+            lucida-macos-universal.sha256
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Build statically against musl
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Smoke test
+        run: |
+          BIN=target/x86_64-unknown-linux-musl/release/lucida
+          file "$BIN" | grep -q "statically linked" && echo "static OK"
+          "$BIN" --version
+          cp "$BIN" lucida-x86_64-linux-musl
+
+      - run: sha256sum lucida-x86_64-linux-musl > lucida-x86_64-linux-musl.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            lucida-x86_64-linux-musl
+            lucida-x86_64-linux-musl.sha256
