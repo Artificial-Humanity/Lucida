@@ -17,6 +17,7 @@ use crate::provider::{
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Where ComfyUI is listening. Overridden with `LUCIDA_COMFYUI_URL`.
@@ -276,47 +277,163 @@ impl Client {
             })
     }
 
-    /// Builds the API-format graph.
+    /// Sends an image to the server so a graph can name it.
     ///
-    /// This is the Flux.2 pipeline the ComfyUI blueprints describe, with one
-    /// deliberate choice: `CFGGuider` rather than the `BasicGuider` + `FluxGuidance`
-    /// pair the text-to-image blueprint uses. `CFGGuider` takes both positive and
-    /// negative conditioning, which is what makes a negative prompt a real input
-    /// on this lane rather than a parameter quietly dropped.
-    fn graph(&self, req: &ImageRequest, ckpt: &Checkpoint, seed: u64) -> Value {
-        let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
+    /// ComfyUI's `LoadImage` takes a filename in the server's own input
+    /// directory, not a path and not bytes — so editing means uploading first,
+    /// even when the server is the same machine. Over HTTP rather than by
+    /// writing to the input directory, for the same reason `/view` is used to
+    /// fetch results: a remote or containerised server then needs no shared
+    /// mount.
+    fn upload(&self, path: &str) -> Result<String> {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("reading the image to edit ({path})"))?;
+        let filename = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("upload.png")
+            .to_string();
+
+        let form = reqwest::blocking::multipart::Form::new()
+            // `overwrite` keeps the server's input directory from filling up with
+            // `image (1).png`, `image (2).png` on repeated edits of one file.
+            .text("overwrite", "true")
+            .part(
+                "image",
+                reqwest::blocking::multipart::Part::bytes(bytes).file_name(filename),
+            );
+
+        let response = self
+            .authed(self.http.post(format!("{}/upload/image", self.base)))
+            .multipart(form)
+            .send()
+            .map_err(|e| anyhow!("{}", self.explain_transport("/upload/image", &e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            if let Some(refusal) = explain_refusal(status.as_u16(), &self.auth) {
+                bail!("uploading the image to edit was refused.\n\n{refusal}");
+            }
+            let text = response.text().unwrap_or_default();
+            bail!(
+                "ComfyUI rejected the upload of {path} (HTTP {}): {text}",
+                status.as_u16()
+            );
+        }
+
+        let payload: Value = response.json().context("parsing the upload response")?;
+        let name = payload["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("ComfyUI accepted the upload but named no file: {payload}"))?;
+
+        // The server may file it under a subfolder; `LoadImage` wants the
+        // combined path, not the bare name.
+        Ok(match payload["subfolder"].as_str().unwrap_or("") {
+            "" => name.to_string(),
+            subfolder => format!("{subfolder}/{name}"),
+        })
+    }
+
+    /// Builds the API-format graph, for generation or editing.
+    ///
+    /// Two deliberate choices carry through both shapes. `CFGGuider` rather than
+    /// the `BasicGuider` + `FluxGuidance` pair the text-to-image blueprint uses,
+    /// because it takes negative conditioning and that is what makes a negative
+    /// prompt a real input rather than a parameter quietly dropped. And, when
+    /// editing, the encoded source is attached to **both** the positive and the
+    /// negative conditioning — which looks redundant and is what the Flux.2 edit
+    /// blueprint does, since the negative branch has to be denoising the same
+    /// picture for the guidance difference to mean anything.
+    fn graph_for(
+        req: &ImageRequest,
+        ckpt: &Checkpoint,
+        seed: u64,
+        uploaded: &[String],
+    ) -> Value {
         let steps = req.steps.unwrap_or(DEFAULT_STEPS);
         let guidance = req.guidance.unwrap_or(DEFAULT_GUIDANCE);
         let negative = req.negative_prompt.clone().unwrap_or_default();
 
-        json!({
-            "unet":    { "class_type": "UNETLoader",
-                         "inputs": { "unet_name": ckpt.unet, "weight_dtype": "default" } },
-            "clip":    { "class_type": "CLIPLoader",
-                         "inputs": { "clip_name": ckpt.clip, "type": "flux2" } },
-            "vae":     { "class_type": "VAELoader", "inputs": { "vae_name": ckpt.vae } },
-            "pos":     { "class_type": "CLIPTextEncode",
-                         "inputs": { "text": req.prompt, "clip": ["clip", 0] } },
-            "neg":     { "class_type": "CLIPTextEncode",
-                         "inputs": { "text": negative, "clip": ["clip", 0] } },
-            "guider":  { "class_type": "CFGGuider",
-                         "inputs": { "model": ["unet", 0], "positive": ["pos", 0],
-                                     "negative": ["neg", 0], "cfg": guidance } },
-            "sampler": { "class_type": "KSamplerSelect", "inputs": { "sampler_name": "euler" } },
-            "sigmas":  { "class_type": "Flux2Scheduler",
-                         "inputs": { "steps": steps, "width": width, "height": height } },
-            "noise":   { "class_type": "RandomNoise", "inputs": { "noise_seed": seed } },
-            "latent":  { "class_type": "EmptyFlux2LatentImage",
-                         "inputs": { "width": width, "height": height, "batch_size": 1 } },
-            "out":     { "class_type": "SamplerCustomAdvanced",
-                         "inputs": { "noise": ["noise", 0], "guider": ["guider", 0],
-                                     "sampler": ["sampler", 0], "sigmas": ["sigmas", 0],
-                                     "latent_image": ["latent", 0] } },
-            "decode":  { "class_type": "VAEDecode",
-                         "inputs": { "samples": ["out", 0], "vae": ["vae", 0] } },
-            "save":    { "class_type": "SaveImage",
-                         "inputs": { "images": ["decode", 0], "filename_prefix": "lucida" } },
-        })
+        let mut nodes = serde_json::Map::new();
+        let mut node = |id: &str, class: &str, inputs: Value| {
+            nodes.insert(
+                id.to_string(),
+                json!({ "class_type": class, "inputs": inputs }),
+            );
+        };
+
+        node("unet", "UNETLoader",
+             json!({ "unet_name": ckpt.unet, "weight_dtype": "default" }));
+        node("clip", "CLIPLoader",
+             json!({ "clip_name": ckpt.clip, "type": "flux2" }));
+        node("vae", "VAELoader", json!({ "vae_name": ckpt.vae }));
+        node("pos", "CLIPTextEncode",
+             json!({ "text": req.prompt, "clip": ["clip", 0] }));
+        node("neg", "CLIPTextEncode",
+             json!({ "text": negative, "clip": ["clip", 0] }));
+
+        // Each reference is scaled, encoded, and chained onto both conditionings.
+        // Chaining is how Flux.2 takes more than one reference: every
+        // ReferenceLatent adds its latent to the conditioning it receives.
+        let mut positive = json!(["pos", 0]);
+        let mut negative_cond = json!(["neg", 0]);
+
+        for (index, name) in uploaded.iter().enumerate() {
+            let (load, scale, encode) = (
+                format!("load{index}"),
+                format!("scale{index}"),
+                format!("encode{index}"),
+            );
+            node(&load, "LoadImage", json!({ "image": name }));
+            // `resolution_steps` rounds the scaled dimensions onto the latent
+            // grid, so the size derived below is one Flux can actually render.
+            node(&scale, "ImageScaleToTotalPixels",
+                 json!({ "image": [load, 0], "upscale_method": "nearest-exact",
+                         "megapixels": 1.0, "resolution_steps": PIXEL_GRID }));
+            node(&encode, "VAEEncode",
+                 json!({ "pixels": [scale, 0], "vae": ["vae", 0] }));
+
+            let (pos_ref, neg_ref) = (format!("pos_ref{index}"), format!("neg_ref{index}"));
+            node(&pos_ref, "ReferenceLatent",
+                 json!({ "conditioning": positive, "latent": [encode, 0] }));
+            node(&neg_ref, "ReferenceLatent",
+                 json!({ "conditioning": negative_cond, "latent": [encode, 0] }));
+            positive = json!([pos_ref, 0]);
+            negative_cond = json!([neg_ref, 0]);
+        }
+
+        // An edit keeps the source's shape unless the request says otherwise, so
+        // the dimensions are read off the scaled image on the server rather than
+        // guessed here. Asking for an aspect or size overrides that, which is how
+        // an edit reframes.
+        let asked_for_dimensions = req.aspect.is_some() || req.size.is_some();
+        let (width, height) = if uploaded.is_empty() || asked_for_dimensions {
+            let (w, h) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
+            (json!(w), json!(h))
+        } else {
+            node("size", "GetImageSize", json!({ "image": ["scale0", 0] }));
+            (json!(["size", 0]), json!(["size", 1]))
+        };
+
+        node("guider", "CFGGuider",
+             json!({ "model": ["unet", 0], "positive": positive,
+                     "negative": negative_cond, "cfg": guidance }));
+        node("sampler", "KSamplerSelect", json!({ "sampler_name": "euler" }));
+        node("sigmas", "Flux2Scheduler",
+             json!({ "steps": steps, "width": width, "height": height }));
+        node("noise", "RandomNoise", json!({ "noise_seed": seed }));
+        node("latent", "EmptyFlux2LatentImage",
+             json!({ "width": width, "height": height, "batch_size": 1 }));
+        node("out", "SamplerCustomAdvanced",
+             json!({ "noise": ["noise", 0], "guider": ["guider", 0],
+                     "sampler": ["sampler", 0], "sigmas": ["sigmas", 0],
+                     "latent_image": ["latent", 0] }));
+        node("decode", "VAEDecode",
+             json!({ "samples": ["out", 0], "vae": ["vae", 0] }));
+        node("save", "SaveImage",
+             json!({ "images": ["decode", 0], "filename_prefix": "lucida" }));
+
+        Value::Object(nodes)
     }
 
     fn submit(&self, graph: &Value) -> Result<String> {
@@ -449,11 +566,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     },
     seed: true,
     negative_prompt: true,
-    // Editing needs an uploaded image and a reference-conditioning graph, which
-    // this provider does not build yet. Declaring it false makes the attempt fail
-    // with a message rather than silently generate from scratch and hand back
-    // something that ignored the input entirely.
-    references: false,
+    references: true,
     steps: true,
     guidance: true,
     provenance: Provenance::Unmarked,
@@ -471,13 +584,32 @@ impl ImageProvider for Client {
         // rather than one the server picks and never tells us.
         let seed = req.seed.unwrap_or_else(arbitrary_seed);
 
-        let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
-        eprintln!(
-            "Rendering {width}x{height} with {} (seed {seed})…",
-            ckpt.unet
-        );
+        let uploaded = req
+            .references
+            .iter()
+            .map(|path| self.upload(path))
+            .collect::<Result<Vec<_>>>()?;
 
-        let prompt_id = self.submit(&self.graph(req, &ckpt, seed))?;
+        if uploaded.is_empty() {
+            let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
+            eprintln!("Rendering {width}x{height} with {} (seed {seed})…", ckpt.unet);
+        } else {
+            // The size is decided server-side from the source unless overridden,
+            // so there is no honest number to print here.
+            let shape = if req.aspect.is_some() || req.size.is_some() {
+                let (w, h) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
+                format!("{w}x{h}")
+            } else {
+                "at the source's size".to_string()
+            };
+            eprintln!(
+                "Editing with {} reference image(s) {shape}, {} (seed {seed})…",
+                uploaded.len(),
+                ckpt.unet
+            );
+        }
+
+        let prompt_id = self.submit(&Self::graph_for(req, &ckpt, seed, &uploaded))?;
         let (bytes, mime_type) = self.await_image(&prompt_id)?;
 
         Ok(GeneratedImage {
@@ -801,6 +933,99 @@ mod tests {
     #[test]
     fn filenames_with_spaces_survive_the_view_url() {
         assert_eq!(urlencode("a file&b.png"), "a%20file%26b.png");
+    }
+
+    fn checkpoint() -> Checkpoint {
+        Checkpoint {
+            unet: "flux2.safetensors".into(),
+            clip: "flux2_te.safetensors".into(),
+            vae: "flux2_vae.safetensors".into(),
+        }
+    }
+
+    fn request(prompt: &str) -> ImageRequest {
+        ImageRequest {
+            prompt: prompt.into(),
+            model: "klein".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn generating_loads_no_image_and_sizes_itself() {
+        let graph = Client::graph_for(&request("a fox"), &checkpoint(), 1, &[]);
+        assert!(graph.get("load0").is_none(), "nothing to load when generating");
+        assert!(graph.get("size").is_none());
+        // Dimensions are literals, not wired from an image.
+        assert_eq!(graph["latent"]["inputs"]["width"], 1024);
+    }
+
+    /// The wiring most likely to be got wrong, and the reason it is tested:
+    /// the encoded source attaches to the negative branch as well as the
+    /// positive. It looks redundant; the Flux.2 edit blueprint does it because
+    /// the negative branch must denoise the same picture for the guidance
+    /// difference to mean anything.
+    #[test]
+    fn editing_conditions_both_branches_on_the_source() {
+        let graph = Client::graph_for(&request("make it blue"), &checkpoint(), 1,
+                                      &["cat.png".to_string()]);
+
+        assert_eq!(graph["load0"]["inputs"]["image"], "cat.png");
+        assert_eq!(graph["encode0"]["inputs"]["pixels"], json!(["scale0", 0]));
+
+        assert_eq!(graph["pos_ref0"]["inputs"]["conditioning"], json!(["pos", 0]));
+        assert_eq!(graph["neg_ref0"]["inputs"]["conditioning"], json!(["neg", 0]));
+        // Both reference the same encoded latent.
+        assert_eq!(graph["pos_ref0"]["inputs"]["latent"], json!(["encode0", 0]));
+        assert_eq!(graph["neg_ref0"]["inputs"]["latent"], json!(["encode0", 0]));
+
+        // …and the guider takes the referenced conditioning, not the raw text.
+        assert_eq!(graph["guider"]["inputs"]["positive"], json!(["pos_ref0", 0]));
+        assert_eq!(graph["guider"]["inputs"]["negative"], json!(["neg_ref0", 0]));
+    }
+
+    #[test]
+    fn an_edit_keeps_the_sources_shape_by_default() {
+        let graph = Client::graph_for(&request("brighter"), &checkpoint(), 1,
+                                      &["cat.png".to_string()]);
+        // Read off the server rather than guessed here.
+        assert_eq!(graph["size"]["inputs"]["image"], json!(["scale0", 0]));
+        assert_eq!(graph["latent"]["inputs"]["width"], json!(["size", 0]));
+        assert_eq!(graph["sigmas"]["inputs"]["height"], json!(["size", 1]));
+    }
+
+    #[test]
+    fn asking_for_an_aspect_reframes_the_edit() {
+        let req = ImageRequest {
+            aspect: Some(crate::provider::Aspect::parse("16:9").unwrap()),
+            ..request("brighter")
+        };
+        let graph = Client::graph_for(&req, &checkpoint(), 1, &["cat.png".to_string()]);
+        // An explicit request wins over the source's shape, so no GetImageSize.
+        assert!(graph.get("size").is_none());
+        assert_eq!(graph["latent"]["inputs"]["width"], 1024);
+        assert_eq!(graph["latent"]["inputs"]["height"], 576);
+    }
+
+    /// More than one reference chains, each adding its latent to the
+    /// conditioning the previous one produced.
+    #[test]
+    fn references_chain_in_order() {
+        let graph = Client::graph_for(
+            &request("combine these"),
+            &checkpoint(),
+            1,
+            &["a.png".to_string(), "b.png".to_string()],
+        );
+        assert_eq!(graph["pos_ref0"]["inputs"]["conditioning"], json!(["pos", 0]));
+        assert_eq!(
+            graph["pos_ref1"]["inputs"]["conditioning"],
+            json!(["pos_ref0", 0])
+        );
+        assert_eq!(graph["pos_ref1"]["inputs"]["latent"], json!(["encode1", 0]));
+        assert_eq!(graph["guider"]["inputs"]["positive"], json!(["pos_ref1", 0]));
+        // Dimensions still come from the first image, not the last.
+        assert_eq!(graph["size"]["inputs"]["image"], json!(["scale0", 0]));
     }
 
     #[test]

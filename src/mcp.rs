@@ -121,13 +121,13 @@ fn image_schema() -> Value {
             "- comfyui: a local model, free, nothing embedded in the output, and it ",
             "supports a seed and a negative prompt. Renders take minutes rather than ",
             "seconds and it must be running locally.\n\n",
+            "Both providers can edit an existing picture via reference_images.\n\n",
             "The provider is inferred from the model id; pass `provider` to be ",
             "explicit. Not every parameter works on every provider — call ",
             "image_providers to check, or pass one anyway and read the error, which ",
             "names a provider that supports it. Parameters are never silently ",
             "ignored.\n\n",
-            "Pass reference_images to edit or restyle an existing picture ",
-            "(google only)."
+            "Pass reference_images to edit or restyle an existing picture."
         ),
         "inputSchema": {
             "type": "object",
@@ -186,7 +186,7 @@ fn image_schema() -> Value {
                 "reference_images": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Paths to existing images to condition on, for editing or style matching. google only."
+                    "description": "Paths to existing images to condition on, for editing or style matching. Supported by both providers. On comfyui the result keeps the first image's shape unless aspect_ratio or size is given."
                 }
             },
             "required": ["prompt", "output_path"]
@@ -381,8 +381,15 @@ fn generate_image(args: &Value) -> Result<String> {
     let renamed = destination != requested;
     let written = crate::write_image(&destination, &image.bytes)?;
 
+    // The dimensions are stated because they are not always the ones requested:
+    // an edit on comfyui normalizes to roughly a megapixel, so the result can
+    // differ from both the request and the source.
+    let size = match crate::image_dimensions(&image.bytes, &image.mime_type) {
+        Some((w, h)) => format!("{w}x{h}, "),
+        None => String::new(),
+    };
     let mut text = format!(
-        "Wrote {} ({} KB, {}) via {}.",
+        "Wrote {} ({size}{} KB, {}) via {}.",
         written.display(),
         image.bytes.len() / 1024,
         image.mime_type,
@@ -552,11 +559,13 @@ mod tests {
                 "`{field}` must name the provider that honours it"
             );
         }
+        // reference_images is deliberately NOT in that list: both providers
+        // support it now, so claiming otherwise would be the same lie in reverse.
         assert!(
             props["reference_images"]["description"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("google only")
+                .contains("both providers")
         );
     }
 

@@ -523,11 +523,69 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
     if let Some(seed) = image.seed {
         eprintln!("Seed {seed} — pass `--seed {seed}` to render this again.");
     }
-    eprintln!("Wrote {} ({} KB)", written.display(), image.bytes.len() / 1024);
+
+    // The size is reported rather than assumed, because an edit on the local lane
+    // normalizes to roughly a megapixel and may not match the source.
+    let size = match image_dimensions(&image.bytes, &image.mime_type) {
+        Some((w, h)) => format!("{w}x{h}, "),
+        None => String::new(),
+    };
+    eprintln!(
+        "Wrote {} ({size}{} KB)",
+        written.display(),
+        image.bytes.len() / 1024
+    );
 
     // The path alone on stdout, so this composes in a pipeline.
     println!("{}", written.display());
     Ok(())
+}
+
+/// Reads the pixel dimensions out of an encoded image.
+///
+/// Worth the forty lines because the output size is not always the size that was
+/// asked for, and on the local lane it is not always the size of the input
+/// either: an edit normalizes to roughly a megapixel, so a 1024x576 source comes
+/// back 1360x768. That was a surprise when measured, and a surprise is only
+/// acceptable once it is stated — so the size actually written gets reported.
+///
+/// Hand-rolled rather than pulling in an image crate, since this needs the first
+/// few bytes of a header and nothing else.
+pub fn image_dimensions(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
+    match mime {
+        // IHDR is always the first chunk, at a fixed offset.
+        "image/png" => {
+            let (w, h) = (bytes.get(16..20)?, bytes.get(20..24)?);
+            Some((
+                u32::from_be_bytes(w.try_into().ok()?),
+                u32::from_be_bytes(h.try_into().ok()?),
+            ))
+        }
+        // JPEG has no fixed offset: walk the marker segments to the frame header.
+        "image/jpeg" => {
+            let mut at = 2;
+            while at + 9 < bytes.len() {
+                if bytes[at] != 0xFF {
+                    at += 1;
+                    continue;
+                }
+                let marker = bytes[at + 1];
+                // Every SOFn carries the dimensions except the four that are not
+                // frame headers at all (DHT, JPG, DAC, and the RSTn range).
+                let is_frame = matches!(marker, 0xC0..=0xCF)
+                    && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+                if is_frame {
+                    let h = u16::from_be_bytes([bytes[at + 5], bytes[at + 6]]);
+                    let w = u16::from_be_bytes([bytes[at + 7], bytes[at + 8]]);
+                    return Some((u32::from(w), u32::from(h)));
+                }
+                let length = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) as usize;
+                at += 2 + length.max(2);
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Corrects a file extension that disagrees with what the provider actually
@@ -592,5 +650,41 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
     match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
         Some(stripped) => PathBuf::from(stripped),
         None => path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_dimensions_come_from_the_ihdr_chunk() {
+        // A minimal PNG header: signature, chunk length, "IHDR", then w/h.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1360u32.to_be_bytes());
+        png.extend_from_slice(&768u32.to_be_bytes());
+        assert_eq!(image_dimensions(&png, "image/png"), Some((1360, 768)));
+    }
+
+    #[test]
+    fn jpeg_dimensions_are_found_by_walking_to_the_frame_header() {
+        // SOI, then a JFIF APP0 to be skipped, then SOF0 carrying the size.
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x10]);
+        jpeg.extend_from_slice(&[0u8; 14]);
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        jpeg.extend_from_slice(&576u16.to_be_bytes()); // height precedes width
+        jpeg.extend_from_slice(&1024u16.to_be_bytes());
+        jpeg.extend_from_slice(&[0u8; 8]);
+        assert_eq!(image_dimensions(&jpeg, "image/jpeg"), Some((1024, 576)));
+    }
+
+    #[test]
+    fn truncated_or_unknown_data_reports_nothing_rather_than_guessing() {
+        assert_eq!(image_dimensions(&[0x89, b'P', b'N', b'G'], "image/png"), None);
+        assert_eq!(image_dimensions(&[0xFF, 0xD8], "image/jpeg"), None);
+        assert_eq!(image_dimensions(&[0; 64], "image/webp"), None);
     }
 }

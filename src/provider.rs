@@ -280,10 +280,9 @@ impl Capabilities {
             bail!(
                 "`{me}` cannot condition on reference images, so there is nothing \
                  for it to edit.\n\n\
-                 Editing on the local lane needs an uploaded image and a \
-                 reference-conditioning graph, which this provider does not build \
-                 yet. Use the `google` provider for now — `lucida edit` defaults \
-                 to it."
+                 Both providers currently support editing, so reaching this means \
+                 a provider was configured that does not. Generate from a prompt \
+                 instead, or use `google` or `comfyui`."
             );
         }
 

@@ -132,14 +132,55 @@ Two details worth keeping:
 C2PA manifest, checked the same way we checked Google's. The README's flat
 watermarking claim is now per-provider.
 
+### Editing on the local lane
+
+Implemented. The source is uploaded with `/upload/image` (multipart, over HTTP
+rather than by writing into the server's input directory, so a remote server
+still works), scaled onto the latent grid, VAE-encoded, and attached to the
+conditioning with `ReferenceLatent`. Repeating `--ref` chains further images.
+
+**The wiring worth knowing, because it looks like a bug:** the encoded source
+attaches to the *negative* conditioning as well as the positive. The Flux.2 edit
+blueprint does this, and the reason is that classifier-free guidance measures a
+difference between two branches — if only the positive branch sees the source,
+the difference is dominated by "there is an image here" rather than by the
+prompt. Both branches denoise the same picture; the prompt is what differs. It is
+covered by a test for exactly this reason.
+
+Dimensions come from `GetImageSize` on the server rather than being guessed
+client-side, so Lucida never has to decode the image itself. `--aspect` or
+`--size` overrides, which is how an edit reframes.
+
+**That does not mean the output matches the input, and assuming it did was
+wrong.** `GetImageSize` reads the *scaled* image, and the scale normalises to
+about one megapixel — so a 1024x576 source comes back 1360x768, upscaled.
+Aspect survives to within 0.4%, the drift being the 16-pixel grid.
+
+The first two edit tests both used a square source, where a 1024x1024 result is
+indistinguishable from the default, so the error survived them. It took a
+deliberately non-square source to expose it. Worth remembering as a testing
+lesson rather than a Flux one: a fixture that matches the default proves nothing
+about the code path that computes it.
+
+Exact preservation is not the fix. A 12 MP photograph cannot be rendered by this
+model, so some normalisation is unavoidable, and a rule that applies only
+sometimes is worse than one that always applies. Instead the size actually
+written is now reported — `image_dimensions` reads it back out of the PNG or
+JPEG header — so the behaviour is stated rather than discovered. `lucida edit`
+overwriting its input by default is what makes stating it necessary.
+
+Measured at ~460-500s against ~270s to generate at the same size and step count,
+the difference being the tokens the encoded source adds. Worth knowing before
+assuming an edit hangs — it is the same wait again, roughly doubled.
+
+**`references: Vec<String>` survived**, which was the open question. Chained
+whole-image references fit it exactly. What it still cannot express is a *mask* —
+"this region of this image" — so the structural gap the roadmap predicted is real
+but untouched, and inpainting (below) is where it will finally bite.
+
 **Still open on this lane**, in the order they matter:
 
-- **Editing.** `references` is declared `false` and rejected with an
-  explanation. It needs an uploaded image (`/upload/image`, multipart) and a
-  reference-conditioning graph — `VAEEncode` into `ReferenceLatent`, which the
-  Klein edit blueprint already shows. The nodes are all present on the server;
-  this is unfinished, not blocked.
-- **`--workflow` override.** Lucida ships one opinionated graph and no way to
+- **`--workflow` override.** Lucida ships two opinionated graphs and no way to
   supply your own. The compromise named below — maintained templates plus an
   override — is still the right one; only the first half exists.
 - **Non-Flux model families.** The graph hardcodes Flux.2's node types

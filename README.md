@@ -97,7 +97,7 @@ Two, and the difference is not only quality:
 | Aspect ratio | 10 named ratios | Any, rounded to 16px |
 | Seed | **No** — results are not reproducible | Yes |
 | Negative prompt | No | Yes |
-| Reference images / editing | Yes | Not yet |
+| Reference images / editing | Yes | Yes |
 | Output carries | SynthID + C2PA, no opt-out | **Nothing** |
 
 The provider is inferred from the model id, so `--model klein` reaches ComfyUI
@@ -188,8 +188,35 @@ API, so nothing needs importing into the UI. It asks the server which model file
 exist rather than assuming any particular install, and `--model klein` resolves
 to whatever Flux.2 diffusion model, text encoder and VAE that server reports.
 
-The result is fetched back over HTTP (`/view`), not read off disk, so a ComfyUI
-in a container or on another machine works with no shared mount.
+Images move over HTTP in both directions — uploaded with `/upload/image`, results
+fetched with `/view` — rather than through the filesystem, so a ComfyUI in a
+container or on another machine works with no shared mount.
+
+Editing works here too:
+
+```console
+$ lucida edit hero.png "make the sky overcast" --provider comfyui
+```
+
+The source is uploaded, encoded, and attached to the conditioning. Repeating
+`--ref` chains additional images, each adding to what the model is conditioned
+on.
+
+> **An edit keeps the source's aspect ratio, not its pixel dimensions.** The
+> result is normalised to roughly one megapixel — the resolution Flux.2 actually
+> works at — so a `1024×576` source comes back `1360×768`. It can upscale as
+> readily as downscale. Aspect is preserved to within about half a percent,
+> the drift coming from rounding onto the 16-pixel latent grid.
+>
+> This matters because `lucida edit` overwrites its input by default: editing a
+> file in place can change its dimensions. Pass `--out` to write elsewhere, or
+> `--aspect`/`--size` to state the geometry you want. Lucida prints the size it
+> actually wrote, so this is never silent.
+>
+> Exact preservation is deliberately not offered: a 12 MP photograph is not
+> something this model can render, so *some* normalisation is unavoidable and a
+> rule that silently applies only sometimes would be worse than one that always
+> applies.
 
 Requires a Flux.2 checkpoint — diffusion model, text encoder and VAE — installed
 where ComfyUI can see it. `lucida models --provider comfyui` lists what it found,
@@ -197,9 +224,11 @@ and a missing file produces a message naming the files the server actually has
 rather than a validation dump.
 
 > **Renders are slow, and the first one is slowest.** Measured on a Radeon 8060S
-> (gfx1151): 1024×1024, 20 steps, Flux.2 Klein 9B — **~270 seconds**, most of it
-> loading 33 GB of weights. If ComfyUI runs with `--cache-none`, every render
-> pays that cost rather than just the first.
+> (gfx1151), 1024×1024 at 20 steps with Flux.2 Klein 9B: **~270 seconds** to
+> generate, **~460 seconds** to edit. Much of that is loading 33 GB of weights,
+> and if ComfyUI runs with `--cache-none` every render pays it rather than just
+> the first. Editing costs more on top because the encoded source adds tokens for
+> the model to attend over.
 
 ## Use as an MCP server
 
