@@ -254,6 +254,12 @@ SynthID watermark is designed to survive that. Treat "watermark-free" claims as
 false, including any `add_watermark` config field you may encounter — that
 belongs to Vertex AI and does nothing here.
 
+## Roadmap
+
+Google is the only provider today. [ROADMAP.md](ROADMAP.md) covers the intended
+others — OpenAI, Flux, local ComfyUI, Firefly, and why Midjourney is deliberately
+excluded for now — along with the abstraction work they all depend on.
+
 ## Licence
 
 Apache-2.0.
