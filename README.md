@@ -132,6 +132,26 @@ $ lucida video "slow push in, the light shifts to gold" --image still.jpg
 Video is billed **per second of output** and is far more expensive than images,
 which is why the fast model is the default rather than the standard one.
 
+Measured behaviour, all on `veo-lite`:
+
+| | Result |
+|---|---|
+| Clip length | 8 seconds, 24 fps — not currently adjustable |
+| Default resolution | 1280×720 |
+| `--resolution 1080p` | 1920×1080, ~4× the file size, ~50% longer to render |
+| `--aspect 9:16` | 720×1280 vertical |
+| Audio | **Every clip carries an AAC audio track** — Veo generates sound, not just picture |
+| Render time | 35–95 seconds for the above |
+
+Two things worth knowing before you spend money on a long render:
+
+- **Veo generates audio.** If you want a silent asset — a looping background, a
+  hero animation — strip the track afterwards; there is no flag to suppress it.
+- **With `--image`, the source aspect wins.** Animating a 1:1 still while asking
+  for `--aspect 16:9` returns a 16:9 frame with the square image *pillarboxed
+  inside black bars*, not cropped or extended. Match `--aspect` to your source,
+  or crop the still first.
+
 Unlike images, Veo runs as a long-running operation: `lucida` starts the render,
 polls with backoff while reporting elapsed time, then downloads the result. A
 short clip takes roughly a minute. Passing `--image` animates an existing still
