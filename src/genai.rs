@@ -100,6 +100,15 @@ impl Client {
         Ok(Self { api_key, http })
     }
 
+    /// Shared HTTP client, for sibling modules that speak other endpoints.
+    pub(crate) fn http(&self) -> &reqwest::blocking::Client {
+        &self.http
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.api_key
+    }
+
     pub fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
         let model = resolve_model(&req.model);
 
@@ -258,7 +267,7 @@ fn extract_image(payload: &Value) -> Result<GeneratedImage> {
 /// Turns the API's raw error bodies into something worth reading. The 429 case is
 /// the one that matters: on a free-tier project image generation is not rate
 /// limited, it is entirely unavailable, and the stock message does not say so.
-fn explain_error(status: u16, body: &str) -> String {
+pub(crate) fn explain_error(status: u16, body: &str) -> String {
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let message = parsed["error"]["message"].as_str().unwrap_or(body).trim();
 

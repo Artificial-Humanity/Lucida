@@ -8,11 +8,13 @@
 
 mod genai;
 mod mcp;
+mod video;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use genai::{Client, DEFAULT_MODEL, ImageRequest};
 use std::path::{Path, PathBuf};
+use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 
 #[derive(Parser)]
 #[command(
@@ -87,6 +89,36 @@ enum Command {
         reference: Vec<String>,
     },
 
+    /// Generate a video with Veo. Renders take minutes and bill per second.
+    Video {
+        /// What to film
+        prompt: String,
+
+        /// Where to write the video
+        #[arg(short, long, default_value = "video.mp4")]
+        out: PathBuf,
+
+        /// A still image to animate, making this image-to-video
+        #[arg(short, long)]
+        image: Option<String>,
+
+        /// Aspect ratio: 16:9 or 9:16
+        #[arg(short, long)]
+        aspect: Option<String>,
+
+        /// Resolution, e.g. 720p or 1080p
+        #[arg(short, long)]
+        resolution: Option<String>,
+
+        /// What to keep out of the shot
+        #[arg(short, long)]
+        negative: Option<String>,
+
+        /// Model id or alias: veo, veo-standard, veo-lite
+        #[arg(short, long, default_value = DEFAULT_VIDEO_MODEL)]
+        model: String,
+    },
+
     /// List image-capable models this API key can see (free, spends nothing)
     Models,
 
@@ -153,6 +185,37 @@ fn run() -> Result<()> {
             out,
         ),
 
+        Command::Video {
+            prompt,
+            out,
+            image,
+            aspect,
+            resolution,
+            negative,
+            model,
+        } => {
+            let request = VideoRequest {
+                prompt,
+                model,
+                aspect_ratio: aspect,
+                resolution,
+                negative_prompt: negative,
+                image,
+            };
+            let resolved = video::resolve_video_model(&request.model);
+            eprintln!("Rendering with {resolved}…");
+
+            let bytes = Client::from_env()?.generate_video(&request)?;
+            let written = write_image(&out, &bytes)?;
+            eprintln!(
+                "Wrote {} ({} MB)",
+                written.display(),
+                bytes.len() / 1_048_576
+            );
+            println!("{}", written.display());
+            Ok(())
+        }
+
         Command::Edit {
             image,
             prompt,
@@ -197,7 +260,17 @@ fn execute(request: ImageRequest, out: PathBuf) -> Result<()> {
     }
 
     let image = Client::from_env()?.generate(&request)?;
-    let written = write_image(&out, &image.bytes)?;
+
+    let destination = correct_extension(&out, &image.mime_type);
+    if destination != out {
+        eprintln!(
+            "note: the model returned {}, so writing {} rather than {}",
+            image.mime_type,
+            destination.display(),
+            out.display()
+        );
+    }
+    let written = write_image(&destination, &image.bytes)?;
 
     if let Some(commentary) = &image.commentary {
         if !commentary.is_empty() {
@@ -209,6 +282,39 @@ fn execute(request: ImageRequest, out: PathBuf) -> Result<()> {
     // The path alone on stdout, so this composes in a pipeline.
     println!("{}", written.display());
     Ok(())
+}
+
+/// Corrects a file extension that disagrees with what the API actually returned.
+///
+/// Gemini decides the output format itself — usually JPEG, whatever the request
+/// asked for — so `-o icon.png` would otherwise leave a file named `.png` holding
+/// JPEG bytes. That passes unnoticed until some downstream tool rejects it. The
+/// real path is what goes to stdout, so scripts capturing it stay correct.
+pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
+    let expected = match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "video/mp4" => "mp4",
+        _ => return path.to_path_buf(),
+    };
+
+    let actual = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+
+    let matches = match actual.as_deref() {
+        Some("jpg" | "jpeg") => expected == "jpg",
+        Some(other) => other == expected,
+        None => false,
+    };
+
+    if matches {
+        path.to_path_buf()
+    } else {
+        path.with_extension(expected)
+    }
 }
 
 /// Writes `bytes` to `path`, creating parent directories, and returns the

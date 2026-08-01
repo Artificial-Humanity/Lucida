@@ -1,7 +1,7 @@
 # lucida
 
-Generate and edit images with Google's Gemini image models — as a CLI, or as an
-MCP server so coding agents can make their own assets.
+Generate and edit images and video with Google's Gemini and Veo models — as a
+CLI, or as an MCP server so coding agents can make their own assets.
 
 Named for the [camera lucida](https://en.wikipedia.org/wiki/Camera_lucida), the
 optical device that let artists trace what they saw onto paper.
@@ -10,7 +10,9 @@ optical device that let artists trace what they saw onto paper.
 $ lucida generate "a minimalist e-ink reading icon, flat vector, single weight" \
     --out public/icon.png --aspect 1:1
 
-$ lucida edit hero.png "replace the background with transparent alpha"
+$ lucida edit hero.png "replace the background with a warmer gradient"
+
+$ lucida video "a red maple leaf drifting down against white" --out clip.mp4
 
 $ lucida models
 ```
@@ -99,6 +101,29 @@ whole family shuts down on **2026-08-17**. `lucida` detects an Imagen id and
 explains rather than failing obscurely. Note that `imagen-3.0-*` ids found in
 older blog posts and generated code are already retired and return 404.
 
+## Video
+
+```console
+$ lucida video "a red maple leaf drifting down against white" \
+    --out clip.mp4 --aspect 16:9 --model veo-lite
+
+$ lucida video "slow push in, the light shifts to gold" --image still.jpg
+```
+
+| Alias | Model |
+|---|---|
+| `veo`, `veo-fast` | `veo-3.1-fast-generate-preview` — the default |
+| `veo-standard` | `veo-3.1-generate-preview` |
+| `veo-lite` | `veo-3.1-lite-generate-preview` — cheapest |
+
+Video is billed **per second of output** and is far more expensive than images,
+which is why the fast model is the default rather than the standard one.
+
+Unlike images, Veo runs as a long-running operation: `lucida` starts the render,
+polls with backoff while reporting elapsed time, then downloads the result. A
+short clip takes roughly a minute. Passing `--image` animates an existing still
+instead of generating from text alone.
+
 ## Options
 
 Aspect ratios: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`,
@@ -112,17 +137,41 @@ printed to stdout alone, so it composes:
 $ open "$(lucida generate "a sunset" -o /tmp/x.png)"
 ```
 
+**Extensions are corrected to match reality.** Gemini picks its own output format
+— usually JPEG regardless of what you asked for — so `-o icon.png` that returns
+JPEG is written as `icon.jpg`, with a note on stderr. A file named `.png` holding
+JPEG bytes passes unnoticed until something downstream rejects it. Since the real
+path is what goes to stdout, `$(lucida generate …)` stays correct either way.
+
 ## Watermarking
 
-Every image from every Gemini image model carries an invisible
-[SynthID](https://deepmind.google/technologies/synthid/) watermark. There is no
-opt-out, on any tier.
+Everything generated here — images and video alike — is marked as AI-generated.
+There is no opt-out, on any tier, including paid API access.
 
-The visible "sparkle" glyph is a consumer Gemini app feature and is *not* applied
-to API output — so these images look clean, which is not the same as being
-watermark-free. Any provenance detector will still identify them as generated.
-Claims to the contrary are wrong, including a `add_watermark` field you may see
-on some shared config types; it belongs to Vertex AI and does nothing here.
+Two different things get conflated, which is why people reasonably believe
+otherwise:
+
+- **The visible "sparkle" glyph** is a consumer Gemini *app* feature, and paid
+  app tiers remove it. It is not applied to API output at all. So these files
+  genuinely look clean.
+- **Invisible provenance** rides along regardless: an embedded
+  [SynthID](https://deepmind.google/technologies/synthid/) watermark plus a
+  [C2PA](https://c2pa.org/) manifest asserting
+  `digitalSourceType: trainedAlgorithmicMedia`, the IPTC code for AI-generated
+  media.
+
+Looking clean is not the same as being unmarked. Verified directly against this
+tool's own paid-tier output — both the JPEG and the MP4 contain `C2PA`,
+`SynthID`, and `trainedAlgorithmicMedia` strings in the raw bytes:
+
+```console
+$ grep -aoiE "c2pa|synthid|trainedAlgorithmicMedia" output.jpg | sort -u
+```
+
+Re-encoding an image (opening and re-exporting it) strips the C2PA metadata; the
+SynthID watermark is designed to survive that. Treat "watermark-free" claims as
+false, including any `add_watermark` config field you may encounter — that
+belongs to Vertex AI and does nothing here.
 
 ## Licence
 

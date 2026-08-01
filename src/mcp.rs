@@ -164,7 +164,14 @@ fn call_tool(params: &Value) -> Result<Value> {
 fn run(request: &ImageRequest, output_path: &str) -> Result<String> {
     let client = Client::from_env()?;
     let image = client.generate(request)?;
-    let written = crate::write_image(output_path, &image.bytes)?;
+
+    // Gemini picks the output format itself, so the requested extension may not
+    // match the bytes. Correct it and say so, rather than handing back a file
+    // whose name lies about its contents.
+    let requested = std::path::Path::new(output_path);
+    let destination = crate::correct_extension(requested, &image.mime_type);
+    let renamed = destination != requested;
+    let written = crate::write_image(&destination, &image.bytes)?;
 
     let mut text = format!(
         "Wrote {} ({} KB, {})",
@@ -172,6 +179,14 @@ fn run(request: &ImageRequest, output_path: &str) -> Result<String> {
         image.bytes.len() / 1024,
         image.mime_type
     );
+    if renamed {
+        text.push_str(&format!(
+            "\n\nNote: the model returned {}, so the extension was corrected \
+             (requested {}). Use the path above, not the requested one.",
+            image.mime_type,
+            requested.display()
+        ));
+    }
     if let Some(commentary) = &image.commentary {
         if !commentary.is_empty() {
             text.push_str(&format!("\n\nModel commentary: {commentary}"));
