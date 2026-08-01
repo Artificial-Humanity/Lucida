@@ -76,10 +76,23 @@ claude mcp add --scope user --env GOOGLE_API_KEY='${GOOGLE_API_KEY}' \
 
 Verify with `claude mcp list`, which should report `✔ Connected`.
 
-The server exposes one tool, `generate_image`, taking `prompt`, `output_path`,
-and optionally `aspect_ratio`, `size`, `model`, and `reference_images`. Failures
-come back as tool content rather than protocol errors, so the agent can read the
-message and adjust instead of the call simply dying.
+Three tools are exposed:
+
+| Tool | Purpose |
+|---|---|
+| `generate_image` | Prompt to image, or image editing via `reference_images` |
+| `start_video` | Begins a Veo render, returns an operation id immediately |
+| `check_video` | Polls that operation; downloads it once finished |
+
+Video is split in two deliberately. A Veo render takes minutes — long enough that
+a single blocking tool call would likely hit the client's timeout and abandon a
+render you had already paid for. Starting and polling separately keeps every call
+fast, and because the operation id is just a string, a render started by an agent
+can be recovered from the shell with `lucida check <operation>` even if the agent
+session dies.
+
+Failures come back as tool content rather than protocol errors, so the agent
+reads the message and adapts instead of the call simply dying.
 
 ## Models
 
@@ -123,6 +136,13 @@ Unlike images, Veo runs as a long-running operation: `lucida` starts the render,
 polls with backoff while reporting elapsed time, then downloads the result. A
 short clip takes roughly a minute. Passing `--image` animates an existing still
 instead of generating from text alone.
+
+If a wait is interrupted, nothing is lost — the render continues server-side and
+can be collected later by operation id:
+
+```console
+$ lucida check models/veo-3.1-lite-generate-preview/operations/abc123 -o clip.mp4
+```
 
 ## Options
 

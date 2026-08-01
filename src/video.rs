@@ -43,10 +43,48 @@ pub struct VideoRequest {
     pub image: Option<String>,
 }
 
-impl Client {
-    pub fn generate_video(&self, req: &VideoRequest) -> Result<Vec<u8>> {
-        let model = resolve_video_model(&req.model);
+/// One poll of a render in flight.
+pub enum VideoStatus {
+    /// Still working. Carries whatever progress text the API offered.
+    Pending,
+    Done(Vec<u8>),
+}
 
+impl Client {
+    /// Blocking generate: start, poll to completion, download. Used by the CLI,
+    /// where waiting is fine. The MCP server drives `start_video`/`poll_video`
+    /// separately, because a render outlasts a tool call.
+    pub fn generate_video(&self, req: &VideoRequest) -> Result<Vec<u8>> {
+        let operation = self.start_video(req)?;
+        eprintln!("Render started; this usually takes 1-3 minutes.");
+        let done = self.await_operation(&operation)?;
+        self.fetch_video(&done)
+    }
+
+    /// Kicks off a render and returns the operation name to poll.
+    pub fn start_video(&self, req: &VideoRequest) -> Result<String> {
+        let model = resolve_video_model(&req.model);
+        let body = self.build_video_body(req)?;
+        self.start_operation(&model, &body)
+    }
+
+    /// Checks a render once, without blocking.
+    pub fn poll_video(&self, operation: &str) -> Result<VideoStatus> {
+        let payload = self.poll_once(operation)?;
+
+        if let Some(error) = payload.get("error") {
+            let message = error["message"].as_str().unwrap_or("unknown error");
+            bail!("the render failed: {message}");
+        }
+
+        if payload["done"].as_bool().unwrap_or(false) {
+            Ok(VideoStatus::Done(self.fetch_video(&payload)?))
+        } else {
+            Ok(VideoStatus::Pending)
+        }
+    }
+
+    fn build_video_body(&self, req: &VideoRequest) -> Result<Value> {
         let mut instance = serde_json::Map::new();
         instance.insert("prompt".into(), json!(req.prompt));
         if let Some(path) = &req.image {
@@ -76,15 +114,10 @@ impl Client {
             parameters.insert("negativePrompt".into(), json!(v));
         }
 
-        let body = json!({
+        Ok(json!({
             "instances": [Value::Object(instance)],
             "parameters": Value::Object(parameters),
-        });
-
-        let operation = self.start_operation(&model, &body)?;
-        eprintln!("Render started; this usually takes 1-3 minutes.");
-        let result = self.await_operation(&operation)?;
-        self.fetch_video(&result)
+        }))
     }
 
     fn start_operation(&self, model: &str, body: &Value) -> Result<String> {
@@ -112,10 +145,28 @@ impl Client {
             .ok_or_else(|| anyhow!("no operation name in response: {payload}"))
     }
 
+    /// A single non-blocking check of an operation.
+    fn poll_once(&self, operation: &str) -> Result<Value> {
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/{operation}");
+        let response = self
+            .http()
+            .get(&url)
+            .header("x-goog-api-key", self.key())
+            .send()
+            .context("polling the video operation")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("{}", explain_error(status.as_u16(), &text));
+        }
+
+        response.json().context("parsing poll response")
+    }
+
     /// Polls until the operation reports done. Veo renders are slow and the wait
     /// is unpredictable, so this backs off rather than hammering.
     fn await_operation(&self, operation: &str) -> Result<Value> {
-        let url = format!("https://generativelanguage.googleapis.com/v1beta/{operation}");
         let started = Instant::now();
         let deadline = Duration::from_secs(900);
         let mut interval = Duration::from_secs(5);
@@ -123,8 +174,8 @@ impl Client {
         loop {
             if started.elapsed() > deadline {
                 bail!(
-                    "gave up after {} minutes; the operation may still finish. \
-                     Poll it directly at {url}",
+                    "gave up after {} minutes; the render may still finish. \
+                     Poll it with: lucida check {operation}",
                     deadline.as_secs() / 60
                 );
             }
@@ -132,20 +183,7 @@ impl Client {
             std::thread::sleep(interval);
             interval = (interval * 2).min(Duration::from_secs(30));
 
-            let response = self
-                .http()
-                .get(&url)
-                .header("x-goog-api-key", self.key())
-                .send()
-                .context("polling the video operation")?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let text = response.text().unwrap_or_default();
-                bail!("{}", explain_error(status.as_u16(), &text));
-            }
-
-            let payload: Value = response.json().context("parsing poll response")?;
+            let payload = self.poll_once(operation)?;
 
             if let Some(error) = payload.get("error") {
                 let message = error["message"].as_str().unwrap_or("unknown error");
@@ -166,7 +204,7 @@ impl Client {
     /// The payload nests differently depending on model and API version, and it
     /// may carry either a URL or inline bytes, so this searches the tree for
     /// whichever turns up rather than hardcoding one path.
-    fn fetch_video(&self, done: &Value) -> Result<Vec<u8>> {
+    pub(crate) fn fetch_video(&self, done: &Value) -> Result<Vec<u8>> {
         if let Some(encoded) = find_key(done, "bytesBase64Encoded").and_then(|v| v.as_str()) {
             return STANDARD
                 .decode(encoded)

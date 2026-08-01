@@ -119,6 +119,16 @@ enum Command {
         model: String,
     },
 
+    /// Resume a video render by operation id, e.g. after a timeout
+    Check {
+        /// The operation id reported when the render started
+        operation: String,
+
+        /// Where to write the video once it is ready
+        #[arg(short, long, default_value = "video.mp4")]
+        out: PathBuf,
+    },
+
     /// List image-capable models this API key can see (free, spends nothing)
     Models,
 
@@ -184,6 +194,25 @@ fn run() -> Result<()> {
             },
             out,
         ),
+
+        Command::Check { operation, out } => {
+            match Client::from_env()?.poll_video(&operation)? {
+                video::VideoStatus::Pending => {
+                    eprintln!("Still rendering. Try again in half a minute.");
+                    Ok(())
+                }
+                video::VideoStatus::Done(bytes) => {
+                    let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
+                    eprintln!(
+                        "Wrote {} ({:.1} MB)",
+                        written.display(),
+                        bytes.len() as f64 / 1_048_576.0
+                    );
+                    println!("{}", written.display());
+                    Ok(())
+                }
+            }
+        }
 
         Command::Video {
             prompt,
