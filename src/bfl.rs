@@ -88,6 +88,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         aspect: AspectSupport::Free {
             multiple_of: PIXEL_GRID,
         },
+        size: true,
         seed: true,
         // Measured, not assumed: no FLUX endpoint takes one.
         negative_prompt: false,

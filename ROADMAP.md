@@ -200,8 +200,9 @@ but untouched, and inpainting (below) is where it will finally bite.
 | ~~Local (ComfyUI)~~ | — | **Done; see §0** |
 | ~~Flux (Black Forest Labs)~~ | — | **Done; see below** |
 | **OpenAI** | Documented REST API, mask-based editing | None significant, but a one-off — shares little with the others |
-| **Adobe Firefly** | Licensed training data and enterprise indemnification | Entitlements and credential complexity |
-| **Midjourney** | Distinctive aesthetic | No official general API; unofficial ones breach ToS |
+| **Stability AI** | Pay-as-you-go credits, no subscription | Verify which product; Brand Studio is subscription-only |
+| ~~Adobe Firefly~~ | — | **Ruled out: subscription only** |
+| ~~Midjourney~~ | — | **Ruled out: subscription only, and no official API** |
 
 ### Local — ComfyUI (delivered; what the bet was worth)
 
@@ -335,30 +336,36 @@ structural gap worth discovering deliberately rather than late. Also handles
 explicit pixel sizes rather than named ratios, and a quality parameter with its
 own semantics.
 
-### Adobe Firefly
+### Adobe Firefly — ruled out
 
-The distinguishing feature is provenance and indemnification: trained on licensed
-content, with enterprise assurances about commercial use. For a studio publishing
-assets under its own name, that is a substantive difference from every other
-option here, not a marketing line.
+**Not implementing.** Firefly has no pay-as-you-go tier: reaching it means an
+Adobe subscription, and buying one purely to add a provider is not a trade worth
+making. Owner decision, 2026-08-01.
 
-The cost is access complexity — Firefly Services sits behind Adobe's
-authentication and entitlement model, which is heavier than an API key in an
-environment variable. Worth confirming what a single-developer account can
-actually reach before designing anything.
+The appeal was real and is worth recording so the decision is understood rather
+than merely remembered: Firefly is trained on licensed content and comes with
+enterprise indemnification, which for a studio publishing under its own name is a
+substantive difference rather than a marketing line. That does not change the
+answer. If Adobe ever ships metered access, this is worth reopening — and the
+indemnification argument is why it would be.
 
-### Midjourney
+### Midjourney — ruled out
 
-Aesthetically the most distinctive and practically the most difficult. There has
-been no general-availability public API; access has historically run through
-Discord, and the third-party "APIs" that appear in search results work by
-automating accounts in ways that violate the terms of service.
+**Not implementing**, now for two independent reasons, either of which is
+sufficient.
 
-**Not worth implementing against an unofficial interface.** It would break
-without warning, could get an account banned, and would make Lucida complicit in
-a ToS breach. Revisit only if an official API becomes generally available. Until
-then this entry exists to record the decision, so it does not get re-litigated
-every few months.
+The commercial one, and the simpler: subscription only, no metered access. Same
+answer as Firefly, same reasoning. Owner decision, 2026-08-01.
+
+The technical one, recorded earlier and unchanged: there has never been a
+general-availability public API. Access has run through Discord, and the
+third-party "APIs" in search results work by automating accounts in ways that
+violate the terms of service. Implementing against one would break without
+warning, could get an account banned, and would make Lucida complicit in a ToS
+breach.
+
+Revisit only if an official, metered API appears. Both objections would have to
+fall, not one.
 
 ---
 

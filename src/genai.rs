@@ -129,6 +129,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     provider: "google",
     // Ten named ratios and nothing between them.
     aspect: AspectSupport::Named(ASPECT_RATIOS),
+    // 1K / 2K / 4K tiers.
+    size: true,
     // Google exposes no seed on any image model, so nothing here can express
     // "give me that result again".
     seed: false,

@@ -564,6 +564,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     aspect: AspectSupport::Free {
         multiple_of: PIXEL_GRID,
     },
+    size: true,
     seed: true,
     negative_prompt: true,
     references: true,

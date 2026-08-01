@@ -32,6 +32,7 @@
 
 use crate::bfl;
 use crate::comfy;
+use crate::stability;
 use crate::genai::{self, DEFAULT_MODEL};
 use crate::provider::{
     Aspect, AspectSupport, Backend, ImageProvider, ImageRequest, Size, capabilities_for,
@@ -147,7 +148,7 @@ fn image_schema() -> Value {
                 },
                 "provider": {
                     "type": "string",
-                    "enum": ["google", "comfyui", "bfl"],
+                    "enum": ["google", "comfyui", "bfl", "stability"],
                     "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
                 },
                 "model": {
@@ -322,6 +323,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::Google => Box::new(genai::Client::from_env()?),
         Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
         Backend::Bfl => Box::new(bfl::Client::from_env()?),
+        Backend::Stability => Box::new(stability::Client::from_env()?),
     })
 }
 
@@ -347,6 +349,7 @@ fn generate_image(args: &Value) -> Result<String> {
             Backend::Google => DEFAULT_MODEL,
             Backend::ComfyUi => "klein",
             Backend::Bfl => bfl::DEFAULT_MODEL,
+            Backend::Stability => stability::DEFAULT_MODEL,
         })
         .to_string();
 

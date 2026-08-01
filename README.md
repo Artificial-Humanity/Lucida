@@ -88,20 +88,25 @@ from — never a value — so its output is safe to paste into a bug report.
 
 ## Providers
 
-Three, and the differences are not only quality:
+Four, and the differences are not only quality:
 
-| | `google` | `comfyui` | `bfl` |
-|---|---|---|---|
-| Models | Gemini image models | Whatever is installed locally (Flux.2 tested) | Hosted FLUX |
-| Credential | API key, billing required | None | API key, paid |
-| Cost | Per image | Free | ~3 credits / image |
-| Speed | Seconds | **Minutes** | Seconds |
-| Aspect ratio | 10 named ratios | Any, /16px | Any, /32px |
-| Seed | **No** | Yes | Yes |
-| Negative prompt | No | **Yes** | No |
-| Reference images / editing | Yes | Yes | Yes (FLUX.2 + Kontext) |
-| Steps / guidance | No | Yes | Only `flux-2-flex`, `flux-dev` |
-| Output carries | SynthID + C2PA | **Nothing** | C2PA only |
+| | `google` | `comfyui` | `bfl` | `stability` |
+|---|---|---|---|---|
+| Models | Gemini | Local (Flux.2) | Hosted FLUX | Stable Image |
+| Credential | API key, billing | None | API key, paid | API key, paid |
+| Cost | Per image | Free | ~3 credits | ~2 credits |
+| Speed | Seconds | **Minutes** | Seconds | Seconds |
+| Aspect ratio | 10 named | Any, /16px | Any, /32px | 9 named (a *different* 9) |
+| Output size | Tiers | Pixels | Pixels | **Not adjustable** |
+| Seed | **No** | Yes | Yes | Yes |
+| Negative prompt | No | **Yes** | No | **Yes** |
+| Editing | Yes | Yes | Yes | Not yet (needs masks) |
+| Steps / guidance | No | Yes | `flux-2-flex`, `flux-dev` | No |
+| Output carries | SynthID + C2PA | **Nothing** | C2PA only | C2PA only |
+
+Two of them use *named* aspect ratios and **disagree about which** — Google has
+`4:3`, Stability has `9:21`, neither has the other's. That is why the list is
+published per provider rather than shared.
 
 **Capabilities vary per *model* on `bfl`**, which no other provider does — `steps`
 and `guidance` exist on `flux-2-flex` and `flux-dev` and nowhere else in the
@@ -498,6 +503,7 @@ both halves were verified in the raw bytes.**
 |---|---|---|
 | `google` (images and video) | SynthID watermark + C2PA manifest | **Yes** — SynthID is in the pixels |
 | `bfl` | C2PA manifest only, no pixel watermark | No — metadata only |
+| `stability` | C2PA manifest only, no pixel watermark | No — metadata only |
 | `comfyui` | Nothing | — |
 
 That middle row is the one worth reading twice. Hosted FLUX **is** marked: a

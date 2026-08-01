@@ -253,6 +253,13 @@ impl Provenance {
 pub struct Capabilities {
     pub provider: &'static str,
     pub aspect: AspectSupport,
+    /// Whether the output size can be chosen at all.
+    ///
+    /// A late addition, and a reminder that "what varies between providers" is
+    /// not knowable up front: Stability exposes `aspect_ratio` and *no*
+    /// dimensions whatsoever, so `--size` there is not a value out of range but
+    /// a concept the API does not have. Without this it was silently dropped.
+    pub size: bool,
     pub seed: bool,
     pub negative_prompt: bool,
     pub references: bool,
@@ -269,6 +276,18 @@ impl Capabilities {
     /// as the `veo-lite` negative-prompt guard, which earned its keep.
     pub fn check(&self, req: &ImageRequest) -> Result<()> {
         let me = self.provider;
+
+        if req.size.is_some() && !self.size {
+            bail!(
+                "`{me}` does not let you choose the output size, so `--size` cannot \
+                 be honoured.\n\n\
+                 The size is fixed by the provider and follows from the shape you \
+                 ask for — `--aspect 16:9` on stability returns 2016x1152, for \
+                 instance. Use `--aspect` to control the shape, and `comfyui` or \
+                 `bfl` if the pixel count itself matters. Lucida reports the size \
+                 it actually wrote."
+            );
+        }
 
         if req.seed.is_some() && !self.seed {
             bail!(
@@ -387,6 +406,7 @@ pub fn capabilities_for(backend: Backend, model: &str) -> Capabilities {
         Backend::Google => crate::genai::CAPABILITIES,
         Backend::ComfyUi => crate::comfy::CAPABILITIES,
         Backend::Bfl => crate::bfl::capabilities(model),
+        Backend::Stability => crate::stability::capabilities(model),
     }
 }
 
@@ -396,6 +416,7 @@ pub enum Backend {
     Google,
     ComfyUi,
     Bfl,
+    Stability,
 }
 
 impl Backend {
@@ -404,7 +425,10 @@ impl Backend {
             "google" | "gemini" => Ok(Self::Google),
             "comfyui" | "comfy" | "local" => Ok(Self::ComfyUi),
             "bfl" | "flux" | "blackforestlabs" => Ok(Self::Bfl),
-            other => bail!("unknown provider `{other}`. Known providers: google, comfyui, bfl"),
+            "stability" | "stabilityai" | "sai" => Ok(Self::Stability),
+            other => bail!(
+                "unknown provider `{other}`. Known providers: google, comfyui, bfl, stability"
+            ),
         }
     }
 
@@ -413,10 +437,16 @@ impl Backend {
             Self::Google => "google",
             Self::ComfyUi => "comfyui",
             Self::Bfl => "bfl",
+            Self::Stability => "stability",
         }
     }
 
-    pub const ALL: &'static [Backend] = &[Backend::Google, Backend::ComfyUi, Backend::Bfl];
+    pub const ALL: &'static [Backend] = &[
+        Backend::Google,
+        Backend::ComfyUi,
+        Backend::Bfl,
+        Backend::Stability,
+    ];
 }
 
 /// Guesses the backend from a model id, so `--provider` stays optional.
@@ -431,6 +461,9 @@ pub fn infer_backend(model: &str) -> Backend {
 
     if crate::comfy::MODEL_ALIASES.iter().any(|(a, _)| *a == key) {
         return Backend::ComfyUi;
+    }
+    if crate::stability::MODEL_ALIASES.iter().any(|(a, _)| *a == key) {
+        return Backend::Stability;
     }
     if crate::bfl::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
         || crate::bfl::KNOWN_MODELS.contains(&key.as_str())
@@ -509,6 +542,7 @@ mod tests {
         let caps = Capabilities {
             provider: "google",
             aspect: AspectSupport::Named(&["1:1"]),
+            size: true,
             seed: false,
             negative_prompt: false,
             references: true,
@@ -522,6 +556,28 @@ mod tests {
         };
         let error = caps.check(&req).unwrap_err().to_string();
         assert!(error.contains("comfyui"), "the message must name a way forward: {error}");
+    }
+
+    /// Stability is the only provider with no size control, and `--size` there
+    /// would otherwise be silently dropped — the failure this design exists to
+    /// prevent, found only because the API turned out to have no width or height
+    /// field at all.
+    #[test]
+    fn a_provider_without_size_control_rejects_size() {
+        let caps = capabilities_for(Backend::Stability, "core");
+        assert!(!caps.size);
+        let req = ImageRequest {
+            size: Some(Size::TWO_K),
+            ..Default::default()
+        };
+        let error = caps.check(&req).unwrap_err().to_string();
+        assert!(error.contains("--size"));
+        assert!(error.contains("--aspect"), "must name what it does support");
+
+        // The others all take one.
+        for backend in [Backend::Google, Backend::ComfyUi, Backend::Bfl] {
+            assert!(capabilities_for(backend, "").size, "{backend:?} should take a size");
+        }
     }
 
     #[test]

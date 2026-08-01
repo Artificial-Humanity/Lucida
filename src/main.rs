@@ -16,6 +16,7 @@ mod config;
 mod genai;
 mod mcp;
 mod provider;
+mod stability;
 mod video;
 
 use anyhow::{Context, Result};
@@ -179,8 +180,8 @@ enum Command {
         #[arg(long)]
         init: bool,
 
-        /// Set one setting, reading its value from stdin. Keeps the secret out
-        /// of your shell history: `pbpaste | lucida config --set BFL_API_KEY`
+        /// Set one setting. Prompts at a terminal, or reads a pipe:
+        /// `pbpaste | lucida config --set BFL_API_KEY`
         #[arg(long, value_name = "NAME")]
         set: Option<String>,
     },
@@ -405,16 +406,48 @@ fn set_config(name: &str) -> Result<()> {
         );
     }
 
+    // Two ways in, and the difference is worth handling rather than making the
+    // user absorb it.
+    //
+    // Piped, the whole of stdin is the value: reading to EOF is the only correct
+    // thing, since a key could in principle contain a newline and the writer
+    // decides where it ends.
+    //
+    // At a terminal there is no writer to decide, so reading to EOF means
+    // demanding Ctrl-D — which looks like a hang, because nothing has been
+    // printed and the cursor just sits there. A single line, ended by Enter, is
+    // what anyone typing expects.
+    use std::io::{IsTerminal, Read};
+
+    let stdin = std::io::stdin();
     let mut value = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin(), &mut value)
-        .context("reading the value from stdin")?;
+
+    if stdin.is_terminal() {
+        // To stderr, so stdout stays the machine-readable path as everywhere else.
+        eprint!("Value for {name} (hidden): ");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
+        value = rpassword::read_password().context("reading the value")?;
+
+        // The terminal shows nothing at all while typing, so a length gives some
+        // reassurance the paste actually arrived — without revealing any of it.
+        // Deliberately not the first or last few characters: those are exactly
+        // what identifies a key in a screenshot or a pasted transcript.
+        eprintln!("({} characters read)", value.trim().chars().count());
+    } else {
+        stdin
+            .lock()
+            .read_to_string(&mut value)
+            .context("reading the value from stdin")?;
+    }
+
     let value = value.trim();
 
     if value.is_empty() {
         anyhow::bail!(
-            "nothing arrived on stdin, so there is no value to set.\n\n\
-             Pipe it in, e.g. `pbpaste | lucida config --set {name}` or \
-             `printf %s \"$KEY\" | lucida config --set {name}`."
+            "no value was given, so there is nothing to set.\n\n\
+             Type it at the prompt, or pipe it in: \
+             `pbpaste | lucida config --set {name}`."
         );
     }
 
@@ -505,6 +538,7 @@ fn default_model(backend: Backend) -> &'static str {
         Backend::Google => DEFAULT_MODEL,
         Backend::ComfyUi => "klein",
         Backend::Bfl => bfl::DEFAULT_MODEL,
+        Backend::Stability => stability::DEFAULT_MODEL,
     }
 }
 
@@ -513,6 +547,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::Google => Box::new(genai::Client::from_env()?),
         Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
         Backend::Bfl => Box::new(bfl::Client::from_env()?),
+        Backend::Stability => Box::new(stability::Client::from_env()?),
     })
 }
 
@@ -563,6 +598,7 @@ fn list_models(backend: Backend) -> Result<()> {
         Backend::Google => genai::MODEL_ALIASES,
         Backend::ComfyUi => comfy::MODEL_ALIASES,
         Backend::Bfl => bfl::MODEL_ALIASES,
+        Backend::Stability => stability::MODEL_ALIASES,
     };
     if !aliases.is_empty() {
         println!("\nAliases:");
@@ -576,6 +612,7 @@ fn list_models(backend: Backend) -> Result<()> {
     // default model; the per-model differences are annotated above.
     println!("\nThis provider supports:");
     println!("  aspect ratio    {}", describe_aspect(caps.aspect));
+    println!("  output size     {}", yes_no(caps.size));
     println!("  seed            {}", yes_no(caps.seed));
     println!("  negative prompt {}", yes_no(caps.negative_prompt));
     println!("  reference image {}", yes_no(caps.references));
