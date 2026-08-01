@@ -82,7 +82,22 @@ jobs:
           echo "ASSET=$NAME" >> "$GITHUB_ENV"
 
       - name: Verify it is genuinely static
-        run: file "$ASSET" | grep -q "statically linked" || { echo "not static"; exit 1; }
+        run: |
+          # `file` says "static-pie linked" for a musl PIE build, not
+          # "statically linked" — matching only the latter is how the original
+          # check silently passed while asserting nothing. Confirm with ldd too,
+          # which answers the question that actually matters.
+          desc=$(file "$ASSET")
+          echo "  $desc"
+          case "$desc" in
+            *"static-pie linked"*|*"statically linked"*) ;;
+            *) echo "not a static binary"; exit 1 ;;
+          esac
+          if ldd "$ASSET" 2>&1 | grep -qE "not a dynamic executable|statically linked"; then
+            echo "  ldd confirms no dynamic dependencies"
+          else
+            echo "unexpected dynamic dependencies:"; ldd "$ASSET"; exit 1
+          fi
 
       - name: Smoke test
         run: ./scripts/smoke.sh "./$ASSET"
