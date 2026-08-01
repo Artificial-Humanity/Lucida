@@ -27,6 +27,17 @@ constantly and any stray write to stdout corrupts the protocol.
 cargo install --git https://github.com/Artificial-Humanity/lucida
 ```
 
+Or take a prebuilt binary from the
+[latest release](https://github.com/Artificial-Humanity/lucida/releases/latest):
+
+- **macOS** — `lucida-<version>-macos-universal`, a universal binary covering both
+  Apple Silicon and Intel. It is unsigned, so on first run macOS will refuse it;
+  clear the quarantine attribute with
+  `xattr -d com.apple.quarantine lucida-*-macos-universal`.
+- **Linux** — `lucida-<version>-x86_64-linux-musl`, statically linked with no libc
+  or OpenSSL dependency. Verified running on Debian 11 and Alpine, including TLS
+  with no system CA store.
+
 Or build it locally:
 
 ```console

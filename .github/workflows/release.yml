@@ -33,12 +33,19 @@ jobs:
           cargo build --release --target x86_64-apple-darwin
 
       - name: Fuse into a universal binary
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          lipo -create -output lucida-macos-universal \
+          # Version in the filename, so a downloaded binary is still identifiable
+          # months later sitting in ~/Downloads.
+          NAME="lucida-${TAG#v}-macos-universal"
+          lipo -create -output "$NAME" \
             target/aarch64-apple-darwin/release/lucida \
             target/x86_64-apple-darwin/release/lucida
-          lipo -info lucida-macos-universal
-          chmod +x lucida-macos-universal
+          lipo -info "$NAME"
+          chmod +x "$NAME"
+          ln -sf "$NAME" lucida-macos-universal
+          echo "ASSET=$NAME" >> "$GITHUB_ENV"
 
       - name: Smoke test
         run: |
@@ -55,14 +62,14 @@ jobs:
             | ./lucida-macos-universal mcp 2>/dev/null | grep -q generate_image \
             && echo "MCP tools/list OK"
 
-      - run: shasum -a 256 lucida-macos-universal > lucida-macos-universal.sha256
+      - run: shasum -a 256 "$ASSET" > "$ASSET.sha256"
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
-            lucida-macos-universal
-            lucida-macos-universal.sha256
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
 
   linux:
     runs-on: ubuntu-latest
@@ -78,17 +85,21 @@ jobs:
           cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Smoke test
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           BIN=target/x86_64-unknown-linux-musl/release/lucida
           file "$BIN" | grep -q "statically linked" && echo "static OK"
           "$BIN" --version
-          cp "$BIN" lucida-x86_64-linux-musl
+          NAME="lucida-${TAG#v}-x86_64-linux-musl"
+          cp "$BIN" "$NAME"
+          echo "ASSET=$NAME" >> "$GITHUB_ENV"
 
-      - run: sha256sum lucida-x86_64-linux-musl > lucida-x86_64-linux-musl.sha256
+      - run: sha256sum "$ASSET" > "$ASSET.sha256"
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
-            lucida-x86_64-linux-musl
-            lucida-x86_64-linux-musl.sha256
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
