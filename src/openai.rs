@@ -37,18 +37,18 @@ use std::time::Duration;
 
 const API_ROOT: &str = "https://api.openai.com/v1";
 
-/// The newest model verified to work, which is not the newest that exists.
+/// The newest of the family, verified working, and the best at masking.
 ///
-/// `gpt-image-2` is newer and takes free dimensions, but model access on OpenAI
-/// is per project and it is commonly not enabled. A default that 403s on a fresh
-/// account is a worse first impression than a default one version behind, so
-/// this is `1.5` and `gpt-image-2` is one `--model` away.
+/// Measured against `gpt-image-1.5` on the same source and mask:
+/// `gpt-image-2` concentrated 4.5x more change inside the mask than outside,
+/// against 2.0x — and changed only 10.9/255 outside it, against 29.1. Neither
+/// binds the mask, but the difference is large enough to decide the default.
 ///
 /// **A 400 does not prove access.** Validation runs before the entitlement
-/// check, so an invalid-parameter error comes back for models the project cannot
-/// use — which made `gpt-image-2` look reachable when it was not. Only a
-/// successful call, or a 403, actually settles it.
-pub const DEFAULT_MODEL: &str = "gpt-image-1.5";
+/// check, so invalid-parameter errors come back for models a project cannot use.
+/// Only a successful call, or a 403, settles it — worth remembering, because a
+/// validation error reads exactly like proof that the model is reachable.
+pub const DEFAULT_MODEL: &str = "gpt-image-2";
 
 /// Latent grid for `gpt-image-2`, from its own validation error: "width and
 /// height must both be divisible by 16".
@@ -76,10 +76,9 @@ pub const ASPECT_RATIOS: &[&str] = &["1:1", "2:3", "3:2"];
 const DEFAULT_QUALITY: &str = "medium";
 
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
-    ("openai", "gpt-image-1.5"),
-    ("gpt-image", "gpt-image-1.5"),
-    ("oai", "gpt-image-1.5"),
-    ("gpt-image-2", "gpt-image-2"),
+    ("openai", "gpt-image-2"),
+    ("gpt-image", "gpt-image-2"),
+    ("oai", "gpt-image-2"),
 ];
 
 /// Measured against the live API, which distinguishes "no access" (403) from
@@ -91,9 +90,10 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
 /// dead end. Removed rather than kept as a courtesy.
 pub const KNOWN_MODELS: &[&str] = &[
     "gpt-image-2",
+    "chatgpt-image-latest",
     "gpt-image-1.5",
-    "gpt-image-1",
     "gpt-image-1-mini",
+    "gpt-image-1",
 ];
 
 /// Whether a model takes free dimensions rather than the three fixed sizes.
@@ -183,19 +183,47 @@ impl Client {
     /// `auto` when nothing was asked for, which lets the model choose a shape to
     /// suit the prompt — a genuinely useful default that no other provider here
     /// offers.
+    /// The aspect an edit should keep when none was asked for.
+    ///
+    /// `auto` lets the model choose a shape from the prompt, which is a good
+    /// default for a fresh image and a bad one for an edit: gpt-image-1-mini
+    /// turned a 1024x1024 source into 1024x1536, reshaping a picture nobody
+    /// asked to reshape. So an edit with no stated geometry follows its source,
+    /// which is what the local lane and BFL already do.
+    fn implied_aspect(req: &ImageRequest) -> Option<crate::provider::Aspect> {
+        if req.aspect.is_some() || req.references.is_empty() {
+            return req.aspect;
+        }
+        let first = req.references.first()?;
+        let bytes = std::fs::read(first).ok()?;
+        let mime = if first.to_ascii_lowercase().ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+        let (w, h) = crate::image_dimensions(&bytes, mime)?;
+        Some(crate::provider::Aspect { w, h })
+    }
+
     fn size_for(req: &ImageRequest, model: &str) -> String {
+        let asked = Self::implied_aspect(req);
+
         if free_dimensions(model) {
             // Nothing asked for still means `auto`, which lets the model choose a
             // shape to suit the prompt — worth keeping rather than imposing a
             // square by default.
-            if req.aspect.is_none() && req.size.is_none() {
+            if asked.is_none() && req.size.is_none() {
                 return "auto".to_string();
             }
-            let (w, h) = area_dimensions(req, TARGET_AREA);
+            let scoped = ImageRequest {
+                aspect: asked,
+                ..req.clone()
+            };
+            let (w, h) = area_dimensions(&scoped, TARGET_AREA);
             return format!("{w}x{h}");
         }
 
-        match req.aspect.map(|a| (a.w, a.h)) {
+        match asked.map(|a| (a.w, a.h)) {
             None => "auto".to_string(),
             Some((w, h)) if w == h => "1024x1024".to_string(),
             Some((w, h)) if w > h => "1536x1024".to_string(),
@@ -231,12 +259,17 @@ impl Client {
     /// what most people assume, and worth stating in the error rather than
     /// letting someone edit the wrong half of a picture.
     ///
-    /// **The mask is advisory.** Measured on `gpt-image-1.5`: a change requested
-    /// inside a lower-right box gave a mean difference of 58/255 there and
-    /// 29/255 everywhere else, and an object outside the mask disappeared. The
-    /// model regenerates the whole image and treats the mask as a hint about
-    /// where to concentrate. Untested on `gpt-image-1`, which is the one the
-    /// documentation describes as the inpainting model.
+    /// **The mask is advisory, and how advisory depends on the model.** Measured
+    /// on one source with one mask:
+    ///
+    /// | model | inside | outside | concentration |
+    /// |---|---|---|---|
+    /// | `gpt-image-1.5` | 58.0/255 | 29.1/255 | 2.0x |
+    /// | `gpt-image-2` | 49.2/255 | 10.9/255 | 4.5x |
+    ///
+    /// Neither confines the edit — `gpt-image-1.5` lost an object nowhere near
+    /// the mask — but `gpt-image-2` leaves the rest of the picture far closer to
+    /// untouched, which is why it is the default.
     fn edit(&self, req: &ImageRequest, model: &str) -> Result<Vec<u8>> {
         let mut form = reqwest::blocking::multipart::Form::new()
             .text("model", model.to_string())
@@ -507,6 +540,37 @@ mod tests {
         }
     }
 
+    /// An edit with no stated geometry follows its source rather than letting
+    /// the model choose: gpt-image-1-mini turned a square source into a portrait,
+    /// reshaping a picture nobody asked to reshape.
+    #[test]
+    fn an_edit_keeps_the_sources_shape() {
+        let dir = std::env::temp_dir().join("lucida-openai-shape-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.png");
+        // A minimal PNG header is enough: only IHDR is read.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1536u32.to_be_bytes());
+        png.extend_from_slice(&1024u32.to_be_bytes());
+        std::fs::write(&path, &png).unwrap();
+
+        let edit = ImageRequest {
+            references: vec![path.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        // 3:2 source, so the landscape size rather than `auto`.
+        assert_eq!(Client::size_for(&edit, "gpt-image-1.5"), "1536x1024");
+
+        // A fresh image still lets the model choose.
+        assert_eq!(
+            Client::size_for(&ImageRequest::default(), "gpt-image-1.5"),
+            "auto"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `--size` scales the budget, since there is no edge to set.
     #[test]
     fn size_scales_the_area_budget() {
@@ -576,8 +640,7 @@ mod tests {
 
     #[test]
     fn aliases_resolve() {
-        assert_eq!(resolve_model("openai"), "gpt-image-1.5");
-        assert_eq!(resolve_model("gpt-image-2"), "gpt-image-2");
+        assert_eq!(resolve_model("openai"), "gpt-image-2");
         assert_eq!(resolve_model("something-new"), "something-new");
     }
 }

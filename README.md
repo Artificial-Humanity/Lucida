@@ -1,8 +1,8 @@
 # Lucida
 
 Generate and edit images and video — as a CLI, or as an MCP server so coding
-agents can make their own assets. Images come from Google's Gemini models, a
-local ComfyUI, or hosted FLUX from Black Forest Labs; video comes from Veo.
+agents can make their own assets. Images come from Google Gemini, a local
+ComfyUI, hosted FLUX, Stability AI or OpenAI; video comes from Veo.
 
 Named for the [camera lucida](https://en.wikipedia.org/wiki/Camera_lucida), the
 optical device that let artists trace what they saw onto paper.
@@ -88,21 +88,28 @@ from — never a value — so its output is safe to paste into a bug report.
 
 ## Providers
 
-Four, and the differences are not only quality:
+Five, and the differences are not only quality:
 
-| | `google` | `comfyui` | `bfl` | `stability` |
-|---|---|---|---|---|
-| Models | Gemini | Local (Flux.2) | Hosted FLUX | Stable Image |
-| Credential | API key, billing | None | API key, paid | API key, paid |
-| Cost | Per image | Free | ~3 credits | ~2 credits |
-| Speed | Seconds | **Minutes** | Seconds | Seconds |
-| Aspect ratio | 10 named | Any, /16px | Any, /32px | 9 named (a *different* 9) |
-| Output size | Tiers | Pixels | Pixels | **Not adjustable** |
-| Seed | **No** | Yes | Yes | Yes |
-| Negative prompt | No | **Yes** | No | **Yes** |
-| Editing | Yes | Yes | Yes | Not yet (needs masks) |
-| Steps / guidance | No | Yes | `flux-2-flex`, `flux-dev` | No |
-| Output carries | SynthID + C2PA | **Nothing** | C2PA only | C2PA only |
+| | `google` | `comfyui` | `bfl` | `stability` | `openai` |
+|---|---|---|---|---|---|
+| Models | Gemini | Local (Flux.2) | Hosted FLUX | Stable Image | gpt-image |
+| Credential | API key, billing | None | API key, paid | API key, paid | API key, paid |
+| Cost | Per image | Free | ~3 credits | ~2 credits | Per image |
+| Speed | Seconds | **Minutes** | Seconds | Seconds | ~15-20s |
+| Aspect ratio | 10 named | Any, /16px | Any, /32px | 9 named (a *different* 9) | 3 named, or free on `gpt-image-2` |
+| Output size | Tiers | Pixels | Pixels | **Not adjustable** | Only `gpt-image-2` |
+| Seed | **No** | Yes | Yes | Yes | **No** |
+| Negative prompt | No | **Yes** | No | **Yes** | **No** |
+| Editing | Yes | Yes | Yes | Not yet | Yes |
+| **Mask** | No | No | No | No | **Yes (advisory)** |
+| Steps / guidance | No | Yes | `flux-2-flex`, `flux-dev` | No | No |
+| Output carries | SynthID + C2PA | **Nothing** | C2PA only | C2PA only | C2PA only |
+
+**Only `openai` accepts a mask, and it is advisory rather than binding.** Asking
+for a change inside a box and measuring the rest of the picture: `gpt-image-2`
+concentrated 4.5× more change inside than outside (10.9/255 elsewhere), while
+`gpt-image-1.5` managed 2.0× and lost an object nowhere near the mask. If pixels
+outside the mask must survive, composite the result back over the original.
 
 Two of them use *named* aspect ratios and **disagree about which** — Google has
 `4:3`, Stability has `9:21`, neither has the other's. That is why the list is
@@ -504,6 +511,7 @@ both halves were verified in the raw bytes.**
 | `google` (images and video) | SynthID watermark + C2PA manifest | **Yes** — SynthID is in the pixels |
 | `bfl` | C2PA manifest only, no pixel watermark | No — metadata only |
 | `stability` | C2PA manifest only, no pixel watermark | No — metadata only |
+| `openai` | C2PA manifest only, no pixel watermark | No — metadata only |
 | `comfyui` | Nothing | — |
 
 That middle row is the one worth reading twice. Hosted FLUX **is** marked: a
