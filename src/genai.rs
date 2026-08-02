@@ -127,6 +127,7 @@ impl Client {
 
 pub const CAPABILITIES: Capabilities = Capabilities {
     provider: "google",
+    tagline: "Highest quality, costs money per image, seconds to render. The only provider whose output carries a pixel watermark that survives re-encoding.",
     // Ten named ratios and nothing between them.
     aspect: AspectSupport::Named(ASPECT_RATIOS),
     // 1K / 2K / 4K tiers.

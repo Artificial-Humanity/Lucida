@@ -88,6 +88,7 @@ pub fn resolve_model(input: &str) -> String {
 pub fn capabilities(_model: &str) -> Capabilities {
     Capabilities {
         provider: "stability",
+        tagline: "Stable Image. Paid, fast, has a negative prompt. Cannot be asked for an output size at all -- only a shape, from its own list of nine ratios.",
         aspect: AspectSupport::Named(ASPECT_RATIOS),
         // The one provider that does not let you choose. `aspect_ratio` is the
         // only geometry control; there is no width, height or resolution field

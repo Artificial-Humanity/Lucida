@@ -124,19 +124,19 @@ case "$reply" in
   *) fail "MCP tools/list did not list all four tools: $reply" ;;
 esac
 
-# Parameters only one provider honours must say so in the schema itself, since
-# that is all an agent reads before calling.
+# Every provider must be reachable through the schema, not merely implemented.
 #
-# Note this deliberately does *not* try to assert "aspect_ratio has no enum":
-# `start_video` has a legitimate one — Veo really does accept only 16:9 and 9:16
-# — and shell globbing cannot scope a match to a single tool, so the check would
-# match the wrong object. The unit test
-# `mcp::tests::provider_specific_parameters_are_not_advertised_as_enums` makes
-# that assertion properly, against the parsed schema.
-case "$reply" in
-  *"comfyui only"*) pass "schema names which provider honours each parameter" ;;
-  *) fail "schema lost its per-provider parameter annotations: $reply" ;;
-esac
+# Checked by NAME rather than by phrase. The previous version grepped for the
+# literal "comfyui only" — true until a second provider gained a negative prompt
+# and the text correctly became "comfyui and stability only", at which point the
+# check failed on an improvement. Names are what an agent selects on, and they
+# are what a new provider must not be missing from.
+for provider in google comfyui bfl stability; do
+  case "$reply" in
+    *"\"$provider\""*) pass "schema offers provider: $provider" ;;
+    *) fail "provider $provider is missing from the MCP schema" ;;
+  esac
+done
 
 # A client on Windows may terminate requests with CRLF.
 reply=$(printf '%s\r\n' "$handshake" | "$BIN" mcp 2>/dev/null)

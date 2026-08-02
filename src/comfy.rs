@@ -561,6 +561,7 @@ impl Client {
 
 pub const CAPABILITIES: Capabilities = Capabilities {
     provider: "comfyui",
+    tagline: "Local, free, nothing embedded in the output, and the only one with a negative prompt AND full pixel-size control. Renders take MINUTES, not seconds, and it must be running.",
     aspect: AspectSupport::Free {
         multiple_of: PIXEL_GRID,
     },

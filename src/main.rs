@@ -14,6 +14,7 @@ mod bfl;
 mod comfy;
 mod config;
 mod genai;
+mod masked;
 mod mcp;
 mod provider;
 mod stability;
@@ -310,7 +311,7 @@ impl ImageOptions {
             (None, None) => Backend::Google,
         };
 
-        let model = self.model.unwrap_or_else(|| default_model(backend).to_string());
+        let model = self.model.unwrap_or_else(|| backend.default_model().to_string());
 
         let request = ImageRequest {
             prompt,
@@ -424,16 +425,18 @@ fn set_config(name: &str) -> Result<()> {
 
     if stdin.is_terminal() {
         // To stderr, so stdout stays the machine-readable path as everywhere else.
-        eprint!("Value for {name} (hidden): ");
+        eprint!("Value for {name}: ");
         std::io::Write::flush(&mut std::io::stderr()).ok();
 
-        value = rpassword::read_password().context("reading the value")?;
+        // One asterisk per character: enough to show the paste landed, without
+        // showing what landed.
+        value = masked::read_masked()?;
 
-        // The terminal shows nothing at all while typing, so a length gives some
-        // reassurance the paste actually arrived — without revealing any of it.
-        // Deliberately not the first or last few characters: those are exactly
+        // Still worth stating the count. An asterisk run is hard to eyeball, and
+        // a key that arrived truncated or doubled is exactly the failure this
+        // catches. Deliberately not the first or last few characters — those are
         // what identifies a key in a screenshot or a pasted transcript.
-        eprintln!("({} characters read)", value.trim().chars().count());
+        eprintln!("({} characters)", value.trim().chars().count());
     } else {
         stdin
             .lock()
@@ -533,14 +536,7 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn default_model(backend: Backend) -> &'static str {
-    match backend {
-        Backend::Google => DEFAULT_MODEL,
-        Backend::ComfyUi => "klein",
-        Backend::Bfl => bfl::DEFAULT_MODEL,
-        Backend::Stability => stability::DEFAULT_MODEL,
-    }
-}
+
 
 fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
     Ok(match backend {

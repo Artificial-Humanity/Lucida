@@ -85,6 +85,7 @@ pub fn capabilities(model: &str) -> Capabilities {
 
     Capabilities {
         provider: "bfl",
+        tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone.",
         aspect: AspectSupport::Free {
             multiple_of: PIXEL_GRID,
         },

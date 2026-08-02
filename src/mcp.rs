@@ -111,29 +111,65 @@ fn dispatch(method: &str, params: &Value) -> Result<Value> {
     }
 }
 
+/// Describes every provider from its own declared capabilities.
+///
+/// Generated rather than written, because the hand-written version drifted: by
+/// the fourth provider it opened with "Two providers are available", listed
+/// three, and omitted the fourth entirely, which existed only in the enum. An
+/// agent reads a schema and believes it, so a claim nobody can forget to update
+/// is worth more than a better-phrased one that rots.
+fn provider_summary() -> String {
+    Backend::ALL
+        .iter()
+        .map(|backend| {
+            // The provider's own default, not an empty string: capabilities can
+            // depend on the model, and BFL with no model reports no editing.
+            let caps = capabilities_for(*backend, backend.default_model());
+            let mut notes: Vec<&str> = Vec::new();
+            if caps.seed {
+                notes.push("seed");
+            }
+            if caps.negative_prompt {
+                notes.push("negative prompt");
+            }
+            if caps.references {
+                notes.push("editing");
+            }
+            if caps.steps {
+                notes.push("steps/guidance");
+            }
+            if !caps.size {
+                notes.push("NO size control");
+            }
+            format!(
+                "- {}{}: {} [{}] Output carries: {}.",
+                backend.name(),
+                if *backend == Backend::Google { " (default)" } else { "" },
+                caps.tagline,
+                notes.join(", "),
+                caps.provenance.describe()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn image_schema() -> Value {
     json!({
         "name": "generate_image",
-        "description": concat!(
-            "Generate an image and write it to disk. Returns the path written.\n\n",
-            "Two providers are available and the choice matters:\n",
-            "- google (default): Gemini models, highest quality, costs money per ",
-            "image, and every output carries an invisible SynthID watermark plus a ",
-            "C2PA manifest.\n",
-            "- comfyui: a local model, free, nothing embedded in the output, and it ",
-            "supports a seed and a negative prompt. Renders take minutes rather than ",
-            "seconds and it must be running locally.\n",
-            "- bfl: hosted FLUX from Black Forest Labs. Paid per image, fast, and the ",
-            "only provider whose capabilities differ per MODEL — steps and guidance ",
-            "exist on flux-2-flex and flux-dev and nowhere else, and no FLUX model ",
-            "takes a negative prompt.\n\n",
-            "Both providers can edit an existing picture via reference_images.\n\n",
-            "The provider is inferred from the model id; pass `provider` to be ",
-            "explicit. Not every parameter works on every provider — call ",
-            "image_providers to check, or pass one anyway and read the error, which ",
-            "names a provider that supports it. Parameters are never silently ",
-            "ignored.\n\n",
-            "Pass reference_images to edit or restyle an existing picture."
+        "description": format!(
+            "Generate an image and write it to disk. Returns the path written.\n\n\
+             Four providers are available and the choice matters — cost, speed, \
+             what you can ask for, and what ends up embedded in the file all \
+             differ:\n{}\n\n\
+             The provider is inferred from the model id; pass `provider` to be \
+             explicit. Not every parameter works on every provider, and the ones \
+             that do not are a hard error naming one that does — never a silent \
+             drop. Call image_providers for live capabilities and which are \
+             actually reachable.\n\n\
+             Pass reference_images to edit an existing picture (google, comfyui, \
+             bfl — not stability).",
+            provider_summary()
         ),
         "inputSchema": {
             "type": "object",
@@ -155,44 +191,44 @@ fn image_schema() -> Value {
                     "type": "string",
                     "description": format!(
                         "Model id or alias. Defaults to {DEFAULT_MODEL} on google, \
-                         `klein` (local Flux.2) on comfyui, and flux-2-pro on bfl."
+                         `klein` on comfyui, flux-2-pro on bfl, core on stability."
                     )
                 },
                 "aspect_ratio": {
                     "type": "string",
-                    // Deliberately not an enum: it would have to be Google's list,
-                    // and comfyui accepts any ratio. An agent reading an enum
-                    // treats it as the whole truth.
+                    // Deliberately not an enum: the providers with named ratios
+                    // disagree about which, and the others take any ratio at all.
                     "description": format!(
-                        "W:H, e.g. 16:9. google accepts only these: {}. comfyui \
-                         accepts any ratio, rounded to 16 pixels.",
-                        genai::ASPECT_RATIOS.join(", ")
+                        "W:H, e.g. 16:9. google accepts only: {}. stability accepts a \
+                         DIFFERENT nine: {}. comfyui and bfl accept any ratio.",
+                        genai::ASPECT_RATIOS.join(", "),
+                        crate::stability::ASPECT_RATIOS.join(", ")
                     )
                 },
                 "size": {
                     "type": "string",
-                    "description": "Long edge of the image: a tier (1K, 2K, 4K) or a pixel count such as 1536. google rounds to the nearest tier; comfyui uses the pixel count directly. Larger costs more and takes longer."
+                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number. NOT supported by stability at all, which renders a fixed size — passing it there is an error."
                 },
                 "negative_prompt": {
                     "type": "string",
-                    "description": "What to keep out of the picture. comfyui only — google's image models have no such input, so passing this to google is an error rather than a no-op."
+                    "description": "What to keep out of the picture. comfyui and stability only — google's image models and every FLUX endpoint lack the concept, so passing it there is an error rather than a no-op."
                 },
                 "seed": {
                     "type": "integer",
-                    "description": "Renders the same image again from the same prompt. comfyui only — google exposes no seed, so results there cannot be reproduced. The seed used is always reported back, so an unpinned render can still be repeated."
+                    "description": "Renders the same image again. comfyui, bfl and stability; google exposes none, so results there cannot be reproduced. comfyui is verified pixel-identical across runs."
                 },
                 "steps": {
                     "type": "integer",
-                    "description": "Sampling steps, default 20. comfyui only. More is slower and not reliably better."
+                    "description": "Sampling steps. comfyui, and on bfl only flux-2-flex and flux-dev."
                 },
                 "guidance": {
                     "type": "number",
-                    "description": "How closely to follow the prompt, default 5. comfyui only."
+                    "description": "How closely to follow the prompt. comfyui, and on bfl only flux-2-flex and flux-dev."
                 },
                 "reference_images": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Paths to existing images to condition on, for editing or style matching. Supported by both providers. On comfyui the result keeps the first image's shape unless aspect_ratio or size is given."
+                    "description": "Paths to existing images to condition on, for editing or style matching. Supported by google, comfyui and bfl. On comfyui the result keeps the first image's aspect ratio unless aspect_ratio or size is given."
                 }
             },
             "required": ["prompt", "output_path"]
@@ -569,14 +605,21 @@ mod tests {
                 "`{field}` must name the provider that honours it"
             );
         }
-        // reference_images is deliberately NOT in that list: both providers
-        // support it now, so claiming otherwise would be the same lie in reverse.
-        assert!(
-            props["reference_images"]["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("both providers")
-        );
+        // reference_images is checked against the capabilities themselves rather
+        // than a fixed phrase. The previous version asserted the words "both
+        // providers", which was true of two providers and quietly wrong of three.
+        let references = props["reference_images"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        for backend in Backend::ALL {
+            if capabilities_for(*backend, backend.default_model()).references {
+                assert!(
+                    references.contains(backend.name()),
+                    "`{}` edits but is not named in the reference_images description",
+                    backend.name()
+                );
+            }
+        }
     }
 
     /// Checked without calling the tools, so the suite needs no network and no

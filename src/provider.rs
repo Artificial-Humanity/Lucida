@@ -252,6 +252,14 @@ impl Provenance {
 #[derive(Debug, Clone, Copy)]
 pub struct Capabilities {
     pub provider: &'static str,
+    /// One line on why a caller would choose this provider.
+    ///
+    /// Lives beside the measured capabilities rather than in the MCP schema
+    /// because that is where it stays true: the schema's prose was hand-written
+    /// while its enum was generated, and by the fourth provider it claimed there
+    /// were two, listed three, and omitted the fourth entirely. An agent reads
+    /// that and believes it.
+    pub tagline: &'static str,
     pub aspect: AspectSupport,
     /// Whether the output size can be chosen at all.
     ///
@@ -441,6 +449,19 @@ impl Backend {
         }
     }
 
+    /// The model used when none is named. Lives here rather than in `main` so
+    /// anything asking "what can this provider do" gets the same answer the CLI
+    /// would give — asking BFL with an empty model reports no editing, because
+    /// an empty string is not a FLUX.2 endpoint.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Google => crate::genai::DEFAULT_MODEL,
+            Self::ComfyUi => "klein",
+            Self::Bfl => crate::bfl::DEFAULT_MODEL,
+            Self::Stability => crate::stability::DEFAULT_MODEL,
+        }
+    }
+
     pub const ALL: &'static [Backend] = &[
         Backend::Google,
         Backend::ComfyUi,
@@ -541,6 +562,7 @@ mod tests {
     fn check_rejects_a_seed_the_provider_cannot_honour() {
         let caps = Capabilities {
             provider: "google",
+            tagline: "for the test",
             aspect: AspectSupport::Named(&["1:1"]),
             size: true,
             seed: false,
