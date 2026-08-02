@@ -384,17 +384,32 @@ fn show_config() {
     }
 
     println!("\nSettings visible to this process:");
+    let mut shadowed: Vec<&str> = Vec::new();
     for (key, purpose) in config::KNOWN_KEYS {
-        // The environment is reported separately from the file, because "set in
-        // both" and "set only in the file" behave differently and the whole
-        // class of bug here is about which one a process can reach.
-        let in_env = std::env::var(key).is_ok_and(|v| !v.trim().is_empty());
-        let source = match (in_env, config::var(key).is_some()) {
-            (true, _) => "set (environment)",
-            (false, true) => "set (config file)",
-            (false, false) => "not set",
+        // The source is reported, not just the presence, because "set in both"
+        // and "set in one" resolve to the same value but not to the same
+        // situation — and the whole class of bug here is about which source a
+        // process actually reaches.
+        let source = match config::origin(key) {
+            Some(config::Origin::File) => "set (config file)",
+            Some(config::Origin::Environment) => "set (environment)",
+            Some(config::Origin::FileOverridingEnvironment) => {
+                shadowed.push(key);
+                "set (config file)"
+            }
+            None => "not set",
         };
         println!("  {key:<22} {source:<20} {purpose}");
+    }
+
+    // Stated rather than left to be inferred from the column above. Someone
+    // reading this is usually asking why a key they exported is not being used,
+    // and this is the answer.
+    if !shadowed.is_empty() {
+        println!("\nAlso set in this environment, and not used — the config file wins:");
+        for key in shadowed {
+            println!("  {key}");
+        }
     }
 
     // A name Lucida does not know is the silent failure worth surfacing: the
@@ -518,6 +533,17 @@ fn set_config(name: &str) -> Result<()> {
         if replaced { "Updated" } else { "Added" },
         path.display()
     );
+
+    // Setting a name the shell also exports is the reason the precedence rule
+    // was reversed, so say plainly which value now applies. Silence here is what
+    // made the old behaviour so confusing: the write succeeded, the report said
+    // so, and the ambient key kept being used.
+    if std::env::var(name).is_ok_and(|v| !v.trim().is_empty()) {
+        eprintln!(
+            "Note: {name} is also set in this environment. Lucida will use the value \
+             you just set — the config file takes precedence."
+        );
+    }
     println!("{}", path.display());
     Ok(())
 }

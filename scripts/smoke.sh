@@ -78,11 +78,20 @@ case "$out" in
   *) fail "config file was not picked up: $out" ;;
 esac
 
-# …and the environment must still take precedence over it.
+# …and it must beat the environment, which is what makes a key scoped to Lucida
+# reachable at all when the shell already exports a broader one. This assertion
+# was the other way round through v0.5.2; see config::var for why it changed.
 out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GOOGLE_API_KEY=x "$BIN" config 2>&1)
 case "$out" in
-  *"GOOGLE_API_KEY"*"set (environment)"*) pass "environment beats the config file" ;;
-  *) fail "config file overrode the environment: $out" ;;
+  *"GOOGLE_API_KEY"*"set (config file)"*) pass "config file beats the environment" ;;
+  *) fail "environment overrode the config file: $out" ;;
+esac
+
+# The losing source must be named, not merely out-ranked. Someone reading this
+# output is usually asking why the key they exported is not being used.
+case "$out" in
+  *"not used — the config file wins"*) pass "the shadowed environment value is reported" ;;
+  *) fail "config did not report the shadowed environment value: $out" ;;
 esac
 
 # Values must never be printed — this output gets pasted into bug reports.

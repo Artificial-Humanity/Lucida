@@ -94,9 +94,15 @@ variables, so there is no second vocabulary to learn. A leading `export` and
 surrounding quotes are both accepted, so a fragment of a shell profile can be
 pasted straight in. Text after `#` is ignored.
 
-**The environment always wins.** The file is consulted only when a variable is
-unset or empty, so adding one cannot change the behaviour of a setup that
-already works.
+**The config file wins.** A value there takes precedence over the same name in
+the environment, which is what lets you give Lucida a key of its own when your
+shell already exports a broader one — a fine-grained key scoped to this tool
+rather than the general-purpose one in your profile. `lucida config` names any
+setting that exists in both, so a shadowed export is reported rather than left
+to be discovered.
+
+For a one-off, name a different file: `LUCIDA_CONFIG=alt.env lucida …` wins
+outright over both.
 
 It is looked for in order: `$LUCIDA_CONFIG` (a file path, wins outright), then
 `$XDG_CONFIG_HOME/lucida/config.env` or `~/.config/lucida/config.env`, then on

@@ -13,10 +13,14 @@
 //! reboot; putting the value in the MCP client's own config hardcodes a
 //! credential into a JSON file that tends to get shared.
 //!
-//! So: an optional file of `KEY=value` lines, holding defaults for exactly the
-//! variables Lucida already documents. The environment still wins when it has an
-//! answer, which means every existing setup behaves identically and this is
-//! purely a fallback.
+//! So: an optional file of `KEY=value` lines, holding values for exactly the
+//! variables Lucida already documents.
+//!
+//! # Which wins
+//!
+//! The file, and this reverses the original rule — see [`var`] for why. In
+//! short: a file entry is an explicit statement about Lucida, a shell export is
+//! ambient and applies to everything, and the specific one should win.
 //!
 //! # Why not TOML
 //!
@@ -61,17 +65,76 @@ struct Loaded {
 
 static LOADED: OnceLock<Loaded> = OnceLock::new();
 
-/// Looks up a setting: the environment first, then the config file.
+/// Looks up a setting: the config file first, then the environment.
+///
+/// **The file wins, and that reverses the rule this shipped with.** Through
+/// v0.5.2 the environment won and the file was a fallback, on the reasoning that
+/// introducing a config file must not change the behaviour of a setup that
+/// already worked. That was a sound migration property, and it cost more than it
+/// protected.
+///
+/// The case it made unreachable: a shell exports `OPENAI_API_KEY` for general
+/// use, and you want Lucida to use a *different* key — a fine-grained one scoped
+/// to this tool. There was no way to say so. `config --set` wrote the value,
+/// reported success, and every render went on using the ambient key. Not merely
+/// awkward: impossible, and silently so, which is the failure mode this codebase
+/// refuses everywhere else.
+///
+/// A file entry is an explicit statement about Lucida specifically; a shell
+/// export is ambient and applies to everything that reads that name. The
+/// specific one should win. The one-off override survives as
+/// `LUCIDA_CONFIG=other.env lucida …`, which names a whole file and wins
+/// outright — see [`search_paths`].
 ///
 /// An empty environment variable counts as absent. Exporting `GOOGLE_API_KEY=`
 /// is how a shell profile reports "I meant to set this", and treating it as a
-/// real value produces an authentication error instead of a useful one.
+/// real value produces an authentication error instead of a useful one. `parse`
+/// drops empty file values for the same reason.
 pub fn var(name: &str) -> Option<String> {
-    if let Some(value) = std::env::var(name).ok().filter(|v| !v.trim().is_empty()) {
-        return Some(value);
+    if let Some(value) = loaded().values.get(name) {
+        return Some(value.clone());
     }
 
-    loaded().values.get(name).cloned()
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// Where a setting's value is coming from.
+///
+/// Exists so `lucida config` can report the *loser* as well as the winner. "Set
+/// in both" and "set in one" resolve to the same value but not to the same
+/// situation, and the whole class of bug here is about which source a process
+/// actually reaches.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// In the file only.
+    File,
+    /// In the environment only.
+    Environment,
+    /// In both. The file is used; the environment value is not.
+    FileOverridingEnvironment,
+}
+
+/// Which source is supplying `name`, if any.
+pub fn origin(name: &str) -> Option<Origin> {
+    origin_of(
+        loaded().values.contains_key(name),
+        std::env::var(name).is_ok_and(|v| !v.trim().is_empty()),
+    )
+}
+
+/// The precedence table itself, separated from where the two answers come from.
+///
+/// Pulled out because `loaded()` is a process-wide `OnceLock` — the first test
+/// to touch it fixes it for every other — so the resolution rule would otherwise
+/// only be checkable from `scripts/smoke.sh`, in a fresh process. It is checked
+/// there too, end to end; this pins the table itself.
+fn origin_of(in_file: bool, in_env: bool) -> Option<Origin> {
+    match (in_file, in_env) {
+        (true, true) => Some(Origin::FileOverridingEnvironment),
+        (true, false) => Some(Origin::File),
+        (false, true) => Some(Origin::Environment),
+        (false, false) => None,
+    }
 }
 
 fn loaded() -> &'static Loaded {
@@ -228,10 +291,12 @@ pub fn template() -> String {
     let mut text = String::from(
         "# Lucida settings.\n\
          #\n\
-         # Read only when the corresponding environment variable is unset, so this\n\
-         # never overrides a shell that already knows the answer. It exists mainly\n\
-         # for GUI-launched MCP clients, which do not inherit a login shell's\n\
-         # environment — the case where an exported key is invisible.\n\
+         # A value here takes precedence over the same name in the environment,\n\
+         # so this is where a key scoped to Lucida goes when your shell already\n\
+         # exports a broader one. It is also the only place a GUI-launched MCP\n\
+         # client can find a key at all, since it inherits no shell.\n\
+         #\n\
+         # `lucida config` reports which source each setting is coming from.\n\
          #\n\
          # Keep this file private: chmod 600\n\n",
     );
@@ -271,6 +336,20 @@ mod tests {
         assert!(!values.contains_key("MALFORMED"));
         // An empty value is the same as absent, so a later fallback still runs.
         assert!(!values.contains_key("EMPTY"));
+    }
+
+    #[test]
+    fn the_file_outranks_the_environment() {
+        // Reversed after v0.5.2. The case that forced it: a shell exporting a broad
+        // key made a Lucida-scoped one unreachable, since the ambient value won
+        // and `config --set` reported success anyway.
+        assert_eq!(
+            origin_of(true, true),
+            Some(Origin::FileOverridingEnvironment)
+        );
+        assert_eq!(origin_of(true, false), Some(Origin::File));
+        assert_eq!(origin_of(false, true), Some(Origin::Environment));
+        assert_eq!(origin_of(false, false), None);
     }
 
     #[test]

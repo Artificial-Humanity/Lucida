@@ -56,7 +56,7 @@ empty one. The README previously recommended that, and was wrong.
 
 So: an optional file of `KEY=value` lines at `~/.config/lucida/config.env`
 (with the native macOS location as a fallback, and `LUCIDA_CONFIG` overriding
-both), read only when a variable is unset. Deliberately not TOML — the keys
+both). Deliberately not TOML — the keys
 *are* environment variable names, and any other format would invent a second
 vocabulary for the same settings plus a mapping to keep in sync. It also keeps
 the parser to a few lines and adds no dependency, the same reasoning that kept a
@@ -66,6 +66,34 @@ JSON-RPC crate out of `mcp.rs`.
 setting came from, never a value. That distinction is the whole diagnostic: the
 answer differs between a terminal and a GUI-launched server, and no other tool
 can tell you which one you are looking at.
+
+**Precedence was reversed after v0.5.2, and the original rule was wrong for a
+reason worth recording.** The file shipped as a *fallback*: the environment won,
+and the file was read only for names the environment did not answer. The
+argument was migration safety — introducing a config file must not change the
+behaviour of a setup that already works — and as a migration property it was
+sound. What it cost was not visible until someone asked for it.
+
+A shell exporting `OPENAI_API_KEY` for general use made a Lucida-scoped key
+**unreachable**. Not awkward: impossible. `config --set` would write the value,
+report `Added OPENAI_API_KEY in …`, and every render would go on using the
+ambient key, because the ambient key won by rule. Fine-grained credentials — one
+key per tool, scoped and revocable independently — is an ordinary way to hold
+API keys, and the design had no answer for it.
+
+Worse, the failure was *silent*, in a codebase whose entire argument is that
+silent drops are the thing to refuse. `--workflow` rejects an option whose token
+is missing; an unsupported parameter is an error naming a provider that has one.
+The config layer quietly discarded what it had just confirmed writing.
+
+The rule now: **a file entry is an explicit statement about Lucida; a shell
+export is ambient and applies to everything that reads that name. The specific
+one wins.** The per-invocation escape survives untouched, because
+`LUCIDA_CONFIG=other.env` names a whole file and outranks both. And `lucida
+config` now reports the loser as well as the winner — a setting present in both
+is listed under "Also set in this environment, and not used", since someone
+reading that output is usually asking exactly why their exported key is being
+ignored.
 
 **The general lesson, which applies to every provider still to come:** a
 credential mechanism has to work in the environment the program actually runs
