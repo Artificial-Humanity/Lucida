@@ -208,8 +208,8 @@ binary — tokens substituted, image found by shape, seed honoured.
 |---|---|---|
 | ~~Local (ComfyUI)~~ | — | **Done; see §0** |
 | ~~Flux (Black Forest Labs)~~ | — | **Done; see below** |
-| **OpenAI** | Documented REST API, mask-based editing | None significant, but a one-off — shares little with the others |
-| **Stability AI** | Pay-as-you-go credits, no subscription | Verify which product; Brand Studio is subscription-only |
+| ~~OpenAI~~ | — | **Done; see below** |
+| ~~Stability AI~~ | — | **Done; see below** |
 | ~~Adobe Firefly~~ | — | **Ruled out: subscription only** |
 | ~~Midjourney~~ | — | **Ruled out: subscription only, and no official API** |
 
@@ -331,7 +331,56 @@ resolving it. Nothing in Lucida depends on the answer — it holds no weights an
 bundles no model — but anything published from a Klein render does. Resolve both
 and record them here rather than in someone's memory.
 
-### OpenAI
+### OpenAI — DELIVERED
+
+Implemented and verified live. The prediction that mattered held: **the mask was
+the structural gap, and it was real.** `references: Vec<String>` could not
+express "this region of this image", so `ImageRequest` grew a mask field — the
+one typed addition four other providers never forced.
+
+What the live API corrected, in the direction of less certainty rather than
+more: **the mask is advisory, not binding.** Measured by asking for a change
+inside a box and comparing the rest of the frame, `gpt-image-2` concentrated
+4.5× more change inside the mask than outside and `gpt-image-1.5` only 2.0×,
+losing an object nowhere near the mask. So `Capabilities` says the provider
+takes a mask; it cannot say the mask is honoured, and the CLI help says
+"advisory" rather than implying a guarantee. Anything needing pixels outside the
+mask to survive has to composite the result back over the original.
+
+Also confirmed: OpenAI **rejects** unknown parameters, which turned out to be a
+free probing technique rather than an obstacle — sending a deliberately invalid
+`output_format` drew a validation error naming the parameter and listing its
+accepted values, without rendering or billing anything. That answered a question
+that had been deferred as needing paid verification. Worth carrying to every
+future provider: ask in the way that costs nothing before paying.
+
+### Stability AI — DELIVERED
+
+Implemented and verified live. It never had a section of its own here, which is
+recorded rather than quietly fixed: it was added in the same sweep as OpenAI and
+the roadmap did not keep up.
+
+Two things it contributed that nothing else had:
+
+1. **A provider whose output size is not adjustable at all.** Every other
+   provider takes either tiers or pixels, so `Capabilities` had carried an
+   implicit assumption that *some* size control always exists. Stability made
+   size a capability like any other, which is the shape the design claimed to
+   have and had not yet been forced to prove.
+2. **A seed reported in a response header.** The code originally recorded, from
+   the documentation, that the API does not report the seed it chose. A later
+   probe found `seed` and `finish-reason` as response *headers*, and pinning a
+   re-render to the reported value produced byte-identical pixels. So an
+   unpinned Stability render is reproducible after all — and the lesson is that
+   "the API does not return X" is a claim about where someone looked, not about
+   the API, until the headers have been read too.
+
+**Still open:** editing. Stability puts it on separate endpoints
+(`edit/inpaint`, `edit/erase`) rather than as parameters to generate, and
+`generate` deliberately refuses an edit rather than silently turning it into a
+fresh render. The capability table says "not yet" and means it.
+
+### OpenAI — original reasoning
 
 Demoted from second to third, not dismissed. The reasoning is only about
 ordering: it is a one-off. Its parameter model shares little with Flux, with the
@@ -429,6 +478,30 @@ The limit is stated rather than hidden: a recording proves Lucida still speaks
 yesterday's protocol, not that the provider still does. Live verification is
 still owed once per new provider or changed endpoint; the recordings make it
 once rather than every change.
+
+**The axis this missed entirely was the platform, and it cost a real bug.**
+Every test ran offline, deterministically and quickly — and only ever on the
+Linux machine they were written on, because the sole workflow ran on a tag and
+built releases rather than running the suite. The first `cargo test` on a Mac,
+at v0.5.2, failed immediately: `arbitrary_seed` read the clock once per call,
+and macOS ticks `SystemTime` at 1 µs where Linux ticks at 1 ns. Measured on the
+Mac, 97,543 of 100,000 back-to-back reads returned the *same* instant, so two
+renders started in the same microsecond were handed the same seed — the one
+property the function exists to provide. Five releases shipped with it.
+
+Three things worth keeping from that:
+
+- **A test can encode a platform assumption without naming one.** Nothing in
+  `successive_seeds_differ` mentioned an operating system; it simply relied on
+  clock resolution that only one platform has. The rewritten test asserts
+  distinctness across a batch of a thousand, which cannot pass by luck anywhere.
+- **The fix had to be structural, not statistical.** Stirring the bits harder
+  would not have helped: multiplication by an odd constant is a bijection mod
+  2^64, so equal inputs stay equal outputs. The clock is now read once and a
+  counter supplies the difference between calls.
+- **`.github/workflows/ci.yml`** now runs the suite, clippy and the smoke script
+  on Linux, macOS and Windows for every push and pull request. Building on three
+  platforms was never the same as running on them.
 
 ---
 

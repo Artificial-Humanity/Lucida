@@ -18,6 +18,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Where ComfyUI is listening. Overridden with `LUCIDA_COMFYUI_URL`.
@@ -774,13 +776,37 @@ impl ImageProvider for Client {
 /// The clock is a poor random source in general and a perfectly good one here:
 /// nothing depends on the value being unpredictable, only on successive renders
 /// differing and the value being reported so it can be pinned again.
+///
+/// **The clock cannot supply the difference between two calls, and reading it
+/// per call — which this used to do — does not work.** macOS ticks `SystemTime`
+/// at 1 µs: 97,543 of 100,000 back-to-back reads there observe the same instant,
+/// so two renders started in the same microsecond were handed the same seed.
+/// Linux ticks at 1 ns and hides the fault completely, which is why this stood
+/// for five releases and took a first run on a Mac to expose. Multiplying
+/// afterwards cannot rescue it either: an odd multiplier is a bijection mod
+/// 2^64, so equal inputs stay equal outputs however well the bits are stirred.
+///
+/// So the clock is read once and a counter supplies the difference. Distinctness
+/// is then structural rather than lucky: consecutive tickets differ by 1 before
+/// the multiply and by the multiplier after it, which is far too large a gap for
+/// the final shift to close.
 fn arbitrary_seed() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        // Flux treats the low bits as significant; the nanosecond field alone is
-        // too coarse on some platforms to differ between quick successive calls.
+    static BASE: OnceLock<u64> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // The clock separates one process from the next; the counter separates
+    // calls within one.
+    let base = *BASE.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    });
+
+    base.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
+        // Knuth's MMIX multiplier, which scatters adjacent inputs across the
+        // whole range — Flux treats the low bits as significant, so a counter
+        // arriving as 0, 1, 2 must not leave as 0, 1, 2.
         .wrapping_mul(6_364_136_223_846_793_005)
         >> 1
 }
@@ -1091,7 +1117,23 @@ mod tests {
 
     #[test]
     fn successive_seeds_differ() {
-        assert_ne!(arbitrary_seed(), arbitrary_seed());
+        // A batch rather than a pair: the fault this guards against was a
+        // platform's clock resolution, so two calls could pass on Linux and
+        // fail on macOS. A thousand in a tight loop cannot land in distinct
+        // microseconds anywhere, which makes the assertion mean the same thing
+        // on every platform.
+        let seeds: std::collections::HashSet<u64> = (0..1000).map(|_| arbitrary_seed()).collect();
+        assert_eq!(seeds.len(), 1000, "every seed in a batch must be distinct");
+    }
+
+    #[test]
+    fn seeds_are_scattered_rather_than_counted() {
+        // Flux reads the low bits, so a counter must not reach it as 0, 1, 2.
+        let (a, b) = (arbitrary_seed(), arbitrary_seed());
+        assert!(
+            a.abs_diff(b) > u32::MAX as u64,
+            "consecutive seeds {a} and {b} are adjacent, so the counter is showing through"
+        );
     }
 
     #[test]

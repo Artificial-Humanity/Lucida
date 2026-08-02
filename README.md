@@ -18,14 +18,19 @@ $ lucida generate "a brass astrolabe on dark slate" \
 
 $ lucida video "a red maple leaf drifting down against white" --out clip.mp4
 
-$ lucida generate "a brass astrolabe on dark slate" --provider bfl --seed 7
-
 $ lucida models --provider bfl
 ```
 
 One static binary. No Python, no virtualenv, no dependency resolution at startup
 — which matters most in the MCP case, where the server is launched and killed
 constantly and any stray write to stdout corrupts the protocol.
+
+**What this file deliberately does not cover:** what each provider charges, how
+fast it is, which models it offers today, or what provenance marking its output
+carries. Those belong to the providers, they change without notice, and a copy
+of them here would be wrong before it was stale. `lucida models --provider
+<name>` asks the provider and prints the live answer; pricing and policy are
+worth reading from the provider directly.
 
 ## Install
 
@@ -36,99 +41,97 @@ cargo install --git https://github.com/Artificial-Humanity/Lucida
 Or take a prebuilt binary from the
 [latest release](https://github.com/Artificial-Humanity/Lucida/releases/latest):
 
-- **macOS** — `lucida-<version>-macos-universal`, a universal binary covering both
-  Apple Silicon and Intel. It is unsigned, so on first run macOS will refuse it;
-  clear the quarantine attribute with
+- **macOS** — `lucida-<version>-macos-universal`, covering Apple Silicon and
+  Intel. It is unsigned, so first run needs
   `xattr -d com.apple.quarantine lucida-*-macos-universal`.
-- **Linux** — `lucida-<version>-x86_64-linux-musl`, statically linked with no libc
-  or OpenSSL dependency. Verified running on Debian 11 and Alpine, including TLS
-  with no system CA store.
+- **Linux** — `lucida-<version>-x86_64-linux-musl`, statically linked with no
+  libc or OpenSSL dependency.
+- **Windows** — `lucida-<version>-x86_64-windows.exe`.
 
-Or build it locally:
-
-```console
-git clone https://github.com/Artificial-Humanity/Lucida
-cd Lucida && cargo build --release
-# binary at target/release/lucida
-```
+Or build it: `git clone …` then `cargo build --release`, binary at
+`target/release/lucida`.
 
 ## Configuration
 
-Every setting is an environment variable, and every one of them can also live in
-a config file for when there is no shell to read the environment from:
+Every setting is an environment variable, and every one can also live in a
+config file for when there is no shell to read the environment from.
 
 ```console
-$ lucida config --init
-$ lucida config
-Config file: /home/you/.config/lucida/config.env
-
-Settings visible to this process:
-  GOOGLE_API_KEY         set (config file)    Google API key
-  LUCIDA_COMFYUI_URL     not set              Where ComfyUI is listening
-  …
+$ lucida config --set BFL_API_KEY       # prompts, masked; or reads a pipe
+$ lucida config                         # what this process sees, and from where
 ```
+
+| Variable | For |
+|---|---|
+| `GOOGLE_API_KEY` | Google — images via Gemini, video via Veo. `GEMINI_API_KEY` is accepted as an alias |
+| `BFL_API_KEY` | Black Forest Labs — hosted FLUX |
+| `STABILITY_API_KEY` | Stability AI |
+| `OPENAI_API_KEY` | OpenAI |
+| `LUCIDA_COMFYUI_URL` | Where ComfyUI is listening. Defaults to `http://127.0.0.1:8188`; no credential needed |
+| `LUCIDA_COMFYUI_AUTH` | ComfyUI credentials, if it is fenced. `user:password`, a complete `Bearer …` / `Basic …` header, or a bare token. Sent on every request including the image download |
+| `LUCIDA_COMFYUI_CA` | Path to a PEM certificate, to trust a private CA |
+| `LUCIDA_CONFIG` | Path to the config file, overriding where it is looked for |
+
+You only need the ones for providers you actually use. Keys come from each
+provider's own dashboard.
+
+**`lucida config`** prints whether each setting is present and where it came
+from — never a value — so its output is safe to paste into a bug report.
+
+**`lucida config --set NAME`** writes one setting into the config file. At a
+terminal it prompts and shows asterisks rather than the value; given a pipe it
+reads stdin, so the key never enters shell history:
+
+```console
+$ pbpaste | lucida config --set OPENAI_API_KEY
+```
+
+**`lucida config --init`** writes a starter file, mode 600, and prints its path.
+It never overwrites an existing one.
 
 The file is plain `KEY=value` lines using the same names as the environment
 variables, so there is no second vocabulary to learn. A leading `export` and
-surrounding quotes are both accepted, which means a fragment of a shell profile
-can be pasted straight in. Lines are ignored after `#`.
+surrounding quotes are both accepted, so a fragment of a shell profile can be
+pasted straight in. Text after `#` is ignored.
 
 **The environment always wins.** The file is consulted only when a variable is
 unset or empty, so adding one cannot change the behaviour of a setup that
 already works.
 
-Looked for in order: `$LUCIDA_CONFIG` (a file path, wins outright), then
+It is looked for in order: `$LUCIDA_CONFIG` (a file path, wins outright), then
 `$XDG_CONFIG_HOME/lucida/config.env` or `~/.config/lucida/config.env`, then on
-macOS `~/Library/Application Support/lucida/config.env`. `--init` creates it
-mode 600 and never overwrites an existing file; Lucida warns if the file it
-reads is readable by other users.
+macOS `~/Library/Application Support/lucida/config.env`. Lucida warns if the
+file it reads is readable by other users.
 
-`lucida config` prints only *whether* each setting is present and where it came
-from — never a value — so its output is safe to paste into a bug report.
+> **A GUI-launched application has no shell environment**, and neither does any
+> MCP server it spawns — so a key exported in `~/.zshenv` is genuinely invisible
+> to a client started from the Dock, Finder or Spotlight, even though the same
+> binary works perfectly from a terminal. This is what the config file is for.
+> Note that passing `--env GOOGLE_API_KEY='${GOOGLE_API_KEY}'` to `claude mcp
+> add` does **not** fix it: the reference expands from the client's own
+> environment, which is exactly the empty one.
 
 ## Providers
 
-Five, and the differences are not only quality:
-
-| | `google` | `comfyui` | `bfl` | `stability` | `openai` |
-|---|---|---|---|---|---|
-| Models | Gemini | Local (Flux.2) | Hosted FLUX | Stable Image | gpt-image |
-| Credential | API key, billing | None | API key, paid | API key, paid | API key, paid |
-| Cost | Per image | Free | ~3 credits | ~2 credits | Per image |
-| Speed | Seconds | **Minutes** | Seconds | Seconds | ~15-20s |
-| Aspect ratio | 10 named | Any, /16px | Any, /32px | 9 named (a *different* 9) | 3 named, or free on `gpt-image-2` |
-| Output size | Tiers | Pixels | Pixels | **Not adjustable** | Only `gpt-image-2` |
-| Seed | **No** | Yes | Yes | Yes | **No** |
-| Negative prompt | No | **Yes** | No | **Yes** | **No** |
-| Editing | Yes | Yes | Yes | Not yet | Yes |
-| **Mask** | No | No | No | No | **Yes (advisory)** |
-| Steps / guidance | No | Yes | `flux-2-flex`, `flux-dev` | No | No |
-| Output carries | SynthID + C2PA | **Nothing** | C2PA only | C2PA only | C2PA only |
-
-**Only `openai` accepts a mask, and it is advisory rather than binding.** Asking
-for a change inside a box and measuring the rest of the picture: `gpt-image-2`
-concentrated 4.5× more change inside than outside (10.9/255 elsewhere), while
-`gpt-image-1.5` managed 2.0× and lost an object nowhere near the mask. If pixels
-outside the mask must survive, composite the result back over the original.
-
-Two of them use *named* aspect ratios and **disagree about which** — Google has
-`4:3`, Stability has `9:21`, neither has the other's. That is why the list is
-published per provider rather than shared.
-
-**Capabilities vary per *model* on `bfl`**, which no other provider does — `steps`
-and `guidance` exist on `flux-2-flex` and `flux-dev` and nowhere else in the
-family. `lucida models --provider bfl` marks which is which.
-
-Note the pattern that is easy to get backwards: the **local** lane is the one
-with a negative prompt, because ComfyUI builds the graph and can wire negative
-conditioning itself. No hosted FLUX endpoint exposes one.
+Five: `google`, `comfyui`, `bfl`, `stability` and `openai`.
 
 The provider is inferred from the model id, so `--model klein` reaches ComfyUI
-and `--model banana` reaches Google. `--provider` overrides it, and also picks
-the default model, so `--provider comfyui` alone works.
+and `--model banana` reaches Google. `--provider` overrides it and supplies that
+provider's default model, so `--provider comfyui` alone works.
 
-**Parameters are never silently dropped.** Asking Google for a seed is an error
-naming the provider that has one, not an image that quietly ignored you:
+They do not support the same things — seeds, negative prompts, masks, sampler
+settings and aspect ratios all vary, and on some providers they vary per model.
+Rather than reproduce that here, ask:
+
+```console
+$ lucida models --provider comfyui
+```
+
+which lists the models that provider can currently reach, the aliases Lucida
+accepts for them, and exactly what it can be asked for.
+
+**Nothing is silently dropped.** A parameter the chosen provider cannot honour
+is an error naming one that can, not an image that quietly ignored you:
 
 ```console
 $ lucida generate "a test" --seed 42
@@ -139,94 +142,62 @@ means. Use the `comfyui` provider (a local model, e.g. `--model klein`) when you
 need to render the same image twice.
 ```
 
-`lucida models --provider <name>` prints that provider's full capability list
-alongside the models it can actually see.
+ComfyUI is the one provider with no credential and no per-image cost, and the
+one that takes minutes rather than seconds. Lucida builds the workflow graph
+itself and submits it to `/prompt`, so nothing needs importing into the UI, and
+it asks the server which model files exist rather than assuming an install.
+Images move over HTTP in both directions rather than through the filesystem, so
+a ComfyUI in a container or on another machine works with no shared mount.
 
-## Setup
+## Commands
 
-### Google
+| Command | What it does |
+|---|---|
+| `lucida generate <prompt>` | Prompt to image. Writes `image.png` unless `--out` |
+| `lucida edit <image> <prompt>` | Edits an existing image. **Overwrites its input** unless `--out` |
+| `lucida video <prompt>` | Renders with Veo. Takes minutes, and bills per second of output |
+| `lucida check <operation>` | Resumes a video render by operation id — after a timeout, or from a different shell |
+| `lucida models` | What a provider can reach, and what it can be asked for |
+| `lucida config` | What settings this process can see |
+| `lucida mcp` | Runs as an MCP server over stdio |
 
-Set an API key from [Google AI Studio](https://aistudio.google.com/apikey):
+`--help` on any of them lists its options and notes which providers honour each.
 
-```sh
-export GOOGLE_API_KEY="..."     # GEMINI_API_KEY also works
-```
+**Geometry.** `--aspect` takes `W:H`; `--size` takes a tier (`1K`, `2K`, `4K`)
+or a pixel count for the long edge. Both are resolved onto whatever grid the
+provider uses, so `--aspect 16:9 --size 1K` means the same thing everywhere and
+becomes `1024×576` on ComfyUI. Omit either to let the provider choose.
 
-> **Billing is required.** Image generation has **no free tier**. A free-tier key
-> authenticates fine and can list models, but every generation returns
-> `HTTP 429 … limit: 0` — meaning no quota exists at all, not that a quota was
-> used up. Waiting will not help; enable billing at
-> [aistudio.google.com/billing](https://aistudio.google.com/billing). `lucida`
-> detects this specific case and says so rather than reporting a generic rate
-> limit.
-
-Check your key without spending anything — listing models is free:
+**Output.** Parent directories are created as needed, and the written path is
+printed to stdout alone, so it composes:
 
 ```console
-$ lucida models
+$ open "$(lucida generate "a sunset" -o /tmp/x.png)"
 ```
 
-### ComfyUI
+Extensions are corrected to match the bytes actually returned: `-o icon.png`
+that comes back as JPEG is written as `icon.jpg`, with a note on stderr. A file
+named `.png` holding JPEG bytes passes unnoticed until something downstream
+rejects it. Since the real path is what goes to stdout, `$(lucida generate …)`
+stays correct either way.
 
-Point Lucida at a running [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
-if it is not on the default `http://127.0.0.1:8188`:
+An edit is normalised to the resolution the model works at rather than kept at
+the source's exact pixel dimensions, so aspect survives but size may not.
+Lucida prints the size it actually wrote; pass `--aspect` or `--size` to state
+the geometry you want.
 
-```sh
-export LUCIDA_COMFYUI_URL="http://127.0.0.1:8188"
-```
-
-**Remote servers work.** The URL is used verbatim, so `https://` and a
-path-prefixed reverse proxy (`https://host/comfyui/`) both work:
-
-```sh
-export LUCIDA_COMFYUI_URL="https://comfyui.example.internal"
-export LUCIDA_COMFYUI_AUTH="user:password"    # if it is fenced
-```
-
-| Variable | Purpose |
-|---|---|
-| `LUCIDA_COMFYUI_URL` | Where the server is. Any scheme, host, port and path prefix |
-| `LUCIDA_COMFYUI_AUTH` | Credentials, sent on every request including the image download |
-| `LUCIDA_COMFYUI_CA` | Path to a PEM certificate, to trust a private CA |
-
-`LUCIDA_COMFYUI_AUTH` accepts whichever form you have to hand:
-
-- `user:password` — encoded as Basic. This is the reverse-proxy `basic_auth` case.
-- `Bearer eyJ…` or `Basic dXNl…` — a complete header value, used as is.
-- anything else — treated as a bare token and sent as `Bearer`.
-
-Credentials embedded in the URL (`https://user:pass@host`) work too, and an
-explicit `LUCIDA_COMFYUI_AUTH` beats them. Either way the password is stripped
-out of the URL before it can reach an error message.
-
-**On certificates:** Lucida trusts the bundled Mozilla root set and never reads
-the system CA store — that is what lets the static musl binary do TLS on a host
-with no certificates installed. A publicly trusted certificate therefore needs no
-configuration at all, including one issued by Let's Encrypt for an internal-only
-hostname via a DNS-01 challenge, which is a common and good setup. Only a genuinely
-private CA needs `LUCIDA_COMFYUI_CA`. There is no flag to skip verification.
-
-Lucida builds the workflow graph itself and submits it to ComfyUI's `/prompt`
-API, so nothing needs importing into the UI. It asks the server which model files
-exist rather than assuming any particular install, and `--model klein` resolves
-to whatever Flux.2 diffusion model, text encoder and VAE that server reports.
-
-Images move over HTTP in both directions — uploaded with `/upload/image`, results
-fetched with `/view` — rather than through the filesystem, so a ComfyUI in a
-container or on another machine works with no shared mount.
-
-### Your own workflow
+### Your own ComfyUI workflow
 
 Lucida builds a Flux.2 graph by default. To render something else — a different
-model family, a ControlNet, an upscaler — supply a workflow of your own:
+model family, a ControlNet, an upscaler — supply a graph of your own in
+ComfyUI's **API format** (Workflow → Export (API), not the editor format with
+`nodes` and `links` arrays):
 
 ```console
 $ lucida generate "a brass astrolabe" --provider comfyui --workflow mine.json
 ```
 
-It must be ComfyUI's **API format** (Workflow → Export (API)), not the editor
-format that has `nodes` and `links` arrays; Lucida names that mistake rather than
-letting the server reject it obscurely. Mark where values belong with tokens:
+Mark where values belong with tokens:
 
 | Token | Filled from |
 |---|---|
@@ -234,76 +205,16 @@ letting the server reject it obscurely. Mark where values belong with tokens:
 | `%width%` `%height%` | `--aspect` and `--size` |
 | `%seed%` `%steps%` `%cfg%` | `--seed`, `--steps`, `--guidance` |
 
-**A token the file omits means that option cannot be honoured, and Lucida refuses
-it rather than ignoring it.** A graph with no `%seed%` would render happily and
-drop `--seed` on the floor — the silent failure this tool exists to prevent,
-arriving through the one door built to let you past its defaults. So the tokens
-present in your file are the capability set for that render.
+**A token the file omits means that option cannot be honoured, and Lucida
+refuses it rather than ignoring it.** A graph with no `%seed%` would render
+happily and drop `--seed` on the floor — the silent failure this tool exists to
+prevent, arriving through the one door built to let you past its defaults. So
+the tokens present in your file are the capability set for that render.
 
 Values are JSON-escaped on the way in, so a prompt containing quotes cannot
-corrupt the graph. A workflow cannot be combined with reference images, since
-Lucida has no way to know which node an upload belongs to.
-
-Editing works here too:
-
-```console
-$ lucida edit hero.png "make the sky overcast" --provider comfyui
-```
-
-The source is uploaded, encoded, and attached to the conditioning. Repeating
-`--ref` chains additional images, each adding to what the model is conditioned
-on.
-
-> **An edit keeps the source's aspect ratio, not its pixel dimensions.** The
-> result is normalised to roughly one megapixel — the resolution Flux.2 actually
-> works at — so a `1024×576` source comes back `1360×768`. It can upscale as
-> readily as downscale. Aspect is preserved to within about half a percent,
-> the drift coming from rounding onto the 16-pixel latent grid.
->
-> This matters because `lucida edit` overwrites its input by default: editing a
-> file in place can change its dimensions. Pass `--out` to write elsewhere, or
-> `--aspect`/`--size` to state the geometry you want. Lucida prints the size it
-> actually wrote, so this is never silent.
->
-> Exact preservation is deliberately not offered: a 12 MP photograph is not
-> something this model can render, so *some* normalisation is unavoidable and a
-> rule that silently applies only sometimes would be worse than one that always
-> applies.
-
-Requires a Flux.2 checkpoint — diffusion model, text encoder and VAE — installed
-where ComfyUI can see it. `lucida models --provider comfyui` lists what it found,
-and a missing file produces a message naming the files the server actually has
-rather than a validation dump.
-
-> **Renders are slow, and the first one is slowest.** Measured on a Radeon 8060S
-> (gfx1151), 1024×1024 at 20 steps with Flux.2 Klein 9B: **~270 seconds** to
-> generate, **~460 seconds** to edit. Much of that is loading 33 GB of weights,
-> and if ComfyUI runs with `--cache-none` every render pays it rather than just
-> the first. Editing costs more on top because the encoded source adds tokens for
-> the model to attend over.
-
-### Black Forest Labs
-
-A key from [dashboard.bfl.ai](https://dashboard.bfl.ai). This is a paid API and
-every render costs credits, so `lucida models --provider bfl` checks the key
-against the free `/v1/credits` endpoint and reports the balance before you spend
-anything.
-
-```console
-$ lucida config --set BFL_API_KEY     # reads stdin; stays out of shell history
-$ lucida models --provider bfl
-Key is valid. Remaining credits: 1000
-```
-
-Measured: a 1024×576 `flux-2-pro` render took **6 seconds and 3 credits**; the
-same picture edited cost 4.5. Compare ~270 seconds for the local lane, free.
-
-Lucida prints the cost of each job before waiting for it, because this is the one
-provider where a typo in a loop spends real money.
-
-> **A malformed key comes back as HTTP 422, not 401.** Lucida recognises it
-> anyway — read by status code alone it looks like a rejected parameter, which
-> sends you to inspect your prompt.
+corrupt the graph. A workflow cannot be combined with reference images or an
+explicit `--model`, since it names its own checkpoints and Lucida has no way to
+know which node an upload belongs to.
 
 ## Use as an MCP server
 
@@ -313,23 +224,9 @@ Register it once, for every project:
 claude mcp add --scope user lucida -- /path/to/lucida mcp
 ```
 
-Verify with `claude mcp list`, which should report `✔ Connected`.
-
-> **If the client was launched from the Dock, Finder or Spotlight, it has no
-> shell environment** — and neither does any MCP server it spawns. A
-> `GOOGLE_API_KEY` exported in `~/.zshenv` is genuinely invisible, even though
-> the same binary works perfectly from a terminal. Use a config file, which is
-> what it is for:
->
-> ```console
-> lucida config --init      # writes ~/.config/lucida/config.env, mode 600
-> lucida config             # shows what a process can actually see
-> ```
->
-> Passing `--env GOOGLE_API_KEY='${GOOGLE_API_KEY}'` to `claude mcp add` does
-> **not** fix this: the reference is expanded from the client's own environment,
-> which is exactly the empty one. `launchctl setenv` does work, but exports the
-> secret to every process in your login session and does not survive a reboot.
+Verify with `claude mcp list`, which should report `✔ Connected`. If keys live
+in your shell rather than a config file, read the note under
+[Configuration](#configuration) first — it is the failure this setup hits most.
 
 Four tools are exposed:
 
@@ -340,260 +237,74 @@ Four tools are exposed:
 | `start_video` | Begins a Veo render, returns an operation id immediately |
 | `check_video` | Polls that operation; downloads it once finished |
 
-**The schema is deliberately generic, and `image_providers` is why.** Version 0.1
-advertised Google's ten aspect ratios and its `1K`/`2K`/`4K` sizes as hard enums.
-Those are not facts about image generation, they are facts about Google — and an
-agent reads a schema and believes it. Since one server here serves every provider,
-chosen per call from the model id, there is no single "configured provider" whose
-schema could be published. So parameter descriptions name which providers honour
-them, `image_providers` reports live capabilities on request, and a parameter the
-chosen provider cannot honour comes back as an error naming one that can. Nothing
-is silently ignored.
+**The schema is deliberately generic, and `image_providers` is why.** Version
+0.1 advertised Google's aspect ratios and size tiers as hard enums. Those are
+not facts about image generation, they are facts about Google — and an agent
+reads a schema and believes it. Since one server serves every provider, chosen
+per call from the model id, there is no single configured provider whose schema
+could be published. So parameter descriptions name which providers honour them,
+`image_providers` reports live capabilities on request, and a parameter the
+chosen provider cannot honour comes back as an error naming one that can.
 
-Video is split in two deliberately. A Veo render takes minutes — long enough that
-a single blocking tool call would likely hit the client's timeout and abandon a
-render you had already paid for. Starting and polling separately keeps every call
-fast, and because the operation id is just a string, a render started by an agent
-can be recovered from the shell with `lucida check <operation>` even if the agent
-session dies.
+Video is split in two deliberately. A Veo render takes minutes — long enough
+that a single blocking call would likely hit the client's timeout and abandon a
+render you had already paid for. Starting and polling separately keeps every
+call fast, and because the operation id is just a string, a render started by an
+agent can be recovered from the shell with `lucida check <operation>` even if
+the agent session dies.
 
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
 
-## Models
-
-The default is `gemini-3.1-flash-image`. Google's codename for this family is
-**Nano Banana**, which appears nowhere in the API, so `lucida` accepts both:
-
-| Alias | Model | Notes |
-|---|---|---|
-| `banana`, `flash` | `gemini-3.1-flash-image` | Nano Banana 2 — the default |
-| `banana-pro`, `pro` | `gemini-3-pro-image` | Nano Banana Pro — best quality |
-| `banana-lite`, `lite` | `gemini-3.1-flash-lite-image` | Cheapest |
-| `banana-1` | `gemini-2.5-flash-image` | Legacy; retires 2026-10-02 |
-
-Any unrecognised value passes straight through, so a new model id works the day
-it ships.
-
-**Imagen is not supported, deliberately.** It uses a different endpoint, and the
-whole family shuts down on **2026-08-17**. `lucida` detects an Imagen id and
-explains rather than failing obscurely. Note that `imagen-3.0-*` ids found in
-older blog posts and generated code are already retired and return 404.
-
-## Video
-
-```console
-$ lucida video "a red maple leaf drifting down against white" \
-    --out clip.mp4 --aspect 16:9 --model veo-lite
-
-$ lucida video "slow push in, the light shifts to gold" --image still.jpg
-```
-
-| Alias | Model |
-|---|---|
-| `veo`, `veo-fast` | `veo-3.1-fast-generate-preview` — the default |
-| `veo-standard` | `veo-3.1-generate-preview` |
-| `veo-lite` | `veo-3.1-lite-generate-preview` — cheapest |
-
-Video is billed **per second of output** and is far more expensive than images,
-which is why the fast model is the default rather than the standard one.
-
-Measured behaviour, all on `veo-lite`:
-
-| | Result |
-|---|---|
-| Clip length | 8 seconds, 24 fps — not currently adjustable |
-| Default resolution | 1280×720 |
-| `--resolution 1080p` | 1920×1080, ~4× the file size, ~50% longer to render |
-| `--aspect 9:16` | 720×1280 vertical |
-| Audio | **Every clip carries an AAC audio track** — Veo generates sound, not just picture |
-| Render time | 35–95 seconds for the above |
-
-Two things worth knowing before you spend money on a long render:
-
-- **Veo generates audio.** If you want a silent asset — a looping background, a
-  hero animation — strip the track afterwards; there is no flag to suppress it.
-- **With `--image`, the source aspect wins.** Animating a 1:1 still while asking
-  for `--aspect 16:9` returns a 16:9 frame with the square image *pillarboxed
-  inside black bars*, not cropped or extended. Match `--aspect` to your source,
-  or crop the still first.
-
-Unlike images, Veo runs as a long-running operation: `lucida` starts the render,
-polls with backoff while reporting elapsed time, then downloads the result. A
-short clip takes roughly a minute. Passing `--image` animates an existing still
-instead of generating from text alone.
-
-If a wait is interrupted, nothing is lost — the render continues server-side and
-can be collected later by operation id:
-
-```console
-$ lucida check models/veo-3.1-lite-generate-preview/operations/abc123 -o clip.mp4
-```
-
-## Options
-
-`--aspect` takes `W:H`. Google accepts only `1:1`, `2:3`, `3:2`, `3:4`, `4:3`,
-`4:5`, `5:4`, `9:16`, `16:9`, `21:9`; ComfyUI accepts any ratio. `--size` takes
-either a tier (`1K`, `2K`, `4K`) or a pixel count for the long edge — Google
-rounds to the nearest tier, ComfyUI uses the number directly, rounded to the
-16-pixel grid latent models require. Omit either to let the provider choose.
-
-So `--aspect 16:9 --size 1K` means "1K on the long edge" everywhere, and becomes
-`aspectRatio: 16:9, imageSize: 1K` on Google and `1024×576` on ComfyUI.
-
-These apply to ComfyUI only, and are rejected with an explanation elsewhere:
-
-| Flag | Meaning |
-|---|---|
-| `--seed` | Renders the same image again. The seed used is always reported, so an unpinned render can still be repeated |
-| `--negative` | What to keep out of the picture |
-| `--steps` | Sampling steps, default 20 |
-| `--guidance` | How closely to follow the prompt, default 5 |
-
-`--seed` is genuinely deterministic here, not approximately so: two separate runs
-of the same prompt, model and seed produced **byte-identical** PNGs. That is the
-one thing Google cannot offer at any price.
-
-`generate` writes to `image.png` by default; `edit` overwrites its input unless
-given `--out`. Parent directories are created as needed. The written path is
-printed to stdout alone, so it composes:
-
-```console
-$ open "$(lucida generate "a sunset" -o /tmp/x.png)"
-```
-
-**Extensions are corrected to match reality.** Gemini picks its own output format
-— usually JPEG regardless of what you asked for — so `-o icon.png` that returns
-JPEG is written as `icon.jpg`, with a note on stderr. A file named `.png` holding
-JPEG bytes passes unnoticed until something downstream rejects it. Since the real
-path is what goes to stdout, `$(lucida generate …)` stays correct either way.
-
 ## Troubleshooting
 
-**`IMAGE_RECITATION` — the model returns no image.** This filter fires when the
-output would too closely reproduce training data, and it catches *simple* prompts
-more readily than elaborate ones, which is the opposite of what most people
-expect. "A small blue circle centered on white" was refused; "a weathered brass
-compass on a folded nautical chart, warm window light, shallow depth of field"
-went straight through.
+Errors from a provider are reported as the provider gave them, with the status
+code — so a quota, billing or model-availability problem is answered by that
+provider's dashboard rather than here. The entries below are the ones that are
+about Lucida.
 
-The reason is that a terse prompt has one obvious rendering while a described
-scene has many. Requests like "a simple flat icon" are the most likely to hit it.
-Add material, lighting, composition, or style detail rather than reaching for
-another model.
+**Every generation says no API key found, but the key is set.** The client was
+launched as a GUI application and inherited no shell environment. Run `lucida
+config` to confirm what the process can actually see, then put the key in the
+config file with `lucida config --set`.
 
-**`HTTP 429 … limit: 0`.** Not throttling — no image quota exists on the project.
-See [Setup](#setup); waiting will not help.
-
-**`negativePrompt isn't supported by this model`.** `veo-lite` rejects negative
-prompts outright. Use `veo` or `veo-standard`, or drop the flag.
+**The MCP tools do not appear.** Claude Code reads its server list at startup,
+so a newly added server is invisible to the session that added it — restart,
+then check `claude mcp list` reports `✔ Connected`. Note that "connected" only
+proves the binary launched and answered a handshake; it says nothing about the
+API key, because listing tools never calls the API. The first real generation is
+what proves credentials.
 
 **`could not reach ComfyUI`.** The server has to be running, and Lucida looks at
-`http://127.0.0.1:8188` unless `LUCIDA_COMFYUI_URL` says otherwise. Note that a
-hostname that resolves elsewhere on your network may not resolve for Lucida —
-prefer the host and port you can `curl`. Short hostnames are a common culprit:
-a name may exist only as a fully qualified one.
+`http://127.0.0.1:8188` unless `LUCIDA_COMFYUI_URL` says otherwise. A hostname
+that resolves elsewhere on your network may not resolve for Lucida — prefer the
+host and port you can `curl`. Short hostnames are a common culprit: a name may
+exist only as a fully qualified one.
 
-**`HTTP 401`.** The server, or a proxy in front of it, wants credentials. Set
-`LUCIDA_COMFYUI_AUTH`. The message distinguishes "none were sent" from "the ones
-you sent were rejected", so it tells you which half to fix.
+**`HTTP 401` from ComfyUI.** The server, or a proxy in front of it, wants
+credentials. Set `LUCIDA_COMFYUI_AUTH`. The message distinguishes "none were
+sent" from "the ones you sent were rejected", so it tells you which half to fix.
 
 **`TLS verification failed`.** The server answered — this is a certificate
-problem, not an unreachable host, and restarting the server will not help. Either
-the certificate is issued by a private CA (point `LUCIDA_COMFYUI_CA` at it) or it
-does not match the hostname you used. The underlying error is appended and names
-which.
+problem, not an unreachable host, and restarting the server will not help.
+Lucida trusts the bundled Mozilla root set and never reads the system CA store,
+which is what lets the static binary do TLS on a host with no certificates
+installed. A publicly trusted certificate therefore needs no configuration;
+only a genuinely private CA needs `LUCIDA_COMFYUI_CA`. There is no flag to skip
+verification.
 
 **A ComfyUI render appears to hang.** Give it several minutes before assuming
-otherwise; elapsed time is reported every 30 seconds. On ROCm specifically,
-ComfyUI needs `--disable-mmap` or diffusion models hang on load rather than
-failing, and a cold MIOpen kernel database can add close to an hour on first use
-— persist it across restarts. A local provider inherits its host's quirks.
-
-**`ComfyUI has no diffusion model for the flux2 family`.** The checkpoint is not
-installed, or not where that server looks. The message lists what it does have;
-`lucida models --provider comfyui` prints the same list.
-
-**The MCP server connects, but every generation says no API key found.** The
-client was launched as a GUI application, so it inherited no shell environment
-and passed that empty environment to the server. Run `lucida config` to confirm,
-then `lucida config --init` and put the key in the file. See
-[Use as an MCP server](#use-as-an-mcp-server).
-
-**The MCP tools do not appear.** Claude Code reads its server list at startup, so
-a newly added server is invisible to the session that added it — restart, then
-check `claude mcp list` reports `✔ Connected`. Note that "connected" only proves
-the binary launched and answered a handshake; it says nothing about the API key,
-because listing tools never calls the API. The first real generation is what
-proves credentials.
+otherwise; elapsed time is reported every 30 seconds. A local provider inherits
+its host's quirks — on ROCm, for instance, ComfyUI needs `--disable-mmap` or
+diffusion models hang on load rather than failing.
 
 **The written file has a different extension than requested.** Intended — see
-[Options](#options).
-
-## Watermarking
-
-**Provenance is per-provider, and the difference is real rather than claimed —
-both halves were verified in the raw bytes.**
-
-| Provider | Output carries | Survives a re-encode? |
-|---|---|---|
-| `google` (images and video) | SynthID watermark + C2PA manifest | **Yes** — SynthID is in the pixels |
-| `bfl` | C2PA manifest only, no pixel watermark | No — metadata only |
-| `stability` | C2PA manifest only, no pixel watermark | No — metadata only |
-| `openai` | C2PA manifest only, no pixel watermark | No — metadata only |
-| `comfyui` | Nothing | — |
-
-That middle row is the one worth reading twice. Hosted FLUX **is** marked: a
-signed C2PA manifest naming `Black Forest Labs API` as claim generator, `FLUX.2`
-as software agent, and asserting `digitalSourceType: trainedAlgorithmicMedia`.
-But it carries no pixel watermark, so re-encoding the file removes the disclosure
-entirely — which is precisely what SynthID is designed to prevent. Marked and
-*removably* marked are different claims, and both differ from unmarked.
-
-Lucida reports which you got: `lucida models --provider <name>` lists it, the MCP
-`generate_image` result states it per render, and `image_providers` reports it
-for both. That is cheaper than the way we established it in the first place,
-which was grepping the bytes.
-
-The rest of this section concerns Google.
-
-Everything Google generates — images and video alike — is marked as AI-generated.
-There is no opt-out, on any tier, including paid API access.
-
-Two different things get conflated, which is why people reasonably believe
-otherwise:
-
-- **The visible "sparkle" glyph** is a consumer Gemini *app* feature, and paid
-  app tiers remove it. It is not applied to API output at all. So these files
-  genuinely look clean.
-- **Invisible provenance** rides along regardless: an embedded
-  [SynthID](https://deepmind.google/technologies/synthid/) watermark plus a
-  [C2PA](https://c2pa.org/) manifest asserting
-  `digitalSourceType: trainedAlgorithmicMedia`, the IPTC code for AI-generated
-  media.
-
-Looking clean is not the same as being unmarked. Verified directly against this
-tool's own paid-tier output — both the JPEG and the MP4 contain `C2PA`,
-`SynthID`, and `trainedAlgorithmicMedia` strings in the raw bytes:
-
-```console
-$ grep -aoiE "c2pa|synthid|trainedAlgorithmicMedia" output.jpg | sort -u
-```
-
-Re-encoding an image (opening and re-exporting it) strips the C2PA metadata; the
-SynthID watermark is designed to survive that. Treat "watermark-free" claims as
-false, including any `add_watermark` config field you may encounter — that
-belongs to Vertex AI and does nothing here.
-
-**The local lane is the exception.** A Flux.2 render from ComfyUI contains no
-SynthID string and no C2PA manifest, checked exactly the same way. If you need
-genuinely unmarked output, that is the only provider here that produces it.
+[Commands](#commands).
 
 ## Roadmap
 
-[ROADMAP.md](ROADMAP.md) covers the providers still to come — hosted Flux,
-OpenAI, Firefly, and why Midjourney is deliberately excluded — plus the pieces
-this second provider left open, editing on the local lane chief among them.
+[ROADMAP.md](ROADMAP.md) records what is built, what is next, and the decisions
+behind both — including which providers were ruled out and why.
 
 ## Licence
 

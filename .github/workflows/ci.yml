@@ -1,0 +1,44 @@
+name: ci
+
+# Until now the only workflow ran on a tag, so `cargo test` had never run on a
+# machine other than the developer's. That is how a seed collision caused by
+# macOS's 1 µs clock resolution survived five releases: the Linux box it was
+# written on could not observe it, and nothing else ever ran the suite.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # All three release platforms, because the bug that prompted this file was
+    # a platform difference the code never mentioned. Windows is here for the
+    # same reason even though the release job already builds it — building is
+    # not running.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: cargo test
+
+      # The tests reach no network: every provider is answered by
+      # `src/testserver.rs` on a loopback port. A run that starts talking to a
+      # real API is a bug in the test, not a flaky provider.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Smoke test the built binary
+        run: |
+          cargo build --release
+          BIN=target/release/lucida
+          if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
+          ./scripts/smoke.sh "$BIN"
