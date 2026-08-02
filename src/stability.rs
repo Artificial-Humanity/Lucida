@@ -69,6 +69,8 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
 pub const KNOWN_MODELS: &[&str] = &["core", "ultra", "sd3"];
 
 /// The `model` values `sd3` accepts, again read from its validation error.
+/// Each is also accepted as a Lucida model id, resolving to the `sd3` endpoint
+/// with the variant named in the form — `sd3` alone means the first of them.
 pub const SD3_VARIANTS: &[&str] = &[
     "sd3.5-large",
     "sd3.5-large-turbo",
@@ -189,11 +191,31 @@ impl ImageProvider for Client {
         // instead, which is what someone running this actually wants to know.
         let credits = self.credits()?;
         eprintln!("Key is valid. Remaining credits: {credits}");
-        Ok(KNOWN_MODELS.iter().map(|m| (*m).to_string()).collect())
+        // The endpoints, then the sd3 variant spellings — listed so the cheap
+        // and fast variants are discoverable, not just the endpoint that
+        // defaults to the large one.
+        Ok(KNOWN_MODELS
+            .iter()
+            .chain(SD3_VARIANTS)
+            .map(|m| (*m).to_string())
+            .collect())
     }
 
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
-        let model = resolve_model(&req.model);
+        let resolved = resolve_model(&req.model);
+
+        // `sd3` is an endpoint, not a model: the weights are named in a `model`
+        // field, and the four sd3.5-* spellings are ways of reaching it. Before
+        // this split, `--model sd3.5-flash` was treated as a URL path and
+        // 404'd — the cheapest and fastest variants were advertised in the
+        // source and unreachable from the CLI.
+        let (model, sd3_variant) = if SD3_VARIANTS.contains(&resolved.as_str()) {
+            ("sd3".to_string(), Some(resolved))
+        } else if resolved == "sd3" {
+            ("sd3".to_string(), Some(SD3_VARIANTS[0].to_string()))
+        } else {
+            (resolved, None)
+        };
 
         let mut form = reqwest::blocking::multipart::Form::new()
             .text("prompt", req.prompt.clone())
@@ -210,13 +232,14 @@ impl ImageProvider for Client {
         if let Some(negative) = &req.negative_prompt {
             form = form.text("negative_prompt", negative.clone());
         }
-        // `sd3` is an endpoint, not a model: it needs a variant naming which
-        // weights actually run, and rejects the request without one.
-        if model == "sd3" {
-            form = form.text("model", SD3_VARIANTS[0]);
+        if let Some(variant) = &sd3_variant {
+            form = form.text("model", variant.clone());
         }
 
-        eprintln!("Rendering with stability {model}…");
+        match &sd3_variant {
+            Some(variant) => eprintln!("Rendering with stability {model} ({variant})…"),
+            None => eprintln!("Rendering with stability {model}…"),
+        }
 
         let response = self
             .http
@@ -436,5 +459,25 @@ mod tests {
         let body = requests[0].body_text();
         assert!(body.contains("name=\"model\""));
         assert!(body.contains("sd3.5-large"));
+    }
+
+    /// A variant spelling is not a URL path: it reaches the `sd3` endpoint and
+    /// names itself in the `model` field. Before this, `sd3.5-flash` became
+    /// `/generate/sd3.5-flash` and 404'd — the cheapest variants unreachable.
+    #[test]
+    fn an_sd3_variant_reaches_the_sd3_endpoint_naming_itself() {
+        let server = serve(vec![Reply::bytes("image/png", b"x")]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "sd3.5-flash".into(),
+            ..Default::default()
+        };
+        wired(&server).generate(&request).unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/v2beta/stable-image/generate/sd3");
+        let body = requests[0].body_text();
+        assert!(body.contains("name=\"model\""));
+        assert!(body.contains("sd3.5-flash"));
     }
 }

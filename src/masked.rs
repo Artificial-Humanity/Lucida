@@ -63,7 +63,10 @@ pub fn read_masked() -> Result<String> {
         }
     }
 
-    let mut value = String::new();
+    // Bytes rather than chars, validated once at the end: UTF-8 arrives here
+    // one byte at a time, and pushing `byte as char` was a Latin-1
+    // reinterpretation that turned a pasted `é` into `Ã©`.
+    let mut value: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];
     let mut stderr = std::io::stderr();
 
@@ -84,7 +87,7 @@ pub fn read_masked() -> Result<String> {
             // Backspace and delete. Erase one asterisk by moving back, painting a
             // space, and moving back again — the terminal has no undo.
             0x08 | 0x7f => {
-                if value.pop().is_some() {
+                if pop_last_char(&mut value) {
                     let _ = write!(stderr, "\u{8} \u{8}");
                     let _ = stderr.flush();
                 }
@@ -93,15 +96,39 @@ pub fn read_masked() -> Result<String> {
             // something that contributed nothing to the value.
             c if c < 0x20 => {}
             c => {
-                value.push(c as char);
-                let _ = write!(stderr, "*");
-                let _ = stderr.flush();
+                value.push(c);
+                // One asterisk per character, not per byte: a continuation byte
+                // belongs to a character whose asterisk is already printed, and
+                // printing another desynchronises the display from backspace.
+                if !is_continuation(c) {
+                    let _ = write!(stderr, "*");
+                    let _ = stderr.flush();
+                }
             }
         }
     }
 
     let _ = writeln!(stderr);
-    Ok(value)
+    String::from_utf8(value).context("the value was not valid UTF-8")
+}
+
+/// A UTF-8 continuation byte, `10xxxxxx`.
+#[cfg(unix)]
+fn is_continuation(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// Removes the last whole character — its continuation bytes, then their lead —
+/// and reports whether there was one to remove, mirroring `Vec::pop`.
+#[cfg(unix)]
+fn pop_last_char(bytes: &mut Vec<u8>) -> bool {
+    let removed = !bytes.is_empty();
+    while let Some(byte) = bytes.pop() {
+        if !is_continuation(byte) {
+            break;
+        }
+    }
+    removed
 }
 
 #[cfg(not(unix))]
@@ -131,5 +158,32 @@ impl Drop for Restore {
         unsafe {
             libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A backspace must undo one *character*: popping one byte from a pasted
+    /// `é` (two bytes) would leave half a code point in an API-key file.
+    #[test]
+    fn backspace_removes_a_whole_character() {
+        let mut bytes = "aé€".as_bytes().to_vec(); // 1 + 2 + 3 bytes
+        assert!(pop_last_char(&mut bytes));
+        assert_eq!(bytes, "aé".as_bytes());
+        assert!(pop_last_char(&mut bytes));
+        assert_eq!(bytes, b"a");
+        assert!(pop_last_char(&mut bytes));
+        assert!(bytes.is_empty());
+        assert!(!pop_last_char(&mut bytes), "an empty value has nothing to erase");
+    }
+
+    /// One asterisk per character keeps the display and backspace in step —
+    /// two asterisks for `é` with one erased per backspace drifted apart.
+    #[test]
+    fn asterisks_are_counted_per_character_not_per_byte() {
+        let printed = "aé€".bytes().filter(|b| !is_continuation(*b)).count();
+        assert_eq!(printed, "aé€".chars().count());
     }
 }

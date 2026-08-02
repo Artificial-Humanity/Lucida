@@ -264,6 +264,17 @@ impl Client {
             let status = response.status();
             if !status.is_success() {
                 let text = response.text().unwrap_or_default();
+                // Not routed through explain_error's 404 branch: that one is
+                // about model endpoints and suggests `lucida models`, which is
+                // misleading advice for a job that has simply expired.
+                if status.as_u16() == 404 {
+                    bail!(
+                        "the render is no longer available at its polling URL — \
+                         results expire shortly after completion. Submit the \
+                         render again.\n\nOriginal message: {}",
+                        text.trim()
+                    );
+                }
                 bail!("{}", explain_error(status.as_u16(), &text, "get_result"));
             }
 

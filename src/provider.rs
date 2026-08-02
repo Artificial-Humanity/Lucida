@@ -567,6 +567,7 @@ pub fn infer_backend(model: &str) -> Backend {
     }
     if crate::stability::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
         || crate::stability::KNOWN_MODELS.contains(&key.as_str())
+        || crate::stability::SD3_VARIANTS.contains(&key.as_str())
     {
         return Backend::Stability;
     }
@@ -693,6 +694,8 @@ mod tests {
         // aliases — `core` used to fall through to Google and 404 there.
         assert_eq!(infer_backend("core"), Backend::Stability);
         assert_eq!(infer_backend("ultra"), Backend::Stability);
+        // The sd3 variant spellings too, now that they are reachable model ids.
+        assert_eq!(infer_backend("sd3.5-flash"), Backend::Stability);
         assert_eq!(infer_backend("gpt-image-2"), Backend::OpenAi);
         assert_eq!(infer_backend("gemini-3.1-flash-image"), Backend::Google);
         assert_eq!(infer_backend("klein"), Backend::ComfyUi);

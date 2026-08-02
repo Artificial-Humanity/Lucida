@@ -266,7 +266,7 @@ fn image_schema() -> Value {
                 },
                 "workflow": {
                     "type": "string",
-                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped."
+                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped. Cannot be combined with `model` or `reference_images` — the workflow names its own checkpoints and inputs."
                 },
                 "mask": {
                     "type": "string",
@@ -433,6 +433,19 @@ fn generate_image(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("`output_path` is required"))?;
 
+    // A supplied workflow names its own checkpoints, so an explicit model has
+    // nowhere to go. Refused here rather than in the provider because by the
+    // time the request reaches comfyui the default model has been filled in
+    // and an explicit one is indistinguishable from it.
+    if args["workflow"].as_str().is_some() && args["model"].as_str().is_some() {
+        anyhow::bail!(
+            "`workflow` and `model` cannot be combined: a supplied workflow \
+             names its own checkpoints, so there is nowhere to put a model id. \
+             Name the model inside the workflow file, or drop `workflow` to \
+             use the built-in graph."
+        );
+    }
+
     let backend = match args["provider"].as_str() {
         Some(name) => Backend::parse(name)?,
         None => match args["model"].as_str() {
@@ -464,7 +477,15 @@ fn generate_image(args: &Value) -> Result<String> {
         mask: args["mask"].as_str().map(str::to_string),
         workflow: args["workflow"].as_str().map(str::to_string),
         seed: args["seed"].as_u64(),
-        steps: args["steps"].as_u64().map(|n| n as u32),
+        // try_from rather than `as`: a pathological value would wrap silently
+        // into a small, plausible step count instead of erroring.
+        steps: args["steps"]
+            .as_u64()
+            .map(|n| {
+                u32::try_from(n)
+                    .map_err(|_| anyhow::anyhow!("`steps` is {n}, which is not a step count"))
+            })
+            .transpose()?,
         guidance: args["guidance"].as_f64().map(|n| n as f32),
     };
 
@@ -703,5 +724,36 @@ mod tests {
     fn an_unknown_tool_is_refused() {
         let called = call_tool(&json!({ "name": "paint_a_fresco", "arguments": {} }));
         assert!(called.unwrap_err().to_string().contains("unknown tool"));
+    }
+
+    /// The last silent drop: a workflow names its own checkpoints, so an
+    /// explicit model would be discarded without a word. Refused here, where
+    /// "explicit" is still visible — and before any client exists, so the test
+    /// needs no credentials.
+    #[test]
+    fn a_workflow_with_an_explicit_model_is_refused() {
+        let error = generate_image(&json!({
+            "prompt": "x",
+            "output_path": "x.png",
+            "workflow": "graph.json",
+            "model": "klein"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("workflow"), "must name the conflict: {error}");
+        assert!(error.contains("model"));
+    }
+
+    /// A step count past u32 used to wrap silently into a small, plausible one.
+    #[test]
+    fn an_absurd_step_count_errors_rather_than_wrapping() {
+        let error = generate_image(&json!({
+            "prompt": "x",
+            "output_path": "x.png",
+            "steps": 4_294_967_297u64
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("steps"), "must name the parameter: {error}");
     }
 }

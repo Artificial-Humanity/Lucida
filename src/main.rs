@@ -322,6 +322,19 @@ impl ImageOptions {
         prompt: String,
         references: Vec<String>,
     ) -> Result<(ImageRequest, Backend)> {
+        // A supplied workflow names its own checkpoints, so an explicit model
+        // has nowhere to go — the same reasoning that refuses `--ref` with a
+        // workflow. Caught here rather than in the provider because only the
+        // entry point still knows the model was typed rather than defaulted.
+        if self.workflow.is_some() && self.model.is_some() {
+            anyhow::bail!(
+                "a workflow and an explicit `--model` cannot be combined.\n\n\
+                 A supplied workflow names its own checkpoints, so there is \
+                 nowhere to put a model id. Name the model inside the workflow \
+                 file, or drop `--workflow` to use the built-in graph."
+            );
+        }
+
         let backend = match (&self.provider, &self.model) {
             (Some(name), _) => Backend::parse(name)?,
             (None, Some(model)) => infer_backend(model),
@@ -724,6 +737,23 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
 ///
 /// Hand-rolled rather than pulling in an image crate, since this needs the first
 /// few bytes of a header and nothing else.
+/// Identifies an image format from its first bytes.
+///
+/// Exists because a filename is a claim about the bytes, not a fact: the one
+/// place that guessed from the extension treated every non-`.png` reference as
+/// JPEG, so a `.webp` source failed dimension-reading and was silently sent
+/// with `auto` geometry — the reshaping its sizing exists to prevent.
+pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        _ if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
+            Some("image/webp")
+        }
+        _ => None,
+    }
+}
+
 pub fn image_dimensions(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
     match mime {
         // IHDR is always the first chunk, at a fixed offset.
@@ -757,6 +787,41 @@ pub fn image_dimensions(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
             }
             None
         }
+        // WebP is one RIFF container holding one of three layouts, told apart
+        // by the chunk following "WEBP". Each stores dimensions differently.
+        "image/webp" => match bytes.get(12..16)? {
+            // Extended: canvas size as 24-bit little-endian minus-one fields,
+            // after a flags byte and three reserved bytes.
+            b"VP8X" => {
+                let le24 =
+                    |b: &[u8]| u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16;
+                Some((le24(bytes.get(24..27)?) + 1, le24(bytes.get(27..30)?) + 1))
+            }
+            // Lossy: dimensions follow the 3-byte frame tag and the sync code,
+            // 14 bits each in a 16-bit little-endian field.
+            b"VP8 " => {
+                if bytes.get(23..26)? != [0x9D, 0x01, 0x2A] {
+                    return None;
+                }
+                let w = u16::from_le_bytes([*bytes.get(26)?, *bytes.get(27)?]) & 0x3FFF;
+                let h = u16::from_le_bytes([*bytes.get(28)?, *bytes.get(29)?]) & 0x3FFF;
+                Some((u32::from(w), u32::from(h)))
+            }
+            // Lossless: a signature byte, then width-1 and height-1 as
+            // consecutive 14-bit fields in a little-endian bit stream.
+            b"VP8L" => {
+                if *bytes.get(20)? != 0x2F {
+                    return None;
+                }
+                let b = bytes.get(21..25)?;
+                let w = 1 + (u32::from(b[1] & 0x3F) << 8 | u32::from(b[0]));
+                let h = 1 + (u32::from(b[3] & 0x0F) << 10
+                    | u32::from(b[2]) << 2
+                    | u32::from(b[1] >> 6));
+                Some((w, h))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -852,6 +917,73 @@ mod tests {
         jpeg.extend_from_slice(&1024u16.to_be_bytes());
         jpeg.extend_from_slice(&[0u8; 8]);
         assert_eq!(image_dimensions(&jpeg, "image/jpeg"), Some((1024, 576)));
+    }
+
+    #[test]
+    fn mime_is_sniffed_from_magic_bytes_not_names() {
+        assert_eq!(sniff_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]), Some("image/png"));
+        assert_eq!(sniff_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0; 4]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(sniff_mime(&webp), Some("image/webp"));
+        assert_eq!(sniff_mime(b"GIF89a"), None);
+        assert_eq!(sniff_mime(&[]), None);
+    }
+
+    #[test]
+    fn webp_dimensions_come_out_of_all_three_container_layouts() {
+        // VP8X: canvas size as 24-bit minus-one fields after flags + reserved.
+        let mut vp8x = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        vp8x.extend_from_slice(&[10, 0, 0, 0]); // chunk size
+        vp8x.extend_from_slice(&[0; 4]); // flags + reserved
+        vp8x.extend_from_slice(&(1360u32 - 1).to_le_bytes()[..3]);
+        vp8x.extend_from_slice(&(768u32 - 1).to_le_bytes()[..3]);
+        assert_eq!(image_dimensions(&vp8x, "image/webp"), Some((1360, 768)));
+
+        // VP8 (lossy): frame tag, sync code, then 14-bit LE dimensions.
+        let mut vp8 = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        vp8.extend_from_slice(&[0; 4]); // chunk size
+        vp8.extend_from_slice(&[0; 3]); // frame tag
+        vp8.extend_from_slice(&[0x9D, 0x01, 0x2A]);
+        vp8.extend_from_slice(&1024u16.to_le_bytes());
+        vp8.extend_from_slice(&576u16.to_le_bytes());
+        assert_eq!(image_dimensions(&vp8, "image/webp"), Some((1024, 576)));
+
+        // VP8L (lossless): 1024x576 packed as consecutive 14-bit fields.
+        let mut vp8l = b"RIFF\0\0\0\0WEBPVP8L".to_vec();
+        vp8l.extend_from_slice(&[0; 4]); // chunk size
+        vp8l.push(0x2F); // signature
+        vp8l.extend_from_slice(&[0xFF, 0xC3, 0x8F, 0x00]);
+        assert_eq!(image_dimensions(&vp8l, "image/webp"), Some((1024, 576)));
+    }
+
+    /// The last silent drop from the review: `--workflow` ignored an explicit
+    /// `--model` without a word, because the provider cannot tell "typed" from
+    /// "defaulted" once into_request fills the default in. So it is refused
+    /// here, where explicitness is still visible — same precedent as the
+    /// `--ref` + `--workflow` refusal in comfy.
+    #[test]
+    fn a_workflow_refuses_an_explicit_model() {
+        let opts = ImageOptions {
+            workflow: Some("graph.json".into()),
+            model: Some("klein".into()),
+            ..Default::default()
+        };
+        let error = opts
+            .into_request("x".into(), Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--workflow"), "must name the conflict: {error}");
+        assert!(error.contains("--model"));
+
+        // A workflow alone still passes — the refusal is the combination.
+        let alone = ImageOptions {
+            workflow: Some("graph.json".into()),
+            provider: Some("comfyui".into()),
+            ..Default::default()
+        };
+        assert!(alone.into_request("x".into(), Vec::new()).is_ok());
     }
 
     #[test]

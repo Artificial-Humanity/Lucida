@@ -203,11 +203,10 @@ impl Client {
         }
         let first = req.references.first()?;
         let bytes = std::fs::read(first).ok()?;
-        let mime = if first.to_ascii_lowercase().ends_with(".png") {
-            "image/png"
-        } else {
-            "image/jpeg"
-        };
+        // Sniffed from the bytes rather than the name: guessing JPEG for every
+        // non-.png reference meant a .webp source failed dimension-reading and
+        // silently fell back to `auto` — the reshaping this exists to prevent.
+        let mime = crate::sniff_mime(&bytes)?;
         let (w, h) = crate::image_dimensions(&bytes, mime)?;
         Some(crate::provider::Aspect { w, h })
     }
@@ -575,6 +574,47 @@ mod tests {
             Client::size_for(&ImageRequest::default(), "gpt-image-1.5"),
             "auto"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The format comes from the bytes, not the filename: a PNG named `.webp`
+    /// used to be read as JPEG, fail, and silently fall back to `auto` — and a
+    /// real WebP source failed the same way for lacking a parser at all.
+    #[test]
+    fn a_sources_shape_survives_a_lying_or_webp_filename() {
+        let dir = std::env::temp_dir().join("lucida-openai-sniff-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // PNG bytes behind a .webp name.
+        let misnamed = dir.join("wide.webp");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1536u32.to_be_bytes());
+        png.extend_from_slice(&1024u32.to_be_bytes());
+        std::fs::write(&misnamed, &png).unwrap();
+
+        let edit = ImageRequest {
+            references: vec![misnamed.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert_eq!(Client::size_for(&edit, "gpt-image-1.5"), "1536x1024");
+
+        // An actual WebP (lossy layout), portrait.
+        let real = dir.join("tall.webp");
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        webp.extend_from_slice(&[0; 4]);
+        webp.extend_from_slice(&[0; 3]);
+        webp.extend_from_slice(&[0x9D, 0x01, 0x2A]);
+        webp.extend_from_slice(&1024u16.to_le_bytes());
+        webp.extend_from_slice(&1536u16.to_le_bytes());
+        std::fs::write(&real, &webp).unwrap();
+
+        let edit = ImageRequest {
+            references: vec![real.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        assert_eq!(Client::size_for(&edit, "gpt-image-1.5"), "1024x1536");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
