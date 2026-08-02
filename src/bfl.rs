@@ -61,7 +61,10 @@ pub fn resolve_model(input: &str) -> String {
         .iter()
         .find(|(alias, _)| *alias == key)
         .map(|(_, id)| (*id).to_string())
-        .unwrap_or_else(|| input.trim().to_string())
+        // Lowercased to match the other hosted providers: `/v1/FLUX-2-PRO`
+        // 404s, and no live FLUX endpoint contains uppercase (measured
+        // 2026-08-02). See genai::resolve_model for why ComfyUI differs.
+        .unwrap_or(key)
 }
 
 /// What a given endpoint accepts.

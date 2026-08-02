@@ -708,6 +708,24 @@ mod tests {
         assert_eq!(infer_backend("flux-3-pro"), Backend::Bfl);
     }
 
+    /// Every hosted provider rejects an uppercase model id — measured against
+    /// all four live APIs, which 404 the path or report the model does not
+    /// exist. So a typed `--model CORE` must reach the wire lowercased rather
+    /// than as a rejection nobody can read. The four used to disagree about
+    /// this, purely by accident.
+    #[test]
+    fn hosted_model_ids_reach_the_wire_lowercased() {
+        assert_eq!(crate::stability::resolve_model("CORE"), "core");
+        assert_eq!(crate::openai::resolve_model("GPT-IMAGE-2"), "gpt-image-2");
+        assert_eq!(crate::bfl::resolve_model("FLUX-2-PRO"), "flux-2-pro");
+        assert_eq!(
+            crate::genai::resolve_model("GEMINI-3.1-FLASH-IMAGE"),
+            "gemini-3.1-flash-image"
+        );
+        // An alias still resolves to its target, whatever the caller typed.
+        assert_eq!(crate::bfl::resolve_model("FLUX"), crate::bfl::resolve_model("flux"));
+    }
+
     /// The ambiguity worth pinning down: local checkpoints and hosted endpoints
     /// both get called something-flux, and picking wrong sends a paid request to
     /// the wrong place — or a local filename to a billing API.

@@ -52,7 +52,14 @@ pub fn resolve_model(input: &str) -> String {
         .iter()
         .find(|(alias, _)| *alias == key)
         .map(|(_, id)| (*id).to_string())
-        .unwrap_or_else(|| input.trim().to_string())
+        // Lowercased rather than passed through as typed: every hosted provider
+        // rejects an uppercase id outright — Google calls it an "unexpected
+        // model name format", the others 404 or report it does not exist
+        // (measured 2026-08-02). No live id anywhere contains uppercase, so
+        // this can only turn a confusing rejection into a working render.
+        // ComfyUI is deliberately not like this: its ids are filenames on a
+        // case-sensitive filesystem, so `resolve` pins the original spelling.
+        .unwrap_or(key)
 }
 
 pub struct Client {
