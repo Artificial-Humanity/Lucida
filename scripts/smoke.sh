@@ -38,6 +38,13 @@ esac
 sandbox=$(mktemp -d)
 trap 'rm -rf "$sandbox"' EXIT
 
+# Compared by directory NAME rather than full path. Under Git Bash on Windows,
+# `mktemp -d` yields a Unix-style /tmp/tmp.XXXX while the native binary
+# correctly prints C:\Users\RUNNER~1\AppData\Local\Temp\tmp.XXXX — two
+# spellings of one directory, which a substring match on the full path calls a
+# failure. The unique name appears in both.
+sandbox_name=$(basename "$sandbox")
+
 out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" models 2>&1 || true)
 case "$out" in
   *"no API key found"*) pass "missing key reports cleanly" ;;
@@ -58,7 +65,7 @@ esac
 # invisible with no way to recover. `env -i` reproduces exactly that.
 out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config --init 2>&1)
 case "$out" in
-  *"$sandbox"*config.env*) pass "config --init writes into a bare HOME" ;;
+  *"$sandbox_name"*config.env*) pass "config --init writes into a bare HOME" ;;
   *)                       fail "config --init: $out" ;;
 esac
 
