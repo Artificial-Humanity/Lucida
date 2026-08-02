@@ -281,7 +281,13 @@ impl Client {
             .text("model", model.to_string())
             .text("prompt", req.prompt.clone())
             .text("size", Self::size_for(req, model))
-            .text("quality", DEFAULT_QUALITY);
+            .text("quality", DEFAULT_QUALITY)
+            // Explicit, matching generate_fresh, rather than trusting the
+            // endpoint's default to stay PNG. Probed 2026-08-02: /images/edits
+            // accepts output_format (png, webp, jpeg) — its validation error
+            // names all three — so the PNG this result is reported as is now
+            // the PNG that was asked for.
+            .text("output_format", "png");
 
         for path in &req.references {
             // `image[]` rather than `image`: gpt-image-1 accepts several, and the
@@ -774,6 +780,9 @@ mod tests {
         assert!(body.contains("name=\"image[]\""), "plural field, or extras are dropped");
         assert!(body.contains("name=\"mask\""));
         assert!(body.contains("filename=\"square.png\""));
+        // Probed: the edits endpoint takes output_format, so the reported PNG
+        // must be requested rather than assumed from the endpoint's default.
+        assert!(body.contains("name=\"output_format\""));
         // The regression this pins: an edit follows its source's shape rather
         // than sending `auto` and letting the model reshape the picture.
         assert!(body.contains("name=\"size\""));

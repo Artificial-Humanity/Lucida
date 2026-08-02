@@ -186,8 +186,9 @@ than silently dropped — the failure this whole design exists to prevent,
 arriving through the one door built to let callers past the design. The editor
 format is named rather than submitted, substituted values are JSON-escaped, and
 validation runs before anything is announced or uploaded. Verified against a
-recorded server end to end; a live render through a custom graph is still owed
-once the GPU frees up.
+recorded server end to end, and live 2026-08-02: a hand-written klein graph
+with a renamed save node rendered 512x512 at seed 42 through the release
+binary — tokens substituted, image found by shape, seed honoured.
 
 **Still open on this lane**, in the order they matter:
 

@@ -258,15 +258,25 @@ impl ImageProvider for Client {
             bail!("{}", explain_error(status.as_u16(), &text, &model));
         }
 
+        // The seed the API actually used arrives in a `seed` response header —
+        // measured 2026-08-02, and re-rendering with that value reproduced the
+        // pixels exactly. Earlier code said no seed was reported because the
+        // original probing never looked past the body; the body indeed has none.
+        let chosen_seed = response
+            .headers()
+            .get("seed")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+
         let bytes = response.bytes().context("reading image bytes")?.to_vec();
 
         Ok(GeneratedImage {
             bytes,
             mime_type: "image/png".to_string(),
             commentary: None,
-            // Echoed back only when it was asked for: the API does not report the
-            // seed it chose, so an unpinned render cannot be reproduced.
-            seed: req.seed,
+            // The header wins — it is what the API says it used. The requested
+            // seed remains the fallback should the header ever be absent.
+            seed: chosen_seed.or(req.seed),
         })
     }
 }
@@ -459,6 +469,24 @@ mod tests {
         let body = requests[0].body_text();
         assert!(body.contains("name=\"model\""));
         assert!(body.contains("sd3.5-large"));
+    }
+
+    /// The API names the seed it chose in a `seed` response header — measured
+    /// 2026-08-02, and re-rendering with that value reproduced the pixels
+    /// exactly. So an unpinned render must come back reproducible, not
+    /// seedless, and a header must beat a request echo.
+    #[test]
+    fn an_unpinned_render_reports_the_seed_the_header_names() {
+        let server = serve(vec![
+            Reply::bytes("image/png", b"raw").with_header("seed", "742048682"),
+        ]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "core".into(),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.seed, Some(742048682));
     }
 
     /// A variant spelling is not a URL path: it reaches the `sd3` endpoint and

@@ -66,6 +66,7 @@ impl Recorded {
 pub struct Reply {
     status: u16,
     content_type: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -74,6 +75,7 @@ impl Reply {
         Self {
             status: 200,
             content_type: "application/json".to_string(),
+            headers: Vec::new(),
             body: body.as_bytes().to_vec(),
         }
     }
@@ -82,6 +84,7 @@ impl Reply {
         Self {
             status,
             content_type: "application/json".to_string(),
+            headers: Vec::new(),
             body: body.as_bytes().to_vec(),
         }
     }
@@ -90,8 +93,16 @@ impl Reply {
         Self {
             status: 200,
             content_type: content_type.to_string(),
+            headers: Vec::new(),
             body: body.to_vec(),
         }
+    }
+
+    /// Adds a response header, transcribed from a real reply — how a recording
+    /// carries the `seed` header Stability reports its chosen seed in.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
     }
 }
 
@@ -242,12 +253,16 @@ fn handle_connection(
     });
 
     let mut stream = reader.into_inner();
-    let head = format!(
-        "HTTP/1.1 {} recorded\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {} recorded\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         reply.status,
         reply.content_type,
         reply.body.len()
     );
+    for (name, value) in &reply.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(&reply.body)?;
     stream.flush()
