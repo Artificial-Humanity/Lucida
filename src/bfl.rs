@@ -403,10 +403,10 @@ impl ImageProvider for Client {
             bail!("{}", explain_error(status.as_u16(), &text, "credits"));
         }
 
-        if let Ok(payload) = response.json::<Value>() {
-            if let Some(credits) = payload["credits"].as_f64() {
-                eprintln!("Key is valid. Remaining credits: {credits}");
-            }
+        if let Ok(payload) = response.json::<Value>()
+            && let Some(credits) = payload["credits"].as_f64()
+        {
+            eprintln!("Key is valid. Remaining credits: {credits}");
         }
 
         Ok(KNOWN_MODELS.iter().map(|m| (*m).to_string()).collect())

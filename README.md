@@ -343,7 +343,7 @@ Four tools are exposed:
 **The schema is deliberately generic, and `image_providers` is why.** Version 0.1
 advertised Google's ten aspect ratios and its `1K`/`2K`/`4K` sizes as hard enums.
 Those are not facts about image generation, they are facts about Google — and an
-agent reads a schema and believes it. Since one server here serves both providers,
+agent reads a schema and believes it. Since one server here serves every provider,
 chosen per call from the model id, there is no single "configured provider" whose
 schema could be published. So parameter descriptions name which providers honour
 them, `image_providers` reports live capabilities on request, and a parameter the

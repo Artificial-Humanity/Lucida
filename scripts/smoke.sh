@@ -138,7 +138,7 @@ esac
 # and the text correctly became "comfyui and stability only", at which point the
 # check failed on an improvement. Names are what an agent selects on, and they
 # are what a new provider must not be missing from.
-for provider in google comfyui bfl stability; do
+for provider in google comfyui bfl stability openai; do
   case "$reply" in
     *"\"$provider\""*) pass "schema offers provider: $provider" ;;
     *) fail "provider $provider is missing from the MCP schema" ;;

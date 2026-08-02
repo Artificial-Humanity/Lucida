@@ -375,7 +375,7 @@ pub(crate) fn explain_error(status: u16, body: &str) -> String {
             "HTTP 403 — the key is valid but lacks permission for this model. {message}"
         ),
         404 => format!(
-            "HTTP 404 — no such model. Run `mediagen models` to list what this key can see. \
+            "HTTP 404 — no such model. Run `lucida models` to list what this key can see. \
              Note that the Imagen 3 IDs are retired. {message}"
         ),
         _ => format!("HTTP {status} — {message}"),

@@ -6,9 +6,10 @@
 //! One binary, two front ends: a plain CLI for shell and script use, and an MCP
 //! server (`lucida mcp`) so agents can call it as a first-class tool.
 //!
-//! Images come from one of three providers — Google's Gemini models, a local
-//! ComfyUI, or hosted FLUX from Black Forest Labs — chosen from the model id
-//! unless `--provider` says otherwise. Video is Google-only for now.
+//! Images come from one of five providers — Google's Gemini models, a local
+//! ComfyUI, hosted FLUX from Black Forest Labs, Stability AI, or OpenAI —
+//! chosen from the model id unless `--provider` says otherwise. Video is
+//! Google-only for now.
 
 mod bfl;
 mod comfy;
@@ -34,9 +35,9 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 #[command(
     name = "lucida",
     version,
-    about = "Generate and edit images with Google Gemini, a local ComfyUI, or hosted FLUX",
-    long_about = "Generate and edit images with Google Gemini, a local ComfyUI, or \
-                  hosted FLUX from Black Forest Labs.\n\n\
+    about = "Generate and edit images with Google Gemini, a local ComfyUI, hosted FLUX, Stability AI or OpenAI",
+    long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
+                  hosted FLUX from Black Forest Labs, Stability AI, or OpenAI.\n\n\
                   Google reads GOOGLE_API_KEY (or GEMINI_API_KEY) from the \
                   environment, and image generation requires billing to be enabled \
                   on the project behind the key; free-tier keys report a quota of \
@@ -45,6 +46,8 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
                   http://127.0.0.1:8188 unless LUCIDA_COMFYUI_URL says otherwise.\n\n\
                   Black Forest Labs reads BFL_API_KEY and bills per image. Its \
                   capabilities differ per model — run `lucida models --provider bfl`.\n\n\
+                  Stability reads STABILITY_API_KEY; OpenAI reads OPENAI_API_KEY, \
+                  and model access there is granted per project.\n\n\
                   Any of these can live in a config file; see `lucida config`."
 )]
 struct Cli {
@@ -70,11 +73,11 @@ struct ImageOptions {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Which provider to use: google, comfyui or bfl. Inferred from the model when omitted.
+    /// Which provider to use: google, comfyui, bfl, stability or openai. Inferred from the model when omitted.
     #[arg(short, long)]
     provider: Option<String>,
 
-    /// What to keep out of the picture (comfyui only — no FLUX or Gemini model takes one)
+    /// What to keep out of the picture (comfyui and stability — no FLUX, Gemini or gpt-image model takes one)
     #[arg(short, long)]
     negative: Option<String>,
 
@@ -89,7 +92,7 @@ struct ImageOptions {
     #[arg(long)]
     mask: Option<String>,
 
-    /// Seed, for a reproducible render (comfyui and bfl; google has none)
+    /// Seed, for a reproducible render (comfyui, bfl and stability; google and openai have none)
     #[arg(long)]
     seed: Option<u64>,
 
@@ -184,7 +187,7 @@ enum Command {
 
     /// List the image models a provider can reach, and what it can be asked for
     Models {
-        /// Which provider to interrogate: google, comfyui or bfl
+        /// Which provider to interrogate: google, comfyui, bfl, stability or openai
         #[arg(short, long, default_value = "google")]
         provider: String,
     },
@@ -294,11 +297,11 @@ fn run() -> Result<()> {
             eprintln!("Rendering with {resolved}…");
 
             let bytes = genai::Client::from_env()?.generate_video(&request)?;
-            let written = write_image(&out, &bytes)?;
+            let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
             eprintln!(
-                "Wrote {} ({} MB)",
+                "Wrote {} ({:.1} MB)",
                 written.display(),
-                bytes.len() / 1_048_576
+                bytes.len() as f64 / 1_048_576.0
             );
             println!("{}", written.display());
             Ok(())
@@ -685,10 +688,10 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
     }
     let written = write_image(&destination, &image.bytes)?;
 
-    if let Some(commentary) = &image.commentary {
-        if !commentary.is_empty() {
-            eprintln!("{commentary}");
-        }
+    if let Some(commentary) = &image.commentary
+        && !commentary.is_empty()
+    {
+        eprintln!("{commentary}");
     }
     if let Some(seed) = image.seed {
         eprintln!("Seed {seed} — pass `--seed {seed}` to render this again.");
@@ -797,11 +800,11 @@ pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
 pub fn write_image(path: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
     let path = path.as_ref();
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
     }
 
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;

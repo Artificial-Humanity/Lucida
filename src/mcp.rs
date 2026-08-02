@@ -77,11 +77,20 @@ pub fn serve() -> Result<()> {
 
         let response = match dispatch(method, &params) {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(e) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32603, "message": e.to_string() }
-            }),
+            Err(e) => {
+                // -32601 is "method not found", which clients may probe for
+                // (resources/list, prompts/list); everything else is -32603.
+                let code = if e.to_string().starts_with("unknown method") {
+                    -32601
+                } else {
+                    -32603
+                };
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": code, "message": e.to_string() }
+                })
+            }
         };
 
         writeln!(stdout, "{response}")?;
@@ -179,7 +188,7 @@ fn image_schema() -> Value {
         "name": "generate_image",
         "description": format!(
             "Generate an image and write it to disk. Returns the path written.\n\n\
-             Four providers are available and the choice matters — cost, speed, \
+             {} providers are available and the choice matters — cost, speed, \
              what you can ask for, and what ends up embedded in the file all \
              differ:\n{}\n\n\
              The provider is inferred from the model id; pass `provider` to be \
@@ -189,6 +198,7 @@ fn image_schema() -> Value {
              actually reachable.\n\n\
              Pass reference_images to edit an existing picture ({}); pass mask as \
              well to concentrate the change on part of one ({}, advisory).",
+            Backend::ALL.len(),
             provider_summary(),
             providers_where(|c| c.references),
             providers_where(|c| c.mask)
@@ -212,8 +222,13 @@ fn image_schema() -> Value {
                 "model": {
                     "type": "string",
                     "description": format!(
-                        "Model id or alias. Defaults to {DEFAULT_MODEL} on google, \
-                         `klein` on comfyui, flux-2-pro on bfl, core on stability."
+                        "Model id or alias. Defaults per provider: {}.",
+                        // Generated: the hand-written list omitted openai.
+                        Backend::ALL
+                            .iter()
+                            .map(|b| format!("{} → {}", b.name(), b.default_model()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 },
                 "aspect_ratio": {
@@ -222,14 +237,16 @@ fn image_schema() -> Value {
                     // disagree about which, and the others take any ratio at all.
                     "description": format!(
                         "W:H, e.g. 16:9. google accepts only: {}. stability accepts a \
-                         DIFFERENT nine: {}. comfyui and bfl accept any ratio.",
+                         DIFFERENT nine: {}. comfyui and bfl accept any ratio; on \
+                         openai, gpt-image-2 takes any ratio and its siblings only \
+                         1:1, 2:3 and 3:2.",
                         genai::ASPECT_RATIOS.join(", "),
                         crate::stability::ASPECT_RATIOS.join(", ")
                     )
                 },
                 "size": {
                     "type": "string",
-                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number. NOT supported by stability at all, which renders a fixed size — passing it there is an error."
+                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number; openai's gpt-image-2 scales its pixel budget by it. NOT supported by stability or the other openai models, which render fixed sizes — passing it there is an error."
                 },
                 "negative_prompt": {
                     "type": "string",
@@ -237,7 +254,7 @@ fn image_schema() -> Value {
                 },
                 "seed": {
                     "type": "integer",
-                    "description": "Renders the same image again. comfyui, bfl and stability; google exposes none, so results there cannot be reproduced. comfyui is verified pixel-identical across runs."
+                    "description": "Renders the same image again. comfyui, bfl and stability; google and openai expose none, so results there cannot be reproduced. comfyui is verified pixel-identical across runs."
                 },
                 "steps": {
                     "type": "integer",
@@ -426,13 +443,7 @@ fn generate_image(args: &Value) -> Result<String> {
 
     let model = args["model"]
         .as_str()
-        .unwrap_or(match backend {
-            Backend::Google => DEFAULT_MODEL,
-            Backend::ComfyUi => "klein",
-            Backend::Bfl => bfl::DEFAULT_MODEL,
-            Backend::Stability => stability::DEFAULT_MODEL,
-            Backend::OpenAi => openai::DEFAULT_MODEL,
-        })
+        .unwrap_or_else(|| backend.default_model())
         .to_string();
 
     let request = ImageRequest {
@@ -507,10 +518,10 @@ fn generate_image(args: &Value) -> Result<String> {
         "\n\nProvenance: {}.",
         caps.provenance.describe()
     ));
-    if let Some(commentary) = &image.commentary {
-        if !commentary.is_empty() {
-            text.push_str(&format!("\n\nModel commentary: {commentary}"));
-        }
+    if let Some(commentary) = &image.commentary
+        && !commentary.is_empty()
+    {
+        text.push_str(&format!("\n\nModel commentary: {commentary}"));
     }
     Ok(text)
 }
@@ -558,11 +569,15 @@ fn describe_providers() -> String {
         out.push_str(&format!(
             "aspect ratio: {aspect}\n\
              seed: {}  |  negative prompt: {}  |  reference images: {}\n\
+             size: {}  |  mask: {}  |  own workflow: {}\n\
              steps: {}  |  guidance: {}\n\
              output carries: {}\n\n",
             caps.seed,
             caps.negative_prompt,
             caps.references,
+            caps.size,
+            if caps.mask { "accepted (advisory)" } else { "false" },
+            caps.workflow,
             caps.steps,
             caps.guidance,
             caps.provenance.describe()

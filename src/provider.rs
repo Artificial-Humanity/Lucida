@@ -403,12 +403,18 @@ impl Capabilities {
         }
 
         if !req.references.is_empty() && !self.references {
+            // The editors are computed, not listed: a hand-written list here
+            // claimed "both providers" long after there were five.
+            let editors: Vec<&str> = Backend::ALL
+                .iter()
+                .filter(|b| capabilities_for(**b, b.default_model()).references)
+                .map(|b| b.name())
+                .collect();
             bail!(
                 "`{me}` cannot condition on reference images, so there is nothing \
                  for it to edit.\n\n\
-                 Both providers currently support editing, so reaching this means \
-                 a provider was configured that does not. Generate from a prompt \
-                 instead, or use `google` or `comfyui`."
+                 Generate from a prompt instead, or edit with one of: {}.",
+                editors.join(", ")
             );
         }
 
@@ -501,7 +507,14 @@ impl Backend {
             "stability" | "stabilityai" | "sai" => Ok(Self::Stability),
             "openai" | "oai" | "gpt" => Ok(Self::OpenAi),
             other => bail!(
-                "unknown provider `{other}`. Known providers: google, comfyui, bfl, stability"
+                "unknown provider `{other}`. Known providers: {}",
+                // Generated, so a sixth provider cannot be missing from it —
+                // the way openai was missing from the hand-written version.
+                Backend::ALL
+                    .iter()
+                    .map(|b| b.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -552,7 +565,9 @@ pub fn infer_backend(model: &str) -> Backend {
     if crate::comfy::MODEL_ALIASES.iter().any(|(a, _)| *a == key) {
         return Backend::ComfyUi;
     }
-    if crate::stability::MODEL_ALIASES.iter().any(|(a, _)| *a == key) {
+    if crate::stability::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
+        || crate::stability::KNOWN_MODELS.contains(&key.as_str())
+    {
         return Backend::Stability;
     }
     if crate::openai::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
@@ -674,6 +689,11 @@ mod tests {
     #[test]
     fn backends_are_inferred_from_the_model_id() {
         assert_eq!(infer_backend("banana"), Backend::Google);
+        // All three Stability endpoints, not just the two that happen to be
+        // aliases — `core` used to fall through to Google and 404 there.
+        assert_eq!(infer_backend("core"), Backend::Stability);
+        assert_eq!(infer_backend("ultra"), Backend::Stability);
+        assert_eq!(infer_backend("gpt-image-2"), Backend::OpenAi);
         assert_eq!(infer_backend("gemini-3.1-flash-image"), Backend::Google);
         assert_eq!(infer_backend("klein"), Backend::ComfyUi);
         assert_eq!(infer_backend("some-model.safetensors"), Backend::ComfyUi);
