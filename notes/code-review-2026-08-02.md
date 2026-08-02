@@ -536,3 +536,17 @@ exactly against what the server reports. Lowercasing there would break
 Remaining open: the openai `--size 4K` practical area ceiling — measuring
 it means paying for a deliberately over-budget render, so it waits until
 someone actually asks for 4K there.
+
+### 8.2 Shipped
+
+**v0.5.2**, tagged and published the same day, superseding §5.3's "one
+command away". All three platform assets built and attached with
+checksums, so v0.5.0's missing-Windows-asset failure did not recur.
+v0.5.0 itself is still present and still incomplete; deleting it remains
+the owner's call.
+
+Total spend for the whole probe batch: **about 7 cents** — two Stability
+core renders and one low-quality gpt-image-1 render. Every other question
+was answered by a validation error, which renders nothing and bills
+nothing. That is the technique worth carrying forward: ask the API in the
+way that costs nothing before paying it.
