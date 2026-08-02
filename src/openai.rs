@@ -141,6 +141,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         negative_prompt: false,
         references: true,
         mask: true,
+        workflow: false,
         steps: false,
         guidance: false,
         // Measured on a real gpt-image-1.5 render: a caBX chunk carrying a C2PA

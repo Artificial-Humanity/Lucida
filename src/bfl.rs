@@ -95,6 +95,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         negative_prompt: false,
         references: edits,
         mask: false,
+        workflow: false,
         steps: tunable,
         guidance: tunable,
         // Verified in a real render rather than assumed: a signed C2PA manifest

@@ -215,6 +215,35 @@ Images move over HTTP in both directions — uploaded with `/upload/image`, resu
 fetched with `/view` — rather than through the filesystem, so a ComfyUI in a
 container or on another machine works with no shared mount.
 
+### Your own workflow
+
+Lucida builds a Flux.2 graph by default. To render something else — a different
+model family, a ControlNet, an upscaler — supply a workflow of your own:
+
+```console
+$ lucida generate "a brass astrolabe" --provider comfyui --workflow mine.json
+```
+
+It must be ComfyUI's **API format** (Workflow → Export (API)), not the editor
+format that has `nodes` and `links` arrays; Lucida names that mistake rather than
+letting the server reject it obscurely. Mark where values belong with tokens:
+
+| Token | Filled from |
+|---|---|
+| `%prompt%` `%negative%` | the prompt and `--negative` |
+| `%width%` `%height%` | `--aspect` and `--size` |
+| `%seed%` `%steps%` `%cfg%` | `--seed`, `--steps`, `--guidance` |
+
+**A token the file omits means that option cannot be honoured, and Lucida refuses
+it rather than ignoring it.** A graph with no `%seed%` would render happily and
+drop `--seed` on the floor — the silent failure this tool exists to prevent,
+arriving through the one door built to let you past its defaults. So the tokens
+present in your file are the capability set for that render.
+
+Values are JSON-escaped on the way in, so a prompt containing quotes cannot
+corrupt the graph. A workflow cannot be combined with reference images, since
+Lucida has no way to know which node an upload belongs to.
+
 Editing works here too:
 
 ```console

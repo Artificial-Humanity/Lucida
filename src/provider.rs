@@ -46,6 +46,14 @@ pub struct ImageRequest {
     /// A raster image rather than a rectangle or a polygon, because that is what
     /// every provider that supports masking actually takes.
     pub mask: Option<String>,
+    /// A provider-native workflow file to render with, instead of the built-in
+    /// graph.
+    ///
+    /// The typed escape hatch the roadmap held in reserve for "genuinely
+    /// provider-specific parameters", and the first thing to need it. A ComfyUI
+    /// workflow is not a parameter any other provider could interpret, and
+    /// pretending otherwise would mean inventing a graph format nobody speaks.
+    pub workflow: Option<String>,
     pub seed: Option<u64>,
     pub steps: Option<u32>,
     pub guidance: Option<f32>,
@@ -294,6 +302,8 @@ pub struct Capabilities {
     /// Anyone needing pixels outside the mask preserved has to composite the
     /// result back over the original themselves.
     pub mask: bool,
+    /// Whether the provider can render a caller-supplied workflow.
+    pub workflow: bool,
     pub steps: bool,
     pub guidance: bool,
     pub provenance: Provenance,
@@ -360,6 +370,16 @@ impl Capabilities {
 
         if req.guidance.is_some() && !self.guidance {
             bail!("{}", self.no_sampler("--guidance", "a guidance scale"));
+        }
+
+        if req.workflow.is_some() && !self.workflow {
+            bail!(
+                "`{me}` has no workflow format, so `--workflow` cannot be \
+                 honoured.\n\n\
+                 A workflow is a provider-native description of how to render — \
+                 only `comfyui` has one, because only there does Lucida build a \
+                 graph rather than fill in a request."
+            );
         }
 
         if req.mask.is_some() {

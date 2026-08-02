@@ -139,6 +139,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     negative_prompt: false,
     references: true,
     mask: false,
+    workflow: false,
     steps: false,
     guidance: false,
     provenance: Provenance::SynthIdAndC2pa,

@@ -247,6 +247,10 @@ fn image_schema() -> Value {
                     "type": "number",
                     "description": "How closely to follow the prompt. comfyui, and on bfl only flux-2-flex and flux-dev."
                 },
+                "workflow": {
+                    "type": "string",
+                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped."
+                },
                 "mask": {
                     "type": "string",
                     "description": format!(
@@ -447,6 +451,7 @@ fn generate_image(args: &Value) -> Result<String> {
             .unwrap_or_default(),
         negative_prompt: args["negative_prompt"].as_str().map(str::to_string),
         mask: args["mask"].as_str().map(str::to_string),
+        workflow: args["workflow"].as_str().map(str::to_string),
         seed: args["seed"].as_u64(),
         steps: args["steps"].as_u64().map(|n| n as u32),
         guidance: args["guidance"].as_f64().map(|n| n as f32),

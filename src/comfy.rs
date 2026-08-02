@@ -277,6 +277,106 @@ impl Client {
             })
     }
 
+    /// Loads a caller-supplied workflow and fills in the request.
+    ///
+    /// # Why tokens, and why the tokens present are the contract
+    ///
+    /// A workflow is an arbitrary graph. Lucida cannot know which node holds the
+    /// prompt, so the file marks the places itself with `%prompt%`, `%seed%` and
+    /// the rest. That much is unremarkable.
+    ///
+    /// What matters is the consequence: **a workflow that omits a token cannot
+    /// honour the matching option**. A graph with no `%seed%` anywhere will
+    /// render happily and ignore `--seed` completely, which is the silent-drop
+    /// failure this whole design exists to prevent — arriving through the one
+    /// door built to let callers past the design. So the tokens found in the file
+    /// become the capability set for that render, and anything asked for and not
+    /// marked is refused before submitting.
+    fn apply_workflow(path: &str, req: &ImageRequest, seed: u64) -> Result<Value> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading the workflow {path}"))?;
+        let graph: Value = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "parsing {path} as JSON. This must be ComfyUI's **API format** \
+                 (Save (API) in the menu), which is a flat object of node ids — \
+                 not the editor format, which has `nodes` and `links` arrays."
+            )
+        })?;
+
+        let Some(nodes) = graph.as_object() else {
+            bail!("{path} is valid JSON but not a workflow: expected an object of nodes");
+        };
+        if nodes.is_empty() {
+            bail!("{path} contains no nodes");
+        }
+        if graph.get("nodes").is_some() && graph.get("links").is_some() {
+            bail!(
+                "{path} looks like ComfyUI's EDITOR format, which has `nodes` and \
+                 `links` arrays. Lucida needs the API format: in ComfyUI use \
+                 Workflow > Export (API), not Save."
+            );
+        }
+        if let Some((id, node)) = nodes.iter().find(|(_, n)| n.get("class_type").is_none()) {
+            bail!(
+                "node `{id}` in {path} has no `class_type`, so this is not the API \
+                 format Lucida can submit: {node}"
+            );
+        }
+
+        let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
+        let substitutions: &[(&str, String, bool)] = &[
+            ("%prompt%", req.prompt.clone(), req.prompt.is_empty()),
+            (
+                "%negative%",
+                req.negative_prompt.clone().unwrap_or_default(),
+                req.negative_prompt.is_none(),
+            ),
+            ("%seed%", seed.to_string(), req.seed.is_none()),
+            ("%width%", width.to_string(), req.aspect.is_none() && req.size.is_none()),
+            ("%height%", height.to_string(), req.aspect.is_none() && req.size.is_none()),
+            (
+                "%steps%",
+                req.steps.unwrap_or(DEFAULT_STEPS).to_string(),
+                req.steps.is_none(),
+            ),
+            (
+                "%cfg%",
+                req.guidance.unwrap_or(DEFAULT_GUIDANCE).to_string(),
+                req.guidance.is_none(),
+            ),
+        ];
+
+        // Refuse anything asked for that the workflow gives no place to put.
+        for (token, _, optional) in substitutions {
+            if !optional && !text.contains(token) {
+                bail!(
+                    "{path} contains no `{token}`, so this workflow cannot honour \
+                     that option.\n\n\
+                     Lucida fills a workflow in by substituting tokens, so a value \
+                     with nowhere to go would be silently ignored. Add `{token}` \
+                     where it belongs in the graph, or drop the option.\n\n\
+                     Tokens: %prompt% %negative% %seed% %width% %height% %steps% %cfg%"
+                );
+            }
+        }
+
+        let mut filled = text;
+        for (token, value, _) in substitutions {
+            // Bare tokens become numbers; tokens inside a longer string stay
+            // strings, so `"%width%"` is 1024 while `"seed_%seed%"` is text.
+            let quoted = format!("\"{token}\"");
+            let is_numeric = !matches!(*token, "%prompt%" | "%negative%");
+            if is_numeric {
+                filled = filled.replace(&quoted, value);
+            }
+            filled = filled.replace(token, &escape_json(value));
+        }
+
+        serde_json::from_str(&filled).with_context(|| {
+            format!("{path} was not valid JSON after substitution — check quoting around the tokens")
+        })
+    }
+
     /// Sends an image to the server so a graph can name it.
     ///
     /// ComfyUI's `LoadImage` takes a filename in the server's own input
@@ -570,6 +670,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     negative_prompt: true,
     references: true,
     mask: false,
+    workflow: true,
     steps: true,
     guidance: true,
     provenance: Provenance::Unmarked,
@@ -581,21 +682,57 @@ impl ImageProvider for Client {
     }
 
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
-        let ckpt = self.resolve(&req.model)?;
+        // A supplied workflow names its own models, so nothing needs resolving
+        // against the server — and resolving anyway would fail on an install
+        // that has the workflow's checkpoints but not a Flux.2 one.
+        let ckpt = match req.workflow {
+            Some(_) => Checkpoint {
+                unet: String::new(),
+                clip: String::new(),
+                vae: String::new(),
+            },
+            None => self.resolve(&req.model)?,
+        };
         // A render is only reproducible if the seed is known, so an unpinned
         // request still gets a concrete seed — chosen here and reported back —
         // rather than one the server picks and never tells us.
         let seed = req.seed.unwrap_or_else(arbitrary_seed);
 
-        let uploaded = req
-            .references
-            .iter()
-            .map(|path| self.upload(path))
-            .collect::<Result<Vec<_>>>()?;
+        // The workflow is loaded and checked FIRST, before anything is announced
+        // or uploaded. Printing "Rendering…" and then refusing reads as a failure
+        // mid-render rather than a request that was never valid — and uploading
+        // an image for a render that cannot happen wastes a round trip.
+        let workflow = match &req.workflow {
+            Some(path) => Some(Self::apply_workflow(path, req, seed)?),
+            None => None,
+        };
+
+        let uploaded = if workflow.is_some() {
+            // A supplied workflow names its own inputs; Lucida has no idea which
+            // node would receive an upload.
+            if !req.references.is_empty() {
+                bail!(
+                    "a workflow and reference images cannot be combined.\n\n\
+                     Lucida substitutes tokens into a workflow but cannot know \
+                     which node an uploaded image belongs to. Put the image into \
+                     the workflow itself, or drop --workflow to use the built-in \
+                     editing graph."
+                );
+            }
+            Vec::new()
+        } else {
+            req.references
+                .iter()
+                .map(|path| self.upload(path))
+                .collect::<Result<Vec<_>>>()?
+        };
 
         if uploaded.is_empty() {
             let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
-            eprintln!("Rendering {width}x{height} with {} (seed {seed})…", ckpt.unet);
+            match &req.workflow {
+                None => eprintln!("Rendering {width}x{height} with {} (seed {seed})…", ckpt.unet),
+                Some(path) => eprintln!("Rendering {width}x{height} via {path} (seed {seed})…"),
+            }
         } else {
             // The size is decided server-side from the source unless overridden,
             // so there is no honest number to print here.
@@ -612,7 +749,11 @@ impl ImageProvider for Client {
             );
         }
 
-        let prompt_id = self.submit(&Self::graph_for(req, &ckpt, seed, &uploaded))?;
+        let graph = match workflow {
+            Some(graph) => graph,
+            None => Self::graph_for(req, &ckpt, seed, &uploaded),
+        };
+        let prompt_id = self.submit(&graph)?;
         let (bytes, mime_type) = self.await_image(&prompt_id)?;
 
         Ok(GeneratedImage {
@@ -773,6 +914,26 @@ fn is_certificate_failure(error: &reqwest::Error) -> bool {
         source = current.source();
     }
     false
+}
+
+/// Escapes a substituted value so it cannot break the JSON around it.
+///
+/// A prompt containing a quote or a backslash would otherwise turn a valid
+/// workflow into a parse error, or worse, silently change the graph's shape.
+fn escape_json(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Compares model filenames ignoring the punctuation that varies between
@@ -1029,6 +1190,92 @@ mod tests {
         assert_eq!(graph["guider"]["inputs"]["positive"], json!(["pos_ref1", 0]));
         // Dimensions still come from the first image, not the last.
         assert_eq!(graph["size"]["inputs"]["image"], json!(["scale0", 0]));
+    }
+
+    fn workflow_file(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lucida-wf-{}", body.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wf.json");
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    const MINIMAL: &str = r#"{"a":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%"}},
+        "b":{"class_type":"RandomNoise","inputs":{"noise_seed":"%seed%"}}}"#;
+
+    #[test]
+    fn a_workflow_is_filled_in_by_token() {
+        let (dir, path) = workflow_file(MINIMAL);
+        let req = ImageRequest {
+            prompt: "a fox".into(),
+            seed: Some(7),
+            ..Default::default()
+        };
+        let g = Client::apply_workflow(path.to_str().unwrap(), &req, 7).unwrap();
+        assert_eq!(g["a"]["inputs"]["text"], "a fox");
+        // A bare numeric token becomes a number, not the string "7".
+        assert_eq!(g["b"]["inputs"]["noise_seed"], 7);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The whole point of the escape hatch not becoming a hole: a workflow with
+    /// no place for a value must refuse it rather than ignore it.
+    #[test]
+    fn an_option_the_workflow_cannot_hold_is_refused() {
+        let no_steps = r#"{"a":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%"}}}"#;
+        let (dir, path) = workflow_file(no_steps);
+        let req = ImageRequest {
+            prompt: "a fox".into(),
+            steps: Some(30),
+            ..Default::default()
+        };
+        let error = Client::apply_workflow(path.to_str().unwrap(), &req, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("%steps%"), "must name the missing token: {error}");
+        assert!(error.contains("silently ignored"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt with a quote in it must not be able to break the graph.
+    #[test]
+    fn quotes_in_a_prompt_cannot_corrupt_the_workflow() {
+        let (dir, path) = workflow_file(MINIMAL);
+        let req = ImageRequest {
+            prompt: r#"a "quoted" sign, back\slash"#.into(),
+            seed: Some(1),
+            ..Default::default()
+        };
+        let g = Client::apply_workflow(path.to_str().unwrap(), &req, 1).unwrap();
+        assert_eq!(g["a"]["inputs"]["text"], r#"a "quoted" sign, back\slash"#);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The likeliest mistake by far, and one that produces a baffling error if
+    /// it reaches the server: exporting the editor format instead of the API one.
+    #[test]
+    fn the_editor_format_is_named_rather_than_submitted() {
+        let editor = r#"{"nodes":[{"id":1,"type":"CLIPTextEncode"}],"links":[],"version":0.4}"#;
+        let (dir, path) = workflow_file(editor);
+        let req = ImageRequest { prompt: "x".into(), ..Default::default() };
+        let error = Client::apply_workflow(path.to_str().unwrap(), &req, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("EDITOR format"), "{error}");
+        assert!(error.contains("Export (API)"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_node_without_a_class_type_is_rejected() {
+        let bad = r#"{"a":{"inputs":{"text":"%prompt%"}}}"#;
+        let (dir, path) = workflow_file(bad);
+        let req = ImageRequest { prompt: "x".into(), ..Default::default() };
+        let error = Client::apply_workflow(path.to_str().unwrap(), &req, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("class_type"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

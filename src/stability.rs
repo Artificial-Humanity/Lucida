@@ -105,6 +105,7 @@ pub fn capabilities(_model: &str) -> Capabilities {
         // would silently turn an edit into a fresh generation.
         references: false,
     mask: false,
+    workflow: false,
         // Not exposed on core/ultra/sd3.
         steps: false,
         guidance: false,

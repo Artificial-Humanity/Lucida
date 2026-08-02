@@ -76,6 +76,12 @@ struct ImageOptions {
     #[arg(short, long)]
     negative: Option<String>,
 
+    /// Render with a ComfyUI workflow of your own (API format) instead of the
+    /// built-in graph. Fill in %prompt% %negative% %seed% %width% %height%
+    /// %steps% %cfg% where they belong. comfyui only.
+    #[arg(long, value_name = "FILE")]
+    workflow: Option<String>,
+
     /// Concentrate an edit on part of the image: a PNG whose TRANSPARENT pixels
     /// are what changes. openai only, and advisory — the rest may still change.
     #[arg(long)]
@@ -327,6 +333,7 @@ impl ImageOptions {
             references,
             negative_prompt: self.negative,
             mask: self.mask,
+            workflow: self.workflow,
             seed: self.seed,
             steps: self.steps,
             guidance: self.guidance,
@@ -621,6 +628,7 @@ fn list_models(backend: Backend) -> Result<()> {
     println!("  seed            {}", yes_no(caps.seed));
     println!("  negative prompt {}", yes_no(caps.negative_prompt));
     println!("  reference image {}", yes_no(caps.references));
+    println!("  own workflow    {}", yes_no(caps.workflow));
     println!(
         "  mask            {}",
         if caps.mask { "accepted (advisory)" } else { "no" }
