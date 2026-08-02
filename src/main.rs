@@ -76,8 +76,8 @@ struct ImageOptions {
     #[arg(short, long)]
     negative: Option<String>,
 
-    /// Restrict an edit to part of the image: a PNG whose TRANSPARENT pixels are
-    /// what changes. openai only.
+    /// Concentrate an edit on part of the image: a PNG whose TRANSPARENT pixels
+    /// are what changes. openai only, and advisory — the rest may still change.
     #[arg(long)]
     mask: Option<String>,
 
@@ -621,7 +621,10 @@ fn list_models(backend: Backend) -> Result<()> {
     println!("  seed            {}", yes_no(caps.seed));
     println!("  negative prompt {}", yes_no(caps.negative_prompt));
     println!("  reference image {}", yes_no(caps.references));
-    println!("  masked edit     {}", yes_no(caps.mask));
+    println!(
+        "  mask            {}",
+        if caps.mask { "accepted (advisory)" } else { "no" }
+    );
     println!("  steps           {}", yes_no(caps.steps));
     println!("  guidance        {}", yes_no(caps.guidance));
     println!("  output carries  {}", caps.provenance.describe());

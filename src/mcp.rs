@@ -188,7 +188,7 @@ fn image_schema() -> Value {
              drop. Call image_providers for live capabilities and which are \
              actually reachable.\n\n\
              Pass reference_images to edit an existing picture ({}); pass mask as \
-             well to change only part of one ({}).",
+             well to concentrate the change on part of one ({}, advisory).",
             provider_summary(),
             providers_where(|c| c.references),
             providers_where(|c| c.mask)
@@ -250,10 +250,12 @@ fn image_schema() -> Value {
                 "mask": {
                     "type": "string",
                     "description": format!(
-                        "Path to a PNG restricting an edit to part of the image: \
+                        "Path to a PNG concentrating an edit on part of the image: \
                          its TRANSPARENT pixels are what changes. Supported by {}, \
-                         and requires reference_images. Every other provider \
-                         rewrites the whole picture.",
+                         and requires reference_images. ADVISORY, not binding — \
+                         measured at about twice the change inside the mask as \
+                         outside, with the rest of the picture regenerated too. \
+                         Composite over the original if untouched pixels matter.",
                         providers_where(|c| c.mask)
                     )
                 },

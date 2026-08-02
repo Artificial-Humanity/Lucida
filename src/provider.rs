@@ -281,10 +281,18 @@ pub struct Capabilities {
     pub seed: bool,
     pub negative_prompt: bool,
     pub references: bool,
-    /// Whether a mask can restrict an edit to part of the image.
+    /// Whether the provider *accepts* a mask naming where to concentrate an edit.
     ///
-    /// Separate from `references` because they are genuinely different
-    /// capabilities: three providers can edit a whole picture and cannot mask.
+    /// Deliberately not "restricts an edit to part of the image", which is what
+    /// this said until it was measured. On `gpt-image-1.5` a mask is **advisory**:
+    /// asking for a change in a lower-right box produced a mean difference of
+    /// 58/255 inside it and 29/255 outside — twice the change where asked for,
+    /// and the rest of the picture regenerated anyway, losing an object that was
+    /// nowhere near the mask.
+    ///
+    /// So this is a real capability and a weaker one than the name suggests.
+    /// Anyone needing pixels outside the mask preserved has to composite the
+    /// result back over the original themselves.
     pub mask: bool,
     pub steps: bool,
     pub guidance: bool,
@@ -357,11 +365,12 @@ impl Capabilities {
         if req.mask.is_some() {
             if !self.mask {
                 bail!(
-                    "`{me}` cannot restrict an edit to part of an image, so `--mask` \
-                     cannot be honoured.\n\n\
-                     Editing here rewrites the whole picture. Use the `openai` \
-                     provider for masked edits — it is the only one Lucida \
-                     implements a mask for."
+                    "`{me}` does not accept a mask, so `--mask` cannot be \
+                     honoured.\n\n\
+                     Use the `openai` provider, which does — though note that even \
+                     there a mask is advisory: it concentrates the change without \
+                     guaranteeing the rest of the picture survives. Measured at \
+                     roughly twice the change inside the mask as outside."
                 );
             }
             if req.references.is_empty() {

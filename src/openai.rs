@@ -230,6 +230,13 @@ impl Client {
     /// is a PNG whose **transparent** pixels mark what to change — the inverse of
     /// what most people assume, and worth stating in the error rather than
     /// letting someone edit the wrong half of a picture.
+    ///
+    /// **The mask is advisory.** Measured on `gpt-image-1.5`: a change requested
+    /// inside a lower-right box gave a mean difference of 58/255 there and
+    /// 29/255 everywhere else, and an object outside the mask disappeared. The
+    /// model regenerates the whole image and treats the mask as a hint about
+    /// where to concentrate. Untested on `gpt-image-1`, which is the one the
+    /// documentation describes as the inpainting model.
     fn edit(&self, req: &ImageRequest, model: &str) -> Result<Vec<u8>> {
         let mut form = reqwest::blocking::multipart::Form::new()
             .text("model", model.to_string())
