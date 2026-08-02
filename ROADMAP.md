@@ -178,18 +178,26 @@ whole-image references fit it exactly. What it still cannot express is a *mask* 
 "this region of this image" — so the structural gap the roadmap predicted is real
 but untouched, and inpainting (below) is where it will finally bite.
 
+**`--workflow` override — delivered.** A caller-supplied API-format graph, with
+`%prompt% %negative% %seed% %width% %height% %steps% %cfg%` marking where values
+go. The design centre: the tokens present in the file *are* the capability set
+for that render, so an option with no token to receive it is refused rather
+than silently dropped — the failure this whole design exists to prevent,
+arriving through the one door built to let callers past the design. The editor
+format is named rather than submitted, substituted values are JSON-escaped, and
+validation runs before anything is announced or uploaded. Verified against a
+recorded server end to end; a live render through a custom graph is still owed
+once the GPU frees up.
+
 **Still open on this lane**, in the order they matter:
 
-- **`--workflow` override.** Lucida ships two opinionated graphs and no way to
-  supply your own. The compromise named below — maintained templates plus an
-  override — is still the right one; only the first half exists.
-- **Non-Flux model families.** The graph hardcodes Flux.2's node types
+- **Non-Flux model families.** The built-in graph hardcodes Flux.2's node types
   (`Flux2Scheduler`, `EmptyFlux2LatentImage`, `CLIPLoader type=flux2`). A
-  different family needs a different graph, which is the `--workflow` work again
-  from the other end.
+  different family needs a different graph — reachable today via `--workflow`,
+  but not as a maintained template.
 - **Inpainting.** Mask-based editing is reachable locally via the Flux.1 Fill
-  blueprint, and would strain `references: Vec<String>` in the same way OpenAI
-  would. Still the cheapest place to discover that gap.
+  blueprint. `ImageRequest` can now express a mask (OpenAI forced it), so the
+  remaining work is the graph, not the type.
 
 ---
 
@@ -397,13 +405,29 @@ installed, a graph rejected in validation with the useful sentence four levels
 down in the JSON. Each got a dedicated message, and the troubleshooting section
 grew as predicted. Expect this to continue faster than the feature list.
 
-**Testing gets harder — now the sharpest open problem.** The unit tests cover
+**Testing gets harder — handled, by recording the wire.** The unit tests cover
 what can be checked without a network: request normalization, capability
-rejection, schema honesty, error formatting. Everything else was verified by
-hand against a live server, and a single verification cycle on the local lane
-costs 2–5 minutes of wall clock. That is affordable for one provider and will not
-be for three. Recorded-response testing is needed before the next one, or
-coverage will quietly become aspirational.
+rejection, schema honesty, error formatting. What they could not see was the
+wire itself — which URL was called, which request carried the credential, what
+the body actually said — and that was exactly where the money-costing bugs
+lived. `testserver.rs` (test-only, no dependency, ~200 lines of `TcpListener`)
+now replays responses transcribed from the live sessions while recording every
+request whole, and each client grew a `base` URL field so tests can aim it at
+the recorder.
+
+What earned its keep immediately is that the recordings pin the *deliberate
+asymmetries* that documentation would flatten: BFL's signed download URL must
+carry **no** credential while Veo's download URL **requires** one; ComfyUI's
+credentials must ride on every request *including* `/view`, the round trip that
+used to be the one to fail behind a proxy; an OpenAI edit must send its
+source's implied size, never `auto`. Each of those was verified by hand once
+and then unguarded — now a regression is a red test, not a leaked key or a
+reshaped picture.
+
+The limit is stated rather than hidden: a recording proves Lucida still speaks
+yesterday's protocol, not that the provider still does. Live verification is
+still owed once per new provider or changed endpoint; the recordings make it
+once rather than every change.
 
 ---
 

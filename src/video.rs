@@ -132,9 +132,7 @@ impl Client {
     }
 
     fn start_operation(&self, model: &str, body: &Value) -> Result<String> {
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{model}:predictLongRunning"
-        );
+        let url = format!("{}/models/{model}:predictLongRunning", self.base());
         let response = self
             .http()
             .post(&url)
@@ -158,7 +156,7 @@ impl Client {
 
     /// A single non-blocking check of an operation.
     fn poll_once(&self, operation: &str) -> Result<Value> {
-        let url = format!("https://generativelanguage.googleapis.com/v1beta/{operation}");
+        let url = format!("{}/{operation}", self.base());
         let response = self
             .http()
             .get(&url)
@@ -257,5 +255,86 @@ fn find_key<'a>(value: &'a Value, target: &str) -> Option<&'a Value> {
         }
         Value::Array(items) => items.iter().find_map(|v| find_key(v, target)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testserver::{Reply, serve};
+
+    fn request(model: &str) -> VideoRequest {
+        VideoRequest {
+            prompt: "a fox running".into(),
+            model: model.into(),
+            aspect_ratio: Some("16:9".into()),
+            resolution: None,
+            negative_prompt: None,
+            image: None,
+        }
+    }
+
+    #[test]
+    fn starting_a_render_resolves_the_alias_and_returns_the_operation() {
+        let server = serve(vec![Reply::json(r#"{"name":"operations/xyz"}"#)]);
+        let operation = Client::recorded(server.url())
+            .start_video(&request("veo"))
+            .unwrap();
+        assert_eq!(operation, "operations/xyz");
+
+        let requests = server.finish();
+        assert_eq!(
+            requests[0].path,
+            "/models/veo-3.1-fast-generate-preview:predictLongRunning"
+        );
+        assert_eq!(requests[0].header("x-goog-api-key"), Some("test-key"));
+        let body = requests[0].json();
+        assert_eq!(body["instances"][0]["prompt"], "a fox running");
+        assert_eq!(body["parameters"]["aspectRatio"], "16:9");
+    }
+
+    /// The lite guard runs before any HTTP: aimed at a port nothing listens on,
+    /// it must still answer with the models that would work.
+    #[test]
+    fn lite_rejects_a_negative_prompt_before_spending_a_round_trip() {
+        let mut req = request("veo-lite");
+        req.negative_prompt = Some("rain".into());
+        let error = Client::recorded("http://127.0.0.1:1")
+            .start_video(&req)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("veo-standard"), "must name a way forward: {error}");
+    }
+
+    #[test]
+    fn a_pending_poll_downloads_nothing() {
+        let server = serve(vec![Reply::json(r#"{"done":false}"#)]);
+        let status = Client::recorded(server.url()).poll_video("operations/xyz").unwrap();
+        assert!(matches!(status, VideoStatus::Pending));
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    /// The finished video lives at a URI that itself requires the API key —
+    /// measured, and the opposite of BFL's signed URLs, which must NOT get one.
+    /// Both are deliberate, which is exactly why both are pinned.
+    #[test]
+    fn the_video_download_carries_the_key_because_veo_urls_require_it() {
+        let done = r#"{"done":true,"response":{"generateVideoResponse":{
+            "generatedSamples":[{"video":{"uri":"{{server}}/files/v1:download?alt=media"}}]}}}"#;
+        let server = serve(vec![
+            Reply::json(done),
+            Reply::bytes("video/mp4", b"mp4-bytes"),
+        ]);
+
+        let status = Client::recorded(server.url()).poll_video("operations/xyz").unwrap();
+        match status {
+            VideoStatus::Done(bytes) => assert_eq!(bytes, b"mp4-bytes"),
+            VideoStatus::Pending => panic!("expected the render to be done"),
+        }
+
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/operations/xyz");
+        assert_eq!(requests[1].path, "/files/v1:download?alt=media");
+        assert_eq!(requests[1].header("x-goog-api-key"), Some("test-key"));
     }
 }

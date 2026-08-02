@@ -1193,7 +1193,15 @@ mod tests {
     }
 
     fn workflow_file(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("lucida-wf-{}", body.len()));
+        // Unique per call, not per content: tests run in parallel, and two tests
+        // sharing a directory race — one deletes it while the other reads.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "lucida-wf-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("wf.json");
         std::fs::write(&path, body).unwrap();
@@ -1332,5 +1340,154 @@ mod tests {
         // Anything else is left to the caller's own diagnosis.
         assert!(explain_refusal(404, &None).is_none());
         assert!(explain_refusal(400, &None).is_none());
+    }
+
+    // --- recorded responses -------------------------------------------------
+
+    use crate::provider::ImageProvider;
+    use crate::testserver::{Reply, serve};
+
+    fn wired(server: &crate::testserver::Server) -> Client {
+        Client {
+            base: server.url().to_string(),
+            auth: Some("Basic dGVzdA==".into()),
+            http: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .no_proxy()
+                .build()
+                .unwrap(),
+        }
+    }
+
+    fn object_info(node: &str, input: &str, file: &str) -> Reply {
+        Reply::json(&format!(
+            r#"{{"{node}":{{"input":{{"required":{{"{input}":[["{file}"]]}}}}}}}}"#
+        ))
+    }
+
+    const QUEUED: &str = r#"{"prompt_id":"p1"}"#;
+    const COMPLETED: &str = r#"{"p1":{"status":{"completed":true,"status_str":"success","messages":[]},
+        "outputs":{"save":{"images":[{"filename":"lucida_00001_.png","subfolder":"","type":"output"}]}}}}"#;
+
+    /// The whole conversation, replayed: three `/object_info` lookups, submit,
+    /// history, download. The claim only the wire can prove is that the
+    /// credentials ride on **every** request — `/view` is a separate round trip,
+    /// and it used to be the one call that failed against a fenced server.
+    #[test]
+    fn a_render_carries_credentials_on_every_request_including_the_download() {
+        let server = serve(vec![
+            object_info("UNETLoader", "unet_name", "flux2-klein.safetensors"),
+            object_info("CLIPLoader", "clip_name", "flux2_te.safetensors"),
+            object_info("VAELoader", "vae_name", "flux2_vae.safetensors"),
+            Reply::json(QUEUED),
+            Reply::json(COMPLETED),
+            Reply::bytes("image/png", b"png-bytes"),
+        ]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "klein".into(),
+            seed: Some(9),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"png-bytes");
+        assert_eq!(image.seed, Some(9));
+
+        let requests = server.finish();
+        let paths: Vec<&str> = requests.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/object_info/UNETLoader",
+                "/object_info/CLIPLoader",
+                "/object_info/VAELoader",
+                "/prompt",
+                "/history/p1",
+                "/view?filename=lucida_00001_.png&subfolder=&type=output",
+            ]
+        );
+        for sent in &requests {
+            assert_eq!(
+                sent.header("authorization"),
+                Some("Basic dGVzdA=="),
+                "{} went out unauthenticated",
+                sent.path
+            );
+        }
+
+        let submitted = requests[3].json();
+        assert_eq!(submitted["client_id"], "lucida");
+        let graph = &submitted["prompt"];
+        assert_eq!(graph["pos"]["inputs"]["text"], "a fox");
+        assert_eq!(graph["noise"]["inputs"]["noise_seed"], 9);
+        assert_eq!(graph["unet"]["inputs"]["unet_name"], "flux2-klein.safetensors");
+    }
+
+    /// An edit uploads first, and the graph names the file where the server
+    /// filed it — subfolder included, which `LoadImage` requires.
+    #[test]
+    fn an_uploaded_reference_is_named_with_its_subfolder() {
+        let dir = std::env::temp_dir().join("lucida-comfy-wire-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("cat.png");
+        std::fs::write(&source, b"cat-bytes").unwrap();
+
+        let server = serve(vec![
+            object_info("UNETLoader", "unet_name", "flux2-klein.safetensors"),
+            object_info("CLIPLoader", "clip_name", "flux2_te.safetensors"),
+            object_info("VAELoader", "vae_name", "flux2_vae.safetensors"),
+            Reply::json(r#"{"name":"cat.png","subfolder":"inputs"}"#),
+            Reply::json(QUEUED),
+            Reply::json(COMPLETED),
+            Reply::bytes("image/png", b"png-bytes"),
+        ]);
+
+        let request = ImageRequest {
+            prompt: "make it blue".into(),
+            model: "klein".into(),
+            references: vec![source.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        wired(&server).generate(&request).unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests[3].path, "/upload/image");
+        let upload = requests[3].body_text();
+        assert!(upload.contains("name=\"overwrite\""), "repeat edits must not pile up copies");
+        assert!(upload.contains("filename=\"cat.png\""));
+
+        let graph = &requests[4].json()["prompt"];
+        assert_eq!(graph["load0"]["inputs"]["image"], "inputs/cat.png");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A caller-supplied workflow goes to the server exactly as substituted, and
+    /// — because it names its own models — without a single `/object_info`
+    /// lookup, so it works on an install that lacks the Flux.2 files entirely.
+    #[test]
+    fn a_custom_workflow_is_submitted_without_resolving_models() {
+        let (dir, path) = workflow_file(MINIMAL);
+        let server = serve(vec![
+            Reply::json(QUEUED),
+            Reply::json(COMPLETED),
+            Reply::bytes("image/png", b"png-bytes"),
+        ]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            workflow: Some(path.to_string_lossy().into_owned()),
+            seed: Some(5),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"png-bytes");
+
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/prompt", "no model resolution before submitting");
+        let graph = &requests[0].json()["prompt"];
+        assert_eq!(graph["a"]["inputs"]["text"], "a fox");
+        assert_eq!(graph["b"]["inputs"]["noise_seed"], 5);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

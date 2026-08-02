@@ -119,6 +119,8 @@ pub fn capabilities(_model: &str) -> Capabilities {
 pub struct Client {
     key: String,
     http: reqwest::blocking::Client,
+    /// `API_ROOT` in production; a recorded-response server in tests.
+    base: String,
 }
 
 impl Client {
@@ -147,7 +149,11 @@ impl Client {
             .build()
             .context("building HTTP client")?;
 
-        Ok(Self { key, http })
+        Ok(Self {
+            key,
+            http,
+            base: API_ROOT.to_string(),
+        })
     }
 
     /// The account's credit balance. Free, and the only way to check a key
@@ -155,7 +161,7 @@ impl Client {
     pub fn credits(&self) -> Result<f64> {
         let response = self
             .http
-            .get(format!("{API_ROOT}/v1/user/balance"))
+            .get(format!("{}/v1/user/balance", self.base))
             .header("Authorization", format!("Bearer {}", self.key))
             .send()
             .context("checking the Stability credit balance")?;
@@ -214,7 +220,7 @@ impl ImageProvider for Client {
 
         let response = self
             .http
-            .post(format!("{API_ROOT}/v2beta/stable-image/generate/{model}"))
+            .post(format!("{}/v2beta/stable-image/generate/{model}", self.base))
             // `image/*` returns the bytes directly. The alternative,
             // `application/json`, wraps them in base64 for no benefit here.
             .header("Accept", "image/*")
@@ -350,5 +356,85 @@ mod tests {
         assert_eq!(resolve_model("SD3.5"), "sd3");
         // Anything unknown passes through, so a new endpoint works immediately.
         assert_eq!(resolve_model("something-new"), "something-new");
+    }
+
+    // --- recorded responses -------------------------------------------------
+
+    use crate::provider::{Aspect, ImageProvider, ImageRequest};
+    use crate::testserver::{Reply, serve};
+
+    fn wired(server: &crate::testserver::Server) -> Client {
+        Client {
+            key: "test-key".into(),
+            base: server.url().to_string(),
+            http: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .no_proxy()
+                .build()
+                .unwrap(),
+        }
+    }
+
+    /// The fourth call shape on the wire: one multipart request, raw image bytes
+    /// straight back. Field presence matters more here than anywhere else,
+    /// because this API silently ignores what it does not recognise — a typo'd
+    /// field name would draw no error, just an image that ignored the request.
+    #[test]
+    fn the_render_is_one_multipart_request_returning_raw_bytes() {
+        let server = serve(vec![Reply::bytes("image/png", b"raw-image-bytes")]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "core".into(),
+            aspect: Some(Aspect::parse("21:9").unwrap()),
+            seed: Some(11),
+            negative_prompt: Some("rain".into()),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"raw-image-bytes", "the body IS the image");
+        assert_eq!(image.seed, Some(11));
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "no polling, no download — one round trip");
+        let sent = &requests[0];
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.path, "/v2beta/stable-image/generate/core");
+        assert_eq!(sent.header("authorization"), Some("Bearer test-key"));
+        assert_eq!(sent.header("accept"), Some("image/*"));
+
+        let body = sent.body_text();
+        for needle in [
+            "name=\"prompt\"",
+            "a fox",
+            "name=\"output_format\"",
+            "name=\"aspect_ratio\"",
+            "21:9",
+            "name=\"seed\"",
+            "11",
+            "name=\"negative_prompt\"",
+            "rain",
+        ] {
+            assert!(body.contains(needle), "multipart body lacks {needle}");
+        }
+    }
+
+    /// `sd3` is an endpoint that requires a variant naming the actual weights,
+    /// and rejects the request without one — so the field must be on the wire.
+    #[test]
+    fn the_sd3_endpoint_names_its_variant() {
+        let server = serve(vec![Reply::bytes("image/png", b"x")]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "sd3".into(),
+            ..Default::default()
+        };
+        wired(&server).generate(&request).unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/v2beta/stable-image/generate/sd3");
+        let body = requests[0].body_text();
+        assert!(body.contains("name=\"model\""));
+        assert!(body.contains("sd3.5-large"));
     }
 }

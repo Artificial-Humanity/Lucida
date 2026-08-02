@@ -19,6 +19,8 @@ mod mcp;
 mod openai;
 mod provider;
 mod stability;
+#[cfg(test)]
+mod testserver;
 mod video;
 
 use anyhow::{Context, Result};

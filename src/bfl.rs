@@ -109,6 +109,8 @@ pub fn capabilities(model: &str) -> Capabilities {
 pub struct Client {
     key: String,
     http: reqwest::blocking::Client,
+    /// `API_ROOT` in production; a recorded-response server in tests.
+    base: String,
 }
 
 impl Client {
@@ -134,7 +136,11 @@ impl Client {
             .build()
             .context("building HTTP client")?;
 
-        Ok(Self { key, http })
+        Ok(Self {
+            key,
+            http,
+            base: API_ROOT.to_string(),
+        })
     }
 
     fn body(&self, req: &ImageRequest, model: &str) -> Result<Value> {
@@ -197,7 +203,7 @@ impl Client {
     fn submit(&self, req: &ImageRequest, model: &str) -> Result<(String, Option<f64>)> {
         let response = self
             .http
-            .post(format!("{API_ROOT}/{model}"))
+            .post(format!("{}/{model}", self.base))
             .header("x-key", &self.key)
             .json(&self.body(req, model)?)
             .send()
@@ -220,7 +226,7 @@ impl Client {
             .or_else(|| {
                 payload["id"]
                     .as_str()
-                    .map(|id| format!("{API_ROOT}/get_result?id={id}"))
+                    .map(|id| format!("{}/get_result?id={id}", self.base))
             })
             .ok_or_else(|| anyhow!("the API accepted the job but returned no id: {payload}"))?;
 
@@ -386,7 +392,7 @@ impl ImageProvider for Client {
         // running `lucida models` is really asking.
         let response = self
             .http
-            .get(format!("{API_ROOT}/credits"))
+            .get(format!("{}/credits", self.base))
             .header("x-key", &self.key)
             .send()
             .context("checking the API key against /v1/credits")?;
@@ -555,7 +561,11 @@ mod tests {
     /// itself was perfectly good.
     #[test]
     fn an_edit_sends_no_dimensions_unless_asked() {
-        let client = Client { key: "x".into(), http: reqwest::blocking::Client::new() };
+        let client = Client {
+            key: "x".into(),
+            http: reqwest::blocking::Client::new(),
+            base: API_ROOT.into(),
+        };
 
         let edit = ImageRequest {
             references: vec!["https://example.com/a.png".into()],
@@ -610,5 +620,105 @@ mod tests {
     fn parameter_rejection_names_the_models_that_would_accept_it() {
         let message = explain_error(422, r#"{"detail":"steps not permitted"}"#, "flux-2-pro");
         assert!(message.contains("flux-2-flex"));
+    }
+
+    // --- recorded responses -------------------------------------------------
+
+    use crate::provider::ImageProvider;
+    use crate::testserver::{Reply, serve};
+
+    fn wired(server: &crate::testserver::Server) -> Client {
+        Client {
+            key: "test-key".into(),
+            base: server.url().to_string(),
+            http: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .no_proxy()
+                .build()
+                .unwrap(),
+        }
+    }
+
+    /// The whole call shape, replayed: submit, poll at the URL the API handed
+    /// back, download the result. Three claims that only the wire can prove:
+    ///
+    /// 1. The polling URL is used **verbatim** — the docs insist on this because
+    ///    the global endpoint delegates to a regional one.
+    /// 2. The key travels on submit and poll as `x-key`.
+    /// 3. The download — a signed URL into third-party object storage — carries
+    ///    **no credential at all**. Sending one there is how keys leak.
+    #[test]
+    fn the_signed_download_url_never_receives_the_api_key() {
+        let submit = r#"{"id":"abc","polling_url":"{{server}}/v1/get_result?id=abc","cost":0.06}"#;
+        let ready = r#"{"status":"Ready","result":{"sample":"{{server}}/delivery/img.png"}}"#;
+        let server = serve(vec![
+            Reply::json(submit),
+            Reply::json(ready),
+            Reply::bytes("image/png", b"png-bytes"),
+        ]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            seed: Some(7),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"png-bytes");
+        assert_eq!(image.seed, Some(7), "the pinned seed is reported back");
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/flux-2-pro", "the model id is the path under /v1");
+        assert_eq!(requests[0].header("x-key"), Some("test-key"));
+        let body = requests[0].json();
+        assert_eq!(body["prompt"], "a fox");
+        assert_eq!(body["seed"], 7);
+        assert_eq!(body["width"], 1024, "generation always states its dimensions");
+        assert_eq!(body["output_format"], "png");
+
+        // Poll where told, not where a hand-built URL would go.
+        assert_eq!(requests[1].path, "/v1/get_result?id=abc");
+        assert_eq!(requests[1].header("x-key"), Some("test-key"));
+
+        // The signed URL gets no key.
+        assert_eq!(requests[2].path, "/delivery/img.png");
+        assert_eq!(requests[2].header("x-key"), None);
+    }
+
+    /// Both moderation states are terminal and the message distinguishes them —
+    /// a recorded poll proves the mapping from the API's own status strings.
+    #[test]
+    fn a_moderated_prompt_stops_the_poll_with_a_clear_verdict() {
+        let submit = r#"{"id":"abc","polling_url":"{{server}}/v1/get_result?id=abc"}"#;
+        let moderated = r#"{"status":"Request Moderated"}"#;
+        let server = serve(vec![Reply::json(submit), Reply::json(moderated)]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+        let error = wired(&server).generate(&request).unwrap_err().to_string();
+        assert!(error.contains("content moderation"), "{error}");
+        assert!(error.contains("Nothing was charged"));
+        assert_eq!(server.finish().len(), 2, "no further polling after a terminal state");
+    }
+
+    /// An HTTP failure on submit flows through `explain_error` with the real
+    /// body, so the whole path from status code to advice is exercised.
+    #[test]
+    fn running_out_of_credits_names_the_dashboard() {
+        let server = serve(vec![Reply::status(402, r#"{"detail":"Not enough credits"}"#)]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+        let error = wired(&server).generate(&request).unwrap_err().to_string();
+        assert!(error.contains("out of credits"), "{error}");
+        assert!(error.contains("dashboard.bfl.ai"));
     }
 }

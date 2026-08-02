@@ -58,6 +58,8 @@ pub fn resolve_model(input: &str) -> String {
 pub struct Client {
     api_key: String,
     http: reqwest::blocking::Client,
+    /// `API_ROOT` in production; a recorded-response server in tests.
+    base: String,
 }
 
 impl Client {
@@ -78,7 +80,26 @@ impl Client {
             .build()
             .context("building HTTP client")?;
 
-        Ok(Self { api_key, http })
+        Ok(Self {
+            api_key,
+            http,
+            base: API_ROOT.to_string(),
+        })
+    }
+
+    /// A client aimed at a recorded-response server, for tests here and in
+    /// `video.rs` — which shares this client and cannot reach its fields.
+    #[cfg(test)]
+    pub(crate) fn recorded(base: &str) -> Self {
+        Self {
+            api_key: "test-key".into(),
+            base: base.to_string(),
+            http: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .no_proxy()
+                .build()
+                .unwrap(),
+        }
     }
 
     /// Shared HTTP client, for sibling modules that speak other endpoints.
@@ -90,12 +111,16 @@ impl Client {
         &self.api_key
     }
 
+    pub(crate) fn base(&self) -> &str {
+        &self.base
+    }
+
     /// Image-capable models this key can actually see. Free, and the quickest way
     /// to confirm a key works without spending anything.
     fn image_models(&self) -> Result<Vec<String>> {
         let response = self
             .http
-            .get(format!("{API_ROOT}/models?pageSize=200"))
+            .get(format!("{}/models?pageSize=200", self.base))
             .header("x-goog-api-key", &self.api_key)
             .send()
             .context("listing models")?;
@@ -200,7 +225,7 @@ impl ImageProvider for Client {
 
         // The key travels as a header, never as a `?key=` query parameter, which
         // would leak it into shell history, proxy logs and crash reports.
-        let url = format!("{API_ROOT}/models/{model}:generateContent");
+        let url = format!("{}/models/{model}:generateContent", self.base);
         let response = self
             .http
             .post(&url)
@@ -354,5 +379,82 @@ pub(crate) fn explain_error(status: u16, body: &str) -> String {
              Note that the Imagen 3 IDs are retired. {message}"
         ),
         _ => format!("HTTP {status} — {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{Aspect, Size};
+    use crate::testserver::{Reply, serve};
+
+    /// The key travels as `x-goog-api-key`, never as a `?key=` query parameter —
+    /// which would put it in shell history, proxy logs and crash reports. Only
+    /// the wire can prove where it actually went.
+    ///
+    /// Also pins the translation layer: the normalized request carries a ratio
+    /// and a pixel count, and what Google receives is its named ratio and a tier.
+    #[test]
+    fn the_key_travels_as_a_header_and_never_in_the_url() {
+        let reply = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "text": "Here you go" },
+                { "inlineData": { "mimeType": "image/png",
+                                  "data": STANDARD.encode(b"png-bytes") } }
+            ]}}]
+        })
+        .to_string();
+        let server = serve(vec![Reply::json(&reply)]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "banana".into(),
+            aspect: Some(Aspect::parse("16:9").unwrap()),
+            size: Some(Size::TWO_K),
+            ..Default::default()
+        };
+        let image = Client::recorded(server.url()).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"png-bytes");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.commentary.as_deref(), Some("Here you go"));
+
+        let requests = server.finish();
+        let sent = &requests[0];
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.path, "/models/gemini-3.1-flash-image:generateContent");
+        assert_eq!(sent.header("x-goog-api-key"), Some("test-key"));
+        assert!(!sent.path.contains("key="), "the key must never ride in the URL");
+
+        let body = sent.json();
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "a fox");
+        let config = &body["generationConfig"];
+        assert_eq!(config["imageConfig"]["aspectRatio"], "16:9");
+        assert_eq!(config["imageConfig"]["imageSize"], "2K", "2048px translates to the tier name");
+    }
+
+    /// A blocked prompt is a well-formed response with no parts, and the
+    /// recitation case gets the counterintuitive explanation: *generic* prompts
+    /// trip it more readily than elaborate ones.
+    #[test]
+    fn a_recitation_block_is_explained_rather_than_dumped() {
+        let payload = serde_json::json!({
+            "candidates": [{ "finishReason": "IMAGE_RECITATION" }]
+        });
+        let error = extract_image(&payload).unwrap_err().to_string();
+        assert!(error.contains("IMAGE_RECITATION"));
+        assert!(error.contains("adding detail"), "must say what actually clears it: {error}");
+    }
+
+    /// The model can answer with text and no image — a refusal, usually — and
+    /// that text is the useful part of the error.
+    #[test]
+    fn a_text_only_reply_surfaces_what_the_model_said() {
+        let payload = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "text": "I can't draw that." }
+            ]}}]
+        });
+        let error = extract_image(&payload).unwrap_err().to_string();
+        assert!(error.contains("I can't draw that."));
     }
 }

@@ -154,6 +154,8 @@ pub fn capabilities(model: &str) -> Capabilities {
 pub struct Client {
     key: String,
     http: reqwest::blocking::Client,
+    /// `API_ROOT` in production; a recorded-response server in tests.
+    base: String,
 }
 
 impl Client {
@@ -176,7 +178,11 @@ impl Client {
             .build()
             .context("building HTTP client")?;
 
-        Ok(Self { key, http })
+        Ok(Self {
+            key,
+            http,
+            base: API_ROOT.to_string(),
+        })
     }
 
     /// Maps a requested ratio onto one of the three sizes the API accepts.
@@ -244,7 +250,7 @@ impl Client {
 
         let response = self
             .http
-            .post(format!("{API_ROOT}/images/generations"))
+            .post(format!("{}/images/generations", self.base))
             .header("Authorization", format!("Bearer {}", self.key))
             .json(&body)
             .send()
@@ -289,7 +295,7 @@ impl Client {
 
         let response = self
             .http
-            .post(format!("{API_ROOT}/images/edits"))
+            .post(format!("{}/images/edits", self.base))
             .header("Authorization", format!("Bearer {}", self.key))
             .multipart(form)
             .send()
@@ -340,7 +346,7 @@ impl ImageProvider for Client {
         // than reporting an empty list.
         let response = self
             .http
-            .get(format!("{API_ROOT}/models"))
+            .get(format!("{}/models", self.base))
             .header("Authorization", format!("Bearer {}", self.key))
             .send()
             .context("checking the OpenAI key")?;
@@ -643,5 +649,117 @@ mod tests {
     fn aliases_resolve() {
         assert_eq!(resolve_model("openai"), "gpt-image-2");
         assert_eq!(resolve_model("something-new"), "something-new");
+    }
+
+    // --- recorded responses -------------------------------------------------
+
+    use crate::provider::ImageProvider;
+    use crate::testserver::{Reply, serve};
+
+    fn wired(server: &crate::testserver::Server) -> Client {
+        Client {
+            key: "test-key".into(),
+            base: server.url().to_string(),
+            http: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .no_proxy()
+                .build()
+                .unwrap(),
+        }
+    }
+
+    fn b64_reply(bytes: &[u8]) -> String {
+        format!(r#"{{"data":[{{"b64_json":"{}"}}]}}"#, STANDARD.encode(bytes))
+    }
+
+    /// Generation is JSON, and the quality default is Lucida's stated `medium`
+    /// rather than the API's `auto` — which resolves upward and bills
+    /// accordingly, so its presence on the wire is worth a test.
+    #[test]
+    fn generation_is_json_with_the_stated_quality_default() {
+        let server = serve(vec![Reply::json(&b64_reply(b"png-bytes"))]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "gpt-image-2".into(),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"png-bytes");
+        assert_eq!(image.seed, None, "no seed exists to report");
+
+        let requests = server.finish();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/images/generations");
+        assert_eq!(requests[0].header("authorization"), Some("Bearer test-key"));
+        let body = requests[0].json();
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body["quality"], "medium");
+        assert_eq!(body["output_format"], "png");
+        assert_eq!(body["n"], 1);
+        assert_eq!(body["size"], "auto", "nothing asked for lets the model choose");
+    }
+
+    /// An edit switches encodings entirely: multipart, `image[]` fields (the
+    /// singular form silently keeps only the last), the mask as its own part,
+    /// and a size implied by the source rather than `auto`.
+    #[test]
+    fn an_edit_is_multipart_with_the_sources_implied_size() {
+        let dir = std::env::temp_dir().join("lucida-openai-wire-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("square.png");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1024u32.to_be_bytes());
+        png.extend_from_slice(&1024u32.to_be_bytes());
+        std::fs::write(&source, &png).unwrap();
+        let mask = dir.join("mask.png");
+        std::fs::write(&mask, b"mask-bytes").unwrap();
+
+        let server = serve(vec![Reply::json(&b64_reply(b"edited"))]);
+        let request = ImageRequest {
+            prompt: "make it night".into(),
+            model: "gpt-image-1.5".into(),
+            references: vec![source.to_string_lossy().into_owned()],
+            mask: Some(mask.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"edited");
+
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/images/edits");
+        let body = requests[0].body_text();
+        assert!(body.contains("name=\"image[]\""), "plural field, or extras are dropped");
+        assert!(body.contains("name=\"mask\""));
+        assert!(body.contains("filename=\"square.png\""));
+        // The regression this pins: an edit follows its source's shape rather
+        // than sending `auto` and letting the model reshape the picture.
+        assert!(body.contains("name=\"size\""));
+        assert!(body.contains("1024x1024"), "a square source implies the square size");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Older models may answer with a URL instead of inline base64. The download
+    /// is a signed URL, so — as with BFL — it must carry no credential.
+    #[test]
+    fn a_url_response_is_downloaded_without_the_key() {
+        let listing = r#"{"data":[{"url":"{{server}}/dl/img.png"}]}"#;
+        let server = serve(vec![
+            Reply::json(listing),
+            Reply::bytes("image/png", b"downloaded"),
+        ]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "gpt-image-1".into(),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes, b"downloaded");
+
+        let requests = server.finish();
+        assert_eq!(requests[1].path, "/dl/img.png");
+        assert_eq!(requests[1].header("authorization"), None);
     }
 }
