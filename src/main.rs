@@ -38,9 +38,9 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
     about = "Generate and edit images with Google Gemini, a local ComfyUI, hosted FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
                   hosted FLUX from Black Forest Labs, Stability AI, or OpenAI.\n\n\
-                  Google reads GOOGLE_API_KEY (or GEMINI_API_KEY) from the \
-                  environment, and image generation requires billing to be enabled \
-                  on the project behind the key; free-tier keys report a quota of \
+                  Google reads GEMINI_API_KEY — one key for both images and Veo \
+                  video. Image generation requires billing to be enabled on the \
+                  project behind the key; free-tier keys report a quota of \
                   zero.\n\n\
                   ComfyUI needs no credential. It is found at \
                   http://127.0.0.1:8188 unless LUCIDA_COMFYUI_URL says otherwise.\n\n\
@@ -200,8 +200,12 @@ enum Command {
 
         /// Set one setting. Prompts at a terminal, or reads a pipe:
         /// `pbpaste | lucida config --set BFL_API_KEY`
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["init", "remove"])]
         set: Option<String>,
+
+        /// Remove one setting from the config file, wherever it lives
+        #[arg(long, value_name = "NAME", conflicts_with = "init")]
+        remove: Option<String>,
     },
 
     /// Run as an MCP server over stdio
@@ -221,10 +225,11 @@ fn run() -> Result<()> {
 
         Command::Models { provider } => list_models(Backend::parse(&provider)?),
 
-        Command::Config { init, set } => match set {
-            Some(name) => set_config(&name),
-            None if init => init_config(),
-            None => {
+        Command::Config { init, set, remove } => match (set, remove) {
+            (Some(name), _) => set_config(&name),
+            (_, Some(name)) => remove_config(&name),
+            _ if init => init_config(),
+            _ => {
                 show_config();
                 Ok(())
             }
@@ -412,11 +417,28 @@ fn show_config() {
         }
     }
 
+    // A renamed setting is the other way to hold a key that is present, correct
+    // and never read. Reported before the unrecognised-name list, because this
+    // one has a specific answer rather than "check the spelling".
+    let retired = config::retired_in_use();
+    if !retired.is_empty() {
+        println!("\nSet, but no longer read by Lucida:");
+        for (old, new) in retired {
+            println!("  {old}  (renamed — use {new})");
+        }
+    }
+
     // A name Lucida does not know is the silent failure worth surfacing: the
     // file looks right, the value is there, and nothing ever reads it.
+    // A retired name is excluded: it was reported just above with a specific
+    // answer, and listing it again under "check the spelling" would contradict
+    // that — the spelling is not what is wrong with it.
     let unrecognised: Vec<String> = config::keys_in_file()
         .into_iter()
-        .filter(|name| !config::KNOWN_KEYS.iter().any(|(known, _)| known == name))
+        .filter(|name| {
+            !config::KNOWN_KEYS.iter().any(|(known, _)| known == name)
+                && config::replacement_for(name).is_none()
+        })
         .collect();
     if !unrecognised.is_empty() {
         println!("\nIn the config file but not recognised by Lucida:");
@@ -446,11 +468,95 @@ fn show_config() {
 ///
 /// Rewrites the named line in place if present, appends it otherwise, and never
 /// disturbs anything else in the file — including comments.
-fn set_config(name: &str) -> Result<()> {
-    let name = name.trim();
+/// A setting name is spelled the way an environment variable is; anything else
+/// is a typo worth catching before it reaches a file nothing will ever read.
+fn validate_setting_name(name: &str) -> Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         anyhow::bail!(
-            "`{name}` is not a valid setting name — expected something like GOOGLE_API_KEY"
+            "`{name}` is not a valid setting name — expected something like GEMINI_API_KEY"
+        );
+    }
+    Ok(())
+}
+
+/// Whether `line` assigns `name`, allowing the `export ` prefix that comes along
+/// when a fragment of a shell profile is pasted in.
+fn assigns(line: &str, name: &str) -> bool {
+    let bare = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+    bare.split_once('=').is_some_and(|(key, _)| key.trim() == name)
+}
+
+/// Removes one setting from the config file.
+///
+/// The counterpart to `--set`, and the reason it exists is that changing a key
+/// otherwise means remembering where the file lives. It edits the file **in
+/// use** rather than the preferred location: `--set` writes to the preferred
+/// path, but a stale value can be sitting in a file found further down the
+/// search order, or in one named by `LUCIDA_CONFIG`. Removing from anywhere else
+/// would report success and change nothing.
+fn remove_config(name: &str) -> Result<()> {
+    let name = name.trim();
+    validate_setting_name(name)?;
+
+    let Some(path) = config::source().map(|p| p.to_path_buf()) else {
+        anyhow::bail!(
+            "no config file was found, so there is nothing to remove from.\n\n\
+             `lucida config` lists where one is looked for."
+        );
+    };
+
+    let existing = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|line| !assigns(line, name))
+        .collect();
+
+    // Idempotent, but never silent: removing something that was not there is a
+    // typo often enough to be worth saying out loud.
+    if kept.len() == existing.lines().count() {
+        eprintln!(
+            "{name} is not in {}, so there is nothing to remove.",
+            path.display()
+        );
+        println!("{}", path.display());
+        return Ok(());
+    }
+
+    let mut body = kept.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    restrict_permissions(&path)?;
+
+    eprintln!("Removed {name} from {}.", path.display());
+
+    // Removing a key is usually a step in changing which one is used, so say
+    // what answers now. Under the file-wins rule this is the moment an
+    // environment value stops being shadowed and starts being the credential.
+    if std::env::var(name).is_ok_and(|v| !v.trim().is_empty()) {
+        eprintln!("Note: {name} is set in this environment, so that value now applies.");
+    }
+
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn set_config(name: &str) -> Result<()> {
+    let name = name.trim();
+    validate_setting_name(name)?;
+
+    // Writing a retired name would file a value nothing reads, then report
+    // success — the silent drop this design exists to refuse. Name the
+    // replacement rather than accepting the write.
+    if let Some(replacement) = config::replacement_for(name) {
+        anyhow::bail!(
+            "`{name}` is no longer read — it was renamed to `{replacement}`.\n\n\
+             Set that instead:\n  lucida config --set {replacement}\n\n\
+             And clear the old one if it is still in the file:\n  \
+             lucida config --remove {name}"
         );
     }
 
@@ -511,10 +617,7 @@ fn set_config(name: &str) -> Result<()> {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
     let assignment = format!("{name}={value}");
 
-    let target = lines.iter().position(|line| {
-        let bare = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-        bare.split_once('=').is_some_and(|(key, _)| key.trim() == name)
-    });
+    let target = lines.iter().position(|line| assigns(line, name));
 
     let replaced = target.is_some();
     match target {
@@ -570,7 +673,7 @@ fn init_config() -> Result<()> {
 
     eprintln!(
         "Wrote {}.\n\nEvery line is commented out, so nothing changed yet. \
-         Uncomment GOOGLE_API_KEY\nand set it, then check with `lucida config`.",
+         Uncomment the key you need\nand set it, then check with `lucida config`.",
         path.display()
     );
     println!("{}", path.display());

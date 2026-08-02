@@ -58,12 +58,13 @@ config file for when there is no shell to read the environment from.
 
 ```console
 $ lucida config --set BFL_API_KEY       # prompts, masked; or reads a pipe
+$ lucida config --remove BFL_API_KEY    # clears it again
 $ lucida config                         # what this process sees, and from where
 ```
 
 | Variable | For |
 |---|---|
-| `GOOGLE_API_KEY` | Google — images via Gemini, video via Veo. `GEMINI_API_KEY` is accepted as an alias |
+| `GEMINI_API_KEY` | Google — images via Gemini, video via Veo. One key covers both |
 | `BFL_API_KEY` | Black Forest Labs — hosted FLUX |
 | `STABILITY_API_KEY` | Stability AI |
 | `OPENAI_API_KEY` | OpenAI |
@@ -75,6 +76,12 @@ $ lucida config                         # what this process sees, and from where
 You only need the ones for providers you actually use. Keys come from each
 provider's own dashboard.
 
+> **`GOOGLE_API_KEY` was renamed to `GEMINI_API_KEY`** and is no longer read.
+> Everything Lucida reaches on Google is the Gemini API — images and Veo alike —
+> so one name covers both. If you have the old one, `lucida config` says so by
+> name rather than reporting a missing key, and `lucida config --remove
+> GOOGLE_API_KEY` clears it from the file.
+
 **`lucida config`** prints whether each setting is present and where it came
 from — never a value — so its output is safe to paste into a bug report.
 
@@ -85,6 +92,11 @@ reads stdin, so the key never enters shell history:
 ```console
 $ pbpaste | lucida config --set OPENAI_API_KEY
 ```
+
+**`lucida config --remove NAME`** deletes one setting from whichever file is in
+use, so changing a key does not mean remembering where the file lives. If the
+same name is also in your environment, it says so — that value is what applies
+once the file no longer answers.
 
 **`lucida config --init`** writes a starter file, mode 600, and prints its path.
 It never overwrites an existing one.
@@ -113,7 +125,7 @@ file it reads is readable by other users.
 > MCP server it spawns — so a key exported in `~/.zshenv` is genuinely invisible
 > to a client started from the Dock, Finder or Spotlight, even though the same
 > binary works perfectly from a terminal. This is what the config file is for.
-> Note that passing `--env GOOGLE_API_KEY='${GOOGLE_API_KEY}'` to `claude mcp
+> Note that passing `--env GEMINI_API_KEY='${GEMINI_API_KEY}'` to `claude mcp
 > add` does **not** fix it: the reference expands from the client's own
 > environment, which is exactly the empty one.
 

@@ -70,15 +70,21 @@ pub struct Client {
 }
 
 impl Client {
-    /// GOOGLE_API_KEY is checked first, then GEMINI_API_KEY, which is what the
-    /// Google SDKs themselves look for. Both fall back to the config file.
+    /// `GEMINI_API_KEY`, and only that.
+    ///
+    /// `GOOGLE_API_KEY` was accepted too until v0.5.2, and two spellings for one
+    /// credential was one too many: `lucida config` had to list both, the
+    /// template had to offer one and mention the other, and a key in the wrong
+    /// one still worked, so nothing ever taught anyone which was canonical.
+    /// Everything Lucida reaches on Google is the Gemini API — images and Veo
+    /// alike — and after Imagen's shutdown on 2026-08-17 nothing is left that
+    /// "Google" named more accurately. The retired name is still recognised in
+    /// [`no_key`], purely to say what happened.
     pub fn from_env() -> Result<Self> {
-        let api_key = crate::config::var("GOOGLE_API_KEY")
-            .or_else(|| crate::config::var("GEMINI_API_KEY"))
-            .ok_or_else(no_key)?;
+        let api_key = crate::config::var("GEMINI_API_KEY").ok_or_else(no_key)?;
 
         if api_key.trim().is_empty() {
-            bail!("GOOGLE_API_KEY is set but empty");
+            bail!("GEMINI_API_KEY is set but empty");
         }
 
         let http = reqwest::blocking::Client::builder()
@@ -276,8 +282,24 @@ fn no_key() -> anyhow::Error {
         },
     };
 
+    // Someone holding the old name has a key that is present and correct, so
+    // "no API key found" would send them to check the one thing that is not
+    // wrong. Diagnose the rename instead, and say nothing about shells.
+    if let Some(replacement) = crate::config::replacement_for("GOOGLE_API_KEY")
+        && crate::config::origin("GOOGLE_API_KEY").is_some()
+    {
+        return anyhow!(
+            "GOOGLE_API_KEY is set, but Lucida no longer reads it — the setting \
+             was renamed to {replacement}.\n\n\
+             Rename it in your shell profile, or file it with:\n  \
+             lucida config --set {replacement}\n\n\
+             Everything Lucida reaches on Google is the Gemini API, so one name \
+             covers images and Veo alike."
+        );
+    }
+
     anyhow!(
-        "no API key found: set GOOGLE_API_KEY (or GEMINI_API_KEY).\n\n\
+        "no API key found: set GEMINI_API_KEY.\n\n\
          {config_hint}\n\n\
          If the key IS exported in your shell profile and this still fails, the \
          process was almost certainly not started from a shell — a GUI-launched \

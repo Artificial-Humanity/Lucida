@@ -69,21 +69,21 @@ case "$out" in
   *)                       fail "config --init: $out" ;;
 esac
 
-printf 'GOOGLE_API_KEY=smoke-test-value\n' >> "$sandbox/.config/lucida/config.env"
+printf 'GEMINI_API_KEY=smoke-test-value\n' >> "$sandbox/.config/lucida/config.env"
 
 # The key must be visible with NO environment whatsoever.
 out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config 2>&1)
 case "$out" in
-  *"GOOGLE_API_KEY"*"set (config file)"*) pass "config file is read with no environment" ;;
+  *"GEMINI_API_KEY"*"set (config file)"*) pass "config file is read with no environment" ;;
   *) fail "config file was not picked up: $out" ;;
 esac
 
 # …and it must beat the environment, which is what makes a key scoped to Lucida
 # reachable at all when the shell already exports a broader one. This assertion
 # was the other way round through v0.5.2; see config::var for why it changed.
-out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GOOGLE_API_KEY=x "$BIN" config 2>&1)
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GEMINI_API_KEY=x "$BIN" config 2>&1)
 case "$out" in
-  *"GOOGLE_API_KEY"*"set (config file)"*) pass "config file beats the environment" ;;
+  *"GEMINI_API_KEY"*"set (config file)"*) pass "config file beats the environment" ;;
   *) fail "environment overrode the config file: $out" ;;
 esac
 
@@ -93,6 +93,48 @@ case "$out" in
   *"not used — the config file wins"*) pass "the shadowed environment value is reported" ;;
   *) fail "config did not report the shadowed environment value: $out" ;;
 esac
+
+# A renamed setting must be diagnosed, not merely absent. Someone holding
+# GOOGLE_API_KEY has a key that is present and correct, so "no API key found"
+# would send them to check the one thing that is not wrong.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GOOGLE_API_KEY=x "$BIN" config 2>&1)
+case "$out" in
+  *"no longer read"*GEMINI_API_KEY*) pass "a retired key name names its replacement" ;;
+  *) fail "retired GOOGLE_API_KEY was not reported: $out" ;;
+esac
+
+# …and setting it must be refused rather than written, since a written value
+# nothing reads is the silent drop this design exists to refuse.
+out=$(echo v | env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config --set GOOGLE_API_KEY 2>&1 || true)
+case "$out" in
+  *"no longer read"*"--set GEMINI_API_KEY"*) pass "config --set refuses a retired name" ;;
+  *) fail "config --set accepted a retired name: $out" ;;
+esac
+
+# --remove exists so changing a key does not mean remembering where the file is.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config --remove GEMINI_API_KEY 2>&1)
+case "$out" in
+  *"Removed GEMINI_API_KEY"*) pass "config --remove deletes a setting" ;;
+  *) fail "config --remove: $out" ;;
+esac
+
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config 2>&1)
+case "$out" in
+  *"GEMINI_API_KEY"*"not set"*) pass "the removed setting is gone" ;;
+  *) fail "the setting survived removal: $out" ;;
+esac
+
+# Removing what was never there is idempotent, but never silent — it is a typo
+# often enough to be worth saying out loud.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" config --remove GEMINI_API_KEY 2>&1)
+case "$out" in
+  *"nothing to remove"*) pass "removing an absent setting says so" ;;
+  *) fail "unexpected --remove output: $out" ;;
+esac
+
+# Restored, so the checks below still have a file to read.
+printf 'GEMINI_API_KEY=smoke-test-value\n' >> "$sandbox/.config/lucida/config.env"
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GEMINI_API_KEY=x "$BIN" config 2>&1)
 
 # Values must never be printed — this output gets pasted into bug reports.
 case "$out" in
@@ -105,14 +147,14 @@ esac
 # has a seed is not a fact about your API key. If this ever starts reporting a
 # missing key instead, the check has been moved back behind client construction
 # and the message has become useless.
-out=$(env -u GOOGLE_API_KEY -u GEMINI_API_KEY "$BIN" generate "x" --seed 1 2>&1 || true)
+out=$(env -u GEMINI_API_KEY "$BIN" generate "x" --seed 1 2>&1 || true)
 case "$out" in
   *"no concept of a seed"*comfyui*) pass "unsupported seed names a provider that has one" ;;
   *"no API key found"*)             fail "capability check ran after credentials: $out" ;;
   *)                                fail "unexpected --seed output: $out" ;;
 esac
 
-out=$(env -u GOOGLE_API_KEY -u GEMINI_API_KEY "$BIN" generate "x" --aspect 7:3 2>&1 || true)
+out=$(env -u GEMINI_API_KEY "$BIN" generate "x" --aspect 7:3 2>&1 || true)
 case "$out" in
   *"supports only these aspect ratios"*) pass "unsupported aspect ratio is rejected" ;;
   *)                                     fail "unexpected --aspect output: $out" ;;

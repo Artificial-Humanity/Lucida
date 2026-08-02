@@ -3,7 +3,7 @@
 //! Lucida read its credentials from the environment alone for its first two
 //! versions, which is correct for a CLI and quietly broken for an MCP server.
 //! A GUI-launched application on macOS does not inherit a login shell's
-//! environment, so a `GOOGLE_API_KEY` exported in `~/.zshenv` is invisible to
+//! environment, so a `GEMINI_API_KEY` exported in `~/.zshenv` is invisible to
 //! Claude Code launched from the Dock — and therefore to every server it spawns.
 //! The failure is confusing rather than obvious: the same binary works perfectly
 //! from a terminal.
@@ -25,8 +25,8 @@
 //! # Why not TOML
 //!
 //! Because the keys *are* environment variable names, and any other format would
-//! invent a second vocabulary for the same six settings — `google.api_key` in a
-//! file and `GOOGLE_API_KEY` in the environment, with a mapping table to keep in
+//! invent a second vocabulary for the same seven settings — `gemini.api_key` in
+//! a file and `GEMINI_API_KEY` in the environment, with a mapping table to keep in
 //! sync. It also keeps the parser to a few lines and adds no dependency, which
 //! is the same reasoning that kept a JSON-RPC crate out of `mcp.rs`.
 
@@ -37,8 +37,7 @@ use std::sync::OnceLock;
 /// Every setting Lucida will read from a config file, for `lucida config` and
 /// for the template it writes.
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
-    ("GOOGLE_API_KEY", "Google API key (GEMINI_API_KEY also accepted)"),
-    ("GEMINI_API_KEY", "Alternative spelling of the above"),
+    ("GEMINI_API_KEY", "Gemini API key — images and Veo video"),
     ("BFL_API_KEY", "Black Forest Labs API key (hosted FLUX)"),
     ("STABILITY_API_KEY", "Stability AI developer platform key"),
     ("OPENAI_API_KEY", "OpenAI API key"),
@@ -46,6 +45,41 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),
     ("LUCIDA_COMFYUI_CA", "PEM certificate for a private CA"),
 ];
+
+/// Names Lucida used to read and no longer does, with what replaced each.
+///
+/// A rename cannot simply delete the old name. Someone who exported
+/// `GOOGLE_API_KEY` did nothing wrong, and dropping it silently turns a working
+/// setup into "no API key found" — a message that sends them to check a key that
+/// is present and correct. So the retired name is still *recognised*, purely to
+/// say what happened, and never used as a credential.
+///
+/// `GOOGLE_API_KEY` was dropped in favour of `GEMINI_API_KEY` because everything
+/// Lucida reaches on Google is the Gemini API — images and Veo alike — and after
+/// Imagen's shutdown on 2026-08-17 there is nothing left that "Google" named
+/// more accurately. One name, and it matches the one Google's own documentation
+/// uses.
+pub const RETIRED_KEYS: &[(&str, &str)] = &[("GOOGLE_API_KEY", "GEMINI_API_KEY")];
+
+/// Whether `name` is a retired spelling, and what to use instead.
+pub fn replacement_for(name: &str) -> Option<&'static str> {
+    RETIRED_KEYS
+        .iter()
+        .find(|(old, _)| *old == name)
+        .map(|(_, new)| *new)
+}
+
+/// A retired name this process can still see, from either source.
+///
+/// Reported by `lucida config` and by the credential error, so the diagnosis is
+/// "you have the old name" rather than "you have no key".
+pub fn retired_in_use() -> Vec<(&'static str, &'static str)> {
+    RETIRED_KEYS
+        .iter()
+        .filter(|(old, _)| origin(old).is_some())
+        .copied()
+        .collect()
+}
 
 /// Setting names present in the config file, whether or not Lucida knows them.
 ///
@@ -86,7 +120,7 @@ static LOADED: OnceLock<Loaded> = OnceLock::new();
 /// `LUCIDA_CONFIG=other.env lucida …`, which names a whole file and wins
 /// outright — see [`search_paths`].
 ///
-/// An empty environment variable counts as absent. Exporting `GOOGLE_API_KEY=`
+/// An empty environment variable counts as absent. Exporting `GEMINI_API_KEY=`
 /// is how a shell profile reports "I meant to set this", and treating it as a
 /// real value produces an authentication error instead of a useful one. `parse`
 /// drops empty file values for the same reason.
@@ -301,11 +335,9 @@ pub fn template() -> String {
          # Keep this file private: chmod 600\n\n",
     );
 
+    // Every known key, and only known keys — a retired name has no slot here,
+    // since offering one would invite writing a value nothing reads.
     for (key, purpose) in KNOWN_KEYS {
-        // GEMINI_API_KEY is only an alias; offering both invites setting both.
-        if *key == "GEMINI_API_KEY" {
-            continue;
-        }
         text.push_str(&format!("# {purpose}\n#{key}=\n\n"));
     }
 
@@ -336,6 +368,22 @@ mod tests {
         assert!(!values.contains_key("MALFORMED"));
         // An empty value is the same as absent, so a later fallback still runs.
         assert!(!values.contains_key("EMPTY"));
+    }
+
+    #[test]
+    fn a_retired_name_reports_its_replacement() {
+        assert_eq!(replacement_for("GOOGLE_API_KEY"), Some("GEMINI_API_KEY"));
+        assert_eq!(replacement_for("GEMINI_API_KEY"), None);
+        assert_eq!(replacement_for("BFL_API_KEY"), None);
+
+        // A retired name must not also be a live one, or `config --set` would
+        // refuse to write a setting Lucida actually reads.
+        for (retired, _) in RETIRED_KEYS {
+            assert!(
+                !KNOWN_KEYS.iter().any(|(known, _)| known == retired),
+                "{retired} is both retired and current"
+            );
+        }
     }
 
     #[test]
@@ -370,10 +418,17 @@ mod tests {
     #[test]
     fn the_template_only_offers_the_canonical_key_name() {
         let text = template();
-        assert!(text.contains("#GOOGLE_API_KEY="));
-        // The alias may be *mentioned* — knowing it is accepted is useful — but
-        // offering a second slot for the same credential invites setting both.
-        assert!(!text.contains("#GEMINI_API_KEY="));
+        assert!(text.contains("#GEMINI_API_KEY="));
+
+        // A retired name gets no slot. Offering one would invite writing a
+        // value nothing reads — and a template is the worst place to learn that,
+        // since it looks like the tool suggesting the name itself.
+        for (retired, _) in RETIRED_KEYS {
+            assert!(
+                !text.contains(&format!("#{retired}=")),
+                "the template offers the retired name {retired}"
+            );
+        }
 
         // Every line is inert until uncommented, so writing the file changes
         // nothing about how Lucida behaves.

@@ -95,6 +95,35 @@ is listed under "Also set in this environment, and not used", since someone
 reading that output is usually asking exactly why their exported key is being
 ignored.
 
+**One credential, one name.** `GOOGLE_API_KEY` was accepted alongside
+`GEMINI_API_KEY` from the start, on the reasoning that the Google SDKs look for
+both. Two spellings for one credential turned out to teach nobody which was
+canonical — a key in either worked, so nothing ever corrected a wrong guess —
+while costing an entry in `KNOWN_KEYS`, a special case in the template
+generator, and a clause in every message that mentioned it. `GEMINI_API_KEY` is
+now the only one read: everything Lucida reaches on Google is the Gemini API,
+images and Veo alike, and after Imagen's shutdown on 2026-08-17 nothing is left
+that "Google" named more accurately.
+
+**Retiring a name is not the same as deleting it**, which is the part worth
+keeping. Someone who exported `GOOGLE_API_KEY` did nothing wrong, and simply
+dropping it turns a working setup into "no API key found" — a message that sends
+them to check the one thing that is not wrong. So a retired name stays
+*recognised* and never used: `lucida config` lists it under "Set, but no longer
+read", the credential error names the rename instead of reporting an absence,
+and `config --set` refuses to write it rather than filing a value nothing reads.
+`RETIRED_KEYS` is a table, so the next rename costs one line.
+
+**`config --remove` arrived with it**, and the reason is worth recording because
+it is not symmetry for its own sake: changing a key otherwise meant remembering
+where the config file lives, which is exactly the knowledge `lucida config`
+exists to spare you. It edits the file *in use* rather than the preferred
+location — a stale value can sit in a file further down the search order, or in
+one named by `LUCIDA_CONFIG`, and removing from anywhere else would report
+success and change nothing. It also states what answers *next*: with the file no
+longer supplying a value, an environment variable that was being shadowed
+becomes the credential, and that is said at the moment of removal.
+
 **The general lesson, which applies to every provider still to come:** a
 credential mechanism has to work in the environment the program actually runs
 in, and for an MCP server that is not a shell.
