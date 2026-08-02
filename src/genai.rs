@@ -138,6 +138,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     // Veo takes one; the image models do not.
     negative_prompt: false,
     references: true,
+    mask: false,
     steps: false,
     guidance: false,
     provenance: Provenance::SynthIdAndC2pa,

@@ -36,6 +36,16 @@ pub struct ImageRequest {
     /// Existing images to condition on. Supplying any turns this into an edit.
     pub references: Vec<String>,
     pub negative_prompt: Option<String>,
+    /// A mask naming which part of the first reference to change.
+    ///
+    /// The roadmap predicted from the beginning that `references: Vec<String>`
+    /// could not express "this region of this image", and it was right — it
+    /// survived ComfyUI editing and BFL editing because both change the whole
+    /// picture. OpenAI is where it stopped being deferrable.
+    ///
+    /// A raster image rather than a rectangle or a polygon, because that is what
+    /// every provider that supports masking actually takes.
+    pub mask: Option<String>,
     pub seed: Option<u64>,
     pub steps: Option<u32>,
     pub guidance: Option<f32>,
@@ -271,6 +281,11 @@ pub struct Capabilities {
     pub seed: bool,
     pub negative_prompt: bool,
     pub references: bool,
+    /// Whether a mask can restrict an edit to part of the image.
+    ///
+    /// Separate from `references` because they are genuinely different
+    /// capabilities: three providers can edit a whole picture and cannot mask.
+    pub mask: bool,
     pub steps: bool,
     pub guidance: bool,
     pub provenance: Provenance,
@@ -337,6 +352,25 @@ impl Capabilities {
 
         if req.guidance.is_some() && !self.guidance {
             bail!("{}", self.no_sampler("--guidance", "a guidance scale"));
+        }
+
+        if req.mask.is_some() {
+            if !self.mask {
+                bail!(
+                    "`{me}` cannot restrict an edit to part of an image, so `--mask` \
+                     cannot be honoured.\n\n\
+                     Editing here rewrites the whole picture. Use the `openai` \
+                     provider for masked edits — it is the only one Lucida \
+                     implements a mask for."
+                );
+            }
+            if req.references.is_empty() {
+                bail!(
+                    "`--mask` names which part of an image to change, but no image \
+                     was given to change.\n\n\
+                     Use `lucida edit <image> <prompt> --mask <mask.png>`."
+                );
+            }
         }
 
         if !req.references.is_empty() && !self.references {
@@ -415,6 +449,7 @@ pub fn capabilities_for(backend: Backend, model: &str) -> Capabilities {
         Backend::ComfyUi => crate::comfy::CAPABILITIES,
         Backend::Bfl => crate::bfl::capabilities(model),
         Backend::Stability => crate::stability::capabilities(model),
+        Backend::OpenAi => crate::openai::capabilities(model),
     }
 }
 
@@ -425,6 +460,7 @@ pub enum Backend {
     ComfyUi,
     Bfl,
     Stability,
+    OpenAi,
 }
 
 impl Backend {
@@ -434,6 +470,7 @@ impl Backend {
             "comfyui" | "comfy" | "local" => Ok(Self::ComfyUi),
             "bfl" | "flux" | "blackforestlabs" => Ok(Self::Bfl),
             "stability" | "stabilityai" | "sai" => Ok(Self::Stability),
+            "openai" | "oai" | "gpt" => Ok(Self::OpenAi),
             other => bail!(
                 "unknown provider `{other}`. Known providers: google, comfyui, bfl, stability"
             ),
@@ -446,6 +483,7 @@ impl Backend {
             Self::ComfyUi => "comfyui",
             Self::Bfl => "bfl",
             Self::Stability => "stability",
+            Self::OpenAi => "openai",
         }
     }
 
@@ -459,6 +497,7 @@ impl Backend {
             Self::ComfyUi => "klein",
             Self::Bfl => crate::bfl::DEFAULT_MODEL,
             Self::Stability => crate::stability::DEFAULT_MODEL,
+            Self::OpenAi => crate::openai::DEFAULT_MODEL,
         }
     }
 
@@ -467,6 +506,7 @@ impl Backend {
         Backend::ComfyUi,
         Backend::Bfl,
         Backend::Stability,
+        Backend::OpenAi,
     ];
 }
 
@@ -485,6 +525,11 @@ pub fn infer_backend(model: &str) -> Backend {
     }
     if crate::stability::MODEL_ALIASES.iter().any(|(a, _)| *a == key) {
         return Backend::Stability;
+    }
+    if crate::openai::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
+        || crate::openai::KNOWN_MODELS.contains(&key.as_str())
+    {
+        return Backend::OpenAi;
     }
     if crate::bfl::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
         || crate::bfl::KNOWN_MODELS.contains(&key.as_str())
@@ -560,17 +605,12 @@ mod tests {
 
     #[test]
     fn check_rejects_a_seed_the_provider_cannot_honour() {
+        // Derived from a real provider rather than spelled out: a literal here
+        // has broken three times now, once per capability added, which is noise
+        // that says nothing about the behaviour under test.
         let caps = Capabilities {
-            provider: "google",
-            tagline: "for the test",
-            aspect: AspectSupport::Named(&["1:1"]),
-            size: true,
             seed: false,
-            negative_prompt: false,
-            references: true,
-            steps: false,
-            guidance: false,
-            provenance: Provenance::SynthIdAndC2pa,
+            ..crate::comfy::CAPABILITIES
         };
         let req = ImageRequest {
             seed: Some(7),

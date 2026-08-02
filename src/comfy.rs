@@ -569,6 +569,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     seed: true,
     negative_prompt: true,
     references: true,
+    mask: false,
     steps: true,
     guidance: true,
     provenance: Provenance::Unmarked,

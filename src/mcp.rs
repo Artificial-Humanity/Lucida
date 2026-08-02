@@ -32,6 +32,7 @@
 
 use crate::bfl;
 use crate::comfy;
+use crate::openai;
 use crate::stability;
 use crate::genai::{self, DEFAULT_MODEL};
 use crate::provider::{
@@ -154,6 +155,25 @@ fn provider_summary() -> String {
         .join("\n")
 }
 
+/// The providers for which `predicate` holds, as prose.
+///
+/// Generated because these lists are exactly what rots: "google, comfyui and
+/// bfl" was correct for three providers and wrong the moment a fourth could
+/// edit. A test asserts the editing list against the capabilities, and this is
+/// how it stays true rather than merely being corrected each time.
+fn providers_where(predicate: fn(&crate::provider::Capabilities) -> bool) -> String {
+    let names: Vec<&str> = Backend::ALL
+        .iter()
+        .filter(|b| predicate(&capabilities_for(**b, b.default_model())))
+        .map(|b| b.name())
+        .collect();
+    match names.split_last() {
+        None => "no providers".to_string(),
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 fn image_schema() -> Value {
     json!({
         "name": "generate_image",
@@ -167,9 +187,11 @@ fn image_schema() -> Value {
              that do not are a hard error naming one that does — never a silent \
              drop. Call image_providers for live capabilities and which are \
              actually reachable.\n\n\
-             Pass reference_images to edit an existing picture (google, comfyui, \
-             bfl — not stability).",
-            provider_summary()
+             Pass reference_images to edit an existing picture ({}); pass mask as \
+             well to change only part of one ({}).",
+            provider_summary(),
+            providers_where(|c| c.references),
+            providers_where(|c| c.mask)
         ),
         "inputSchema": {
             "type": "object",
@@ -184,7 +206,7 @@ fn image_schema() -> Value {
                 },
                 "provider": {
                     "type": "string",
-                    "enum": ["google", "comfyui", "bfl", "stability"],
+                    "enum": ["google", "comfyui", "bfl", "stability", "openai"],
                     "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
                 },
                 "model": {
@@ -225,10 +247,26 @@ fn image_schema() -> Value {
                     "type": "number",
                     "description": "How closely to follow the prompt. comfyui, and on bfl only flux-2-flex and flux-dev."
                 },
+                "mask": {
+                    "type": "string",
+                    "description": format!(
+                        "Path to a PNG restricting an edit to part of the image: \
+                         its TRANSPARENT pixels are what changes. Supported by {}, \
+                         and requires reference_images. Every other provider \
+                         rewrites the whole picture.",
+                        providers_where(|c| c.mask)
+                    )
+                },
                 "reference_images": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Paths to existing images to condition on, for editing or style matching. Supported by google, comfyui and bfl. On comfyui the result keeps the first image's aspect ratio unless aspect_ratio or size is given."
+                    "description": format!(
+                        "Paths to existing images to condition on, for editing or \
+                         style matching. Supported by {}. On comfyui the result \
+                         keeps the first image's aspect ratio unless aspect_ratio \
+                         or size is given.",
+                        providers_where(|c| c.references)
+                    )
                 }
             },
             "required": ["prompt", "output_path"]
@@ -360,6 +398,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
         Backend::Bfl => Box::new(bfl::Client::from_env()?),
         Backend::Stability => Box::new(stability::Client::from_env()?),
+        Backend::OpenAi => Box::new(openai::Client::from_env()?),
     })
 }
 
@@ -386,6 +425,7 @@ fn generate_image(args: &Value) -> Result<String> {
             Backend::ComfyUi => "klein",
             Backend::Bfl => bfl::DEFAULT_MODEL,
             Backend::Stability => stability::DEFAULT_MODEL,
+            Backend::OpenAi => openai::DEFAULT_MODEL,
         })
         .to_string();
 
@@ -404,6 +444,7 @@ fn generate_image(args: &Value) -> Result<String> {
             })
             .unwrap_or_default(),
         negative_prompt: args["negative_prompt"].as_str().map(str::to_string),
+        mask: args["mask"].as_str().map(str::to_string),
         seed: args["seed"].as_u64(),
         steps: args["steps"].as_u64().map(|n| n as u32),
         guidance: args["guidance"].as_f64().map(|n| n as f32),

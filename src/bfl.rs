@@ -94,6 +94,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         // Measured, not assumed: no FLUX endpoint takes one.
         negative_prompt: false,
         references: edits,
+        mask: false,
         steps: tunable,
         guidance: tunable,
         // Verified in a real render rather than assumed: a signed C2PA manifest

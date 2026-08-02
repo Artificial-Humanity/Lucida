@@ -16,6 +16,7 @@ mod config;
 mod genai;
 mod masked;
 mod mcp;
+mod openai;
 mod provider;
 mod stability;
 mod video;
@@ -74,6 +75,11 @@ struct ImageOptions {
     /// What to keep out of the picture (comfyui only — no FLUX or Gemini model takes one)
     #[arg(short, long)]
     negative: Option<String>,
+
+    /// Restrict an edit to part of the image: a PNG whose TRANSPARENT pixels are
+    /// what changes. openai only.
+    #[arg(long)]
+    mask: Option<String>,
 
     /// Seed, for a reproducible render (comfyui and bfl; google has none)
     #[arg(long)]
@@ -320,6 +326,7 @@ impl ImageOptions {
             size: self.size.as_deref().map(Size::parse).transpose()?,
             references,
             negative_prompt: self.negative,
+            mask: self.mask,
             seed: self.seed,
             steps: self.steps,
             guidance: self.guidance,
@@ -544,6 +551,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::ComfyUi => Box::new(comfy::Client::from_env()?),
         Backend::Bfl => Box::new(bfl::Client::from_env()?),
         Backend::Stability => Box::new(stability::Client::from_env()?),
+        Backend::OpenAi => Box::new(openai::Client::from_env()?),
     })
 }
 
@@ -595,6 +603,7 @@ fn list_models(backend: Backend) -> Result<()> {
         Backend::ComfyUi => comfy::MODEL_ALIASES,
         Backend::Bfl => bfl::MODEL_ALIASES,
         Backend::Stability => stability::MODEL_ALIASES,
+        Backend::OpenAi => openai::MODEL_ALIASES,
     };
     if !aliases.is_empty() {
         println!("\nAliases:");
@@ -612,6 +621,7 @@ fn list_models(backend: Backend) -> Result<()> {
     println!("  seed            {}", yes_no(caps.seed));
     println!("  negative prompt {}", yes_no(caps.negative_prompt));
     println!("  reference image {}", yes_no(caps.references));
+    println!("  masked edit     {}", yes_no(caps.mask));
     println!("  steps           {}", yes_no(caps.steps));
     println!("  guidance        {}", yes_no(caps.guidance));
     println!("  output carries  {}", caps.provenance.describe());
