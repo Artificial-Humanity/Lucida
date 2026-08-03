@@ -34,27 +34,58 @@ worth reading from the provider directly.
 
 ## Install
 
-Take a prebuilt binary from the
-[latest release](https://github.com/Artificial-Humanity/Lucida/releases/latest).
-No toolchain, no runtime — one file:
+```console
+curl -fsSL https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.sh | sh
+```
 
-- **macOS** — `lucida-<version>-macos-universal`, covering Apple Silicon and
-  Intel. It is unsigned, so first run needs
-  `xattr -d com.apple.quarantine lucida-*-macos-universal`.
-- **Linux** — `lucida-<version>-x86_64-linux-musl`, statically linked with no
-  libc or OpenSSL dependency.
-- **Windows** — `lucida-<version>-x86_64-windows.exe`.
+Windows, in PowerShell:
 
-Each has a `.sha256` beside it.
+```console
+irm https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.ps1 | iex
+```
 
-With Rust installed, `cargo` works too:
+That picks the binary for your platform, verifies its published checksum,
+installs it to `~/.local/bin` (or `%LOCALAPPDATA%\Programs\lucida`), and tells
+you if that directory is not on your PATH. `LUCIDA_INSTALL_DIR` chooses
+somewhere else; `LUCIDA_VERSION=v0.7.0` pins a version instead of taking the
+latest. Nothing needs a toolchain, and nothing needs sudo.
+
+**Reading a script before piping it into a shell is a good habit, and this one
+is written to reward it:**
+
+```console
+curl -fsSL https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.sh -o install.sh
+less install.sh && sh install.sh
+```
+
+The specific hazard of `curl | sh` is not hypothetical: if the transfer drops
+halfway, your shell executes the half that arrived. [`install.sh`](install.sh)
+is therefore entirely function definitions with a single call on the last line,
+so a truncated copy defines a few functions and does nothing at all. It is
+checked that way rather than asserted — CI runs both installers against the live
+release on all three platforms.
+
+<details>
+<summary>Other ways in</summary>
+
+Prebuilt binaries are on the
+[releases page](https://github.com/Artificial-Humanity/Lucida/releases/latest),
+each with a `.sha256` beside it: `lucida-<version>-macos-universal` (Apple
+Silicon and Intel), `lucida-<version>-x86_64-linux-musl` (static, no libc or
+OpenSSL), and `lucida-<version>-x86_64-windows.exe`. A binary downloaded in a
+browser on macOS carries the quarantine attribute and needs
+`xattr -d com.apple.quarantine lucida-*` on first run — one the installer avoids,
+since curl does not set it.
+
+With Rust installed:
 
 ```console
 cargo install --git https://github.com/Artificial-Humanity/Lucida
 ```
 
-Or build it: `git clone …` then `cargo build --release`, binary at
-`target/release/lucida`.
+Or from a clone: `cargo build --release`, binary at `target/release/lucida`.
+
+</details>
 
 ### Updating
 

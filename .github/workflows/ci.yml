@@ -42,3 +42,52 @@ jobs:
           BIN=target/release/lucida
           if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           ./scripts/smoke.sh "$BIN"
+
+  # The installers name the release assets, which makes them one more
+  # hand-written list of platform facts — and this repository has already had
+  # five of those go stale at once. Running them against the live release is
+  # what turns a rename into a red build rather than into somebody's first five
+  # minutes with the tool.
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install with install.sh
+        if: matrix.os != 'windows-latest'
+        env:
+          # Only to avoid the unauthenticated API rate limit, which runners
+          # share by IP. No scopes are needed for public releases.
+          GITHUB_TOKEN: ${{ github.token }}
+          LUCIDA_INSTALL_DIR: ${{ runner.temp }}/lucida-bin
+        run: |
+          sh install.sh
+          "$LUCIDA_INSTALL_DIR/lucida" --version
+
+      - name: Install with install.ps1
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LUCIDA_INSTALL_DIR: ${{ runner.temp }}\lucida-bin
+        run: |
+          ./install.ps1
+          & "$env:LUCIDA_INSTALL_DIR\lucida.exe" --version
+
+      - name: A pinned version installs that version, not the latest
+        if: matrix.os != 'windows-latest'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LUCIDA_INSTALL_DIR: ${{ runner.temp }}/lucida-pinned
+          LUCIDA_VERSION: v0.7.0
+        run: |
+          sh install.sh
+          got=$("$LUCIDA_INSTALL_DIR/lucida" --version)
+          case "$got" in
+            "lucida 0.7.0") echo "ok: $got" ;;
+            *) echo "LUCIDA_VERSION was ignored: got $got"; exit 1 ;;
+          esac
