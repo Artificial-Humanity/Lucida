@@ -21,17 +21,27 @@
 //! self-contained download and replace: no compiler, no toolchain, nothing but
 //! the binary replacing itself.
 //!
-//! # No automatic checks
+//! # Nothing updates itself
 //!
-//! Nothing calls this on startup, and nothing should. The MCP server is spawned
-//! and killed constantly by its client, so a version check at startup would be a
-//! network round trip per launch — and a network call nobody asked for is a
-//! surprise regardless of its cost. `lucida update` and `lucida update --check`
-//! are both explicit.
+//! Installing is always user-triggered: `lucida update`, or whatever the user
+//! automates around it. There is no path in this file that replaces a binary
+//! without being asked to, and that is not squeamishness — it is the same rule
+//! the rest of the codebase follows. Lucida refuses to drop a `--seed` it cannot
+//! honour; a program that swapped itself for a different version unattended
+//! would be committing the largest version of that sin available to it. v0.6.0
+//! reversed config precedence and retired a setting name. Applying that to a
+//! working machine at 3am, with nobody present to read why, is not a service.
+//!
+//! [`notify_if_due`] is the concession: at most once a day, on an interactive
+//! terminal, it prints one line saying a newer release exists. It installs
+//! nothing. See its own notes for the guards, which matter more than the check.
 
+use crate::config;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Where releases are published. A field on [`Updater`] so tests can aim it at
 /// `testserver`, the same way every provider client does.
@@ -68,6 +78,55 @@ struct Asset {
     browser_download_url: String,
 }
 
+/// What `lucida update` should do once it knows both version numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Report only. Never prompts, never installs.
+    Check,
+    /// Report, then ask before replacing anything. The default.
+    Ask,
+    /// Report and install without asking — `--yes`, for automation.
+    Yes,
+}
+
+/// Asks before replacing the running binary.
+///
+/// Refusing without a terminal is the point rather than an inconvenience: a
+/// scripted `lucida update` that silently installed would be exactly the
+/// unattended self-replacement this design does not do. Automation says so out
+/// loud with `--yes`, which puts the decision back in a human's hands — the
+/// person who wrote the script.
+fn confirm() -> Result<bool> {
+    use std::io::{BufRead, Write};
+
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "a newer version is available, but there is no terminal to confirm at.\n\n\
+             Run `lucida update --yes` to install without asking, or \
+             `lucida update --check` to report only."
+        );
+    }
+
+    // To stderr, so stdout carries the report and nothing else — the same
+    // division `config --set` uses.
+    eprint!("A newer version is available. Would you like to update? [y/N] ");
+    std::io::stderr().flush().ok();
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("reading your answer")?;
+
+    // Anything that is not clearly yes is no, including a bare Enter. The
+    // asymmetry is deliberate: the cost of a spurious "no" is running the
+    // command again.
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// How this copy of Lucida got here, and therefore how it is updated.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Install {
@@ -79,31 +138,50 @@ pub enum Install {
 
 impl Updater {
     pub fn new() -> Result<Self> {
+        Self::with_timeout(Duration::from_secs(120))
+    }
+
+    /// A short timeout for the background notice, a long one for a download.
+    fn with_timeout(timeout: Duration) -> Result<Self> {
         Ok(Self {
             http: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(timeout)
                 .build()
                 .context("building HTTP client")?,
             api: RELEASES_API.to_string(),
         })
     }
 
-    /// Reports what is available, and if `apply` is set, installs it.
-    pub fn run(&self, apply: bool) -> Result<()> {
+    /// Reports both versions, then acts according to `mode`.
+    ///
+    /// Both numbers are always printed, including when they match. "You have
+    /// the latest version" is more convincing next to the two figures it is a
+    /// claim about, and it saves the follow-up question of what the latest
+    /// actually is.
+    pub fn run(&self, mode: Mode) -> Result<()> {
         let current = env!("CARGO_PKG_VERSION");
         let release = self.latest()?;
         let latest = release.tag_name.trim_start_matches('v');
 
+        println!("Current version    {current}");
+        println!("Available version  {latest}");
+        println!();
+
         if !is_newer(latest, current)? {
-            println!("lucida {current} is the latest release.");
+            println!("You have the latest version of Lucida.");
             return Ok(());
         }
 
-        println!("lucida {latest} is available (this is {current}).");
-
-        if !apply {
-            println!("\nRun `lucida update` to install it.");
-            return Ok(());
+        match mode {
+            Mode::Check => {
+                println!("A newer version is available. Run `lucida update` to install it.");
+                return Ok(());
+            }
+            Mode::Ask if !confirm()? => {
+                println!("Not updated.");
+                return Ok(());
+            }
+            _ => {}
         }
 
         let exe = std::env::current_exe().context("finding the running binary")?;
@@ -214,6 +292,111 @@ impl Updater {
 
         Ok(response.bytes().context("reading the download")?.to_vec())
     }
+}
+
+/// How long a check is good for. A day, because the thing being reported
+/// changes at most that often and a notice that appears every run is one people
+/// learn to scroll past.
+const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Setting that turns the notice off entirely. Listed in `config::KNOWN_KEYS`,
+/// so `lucida config` reports it like any other setting rather than making it
+/// folklore.
+pub const OPT_OUT: &str = "LUCIDA_NO_UPDATE_CHECK";
+
+/// One line, at most once a day, saying a newer release exists. Installs
+/// nothing.
+///
+/// **Every guard here matters more than the check does**, because the failure
+/// modes of a version check are all about where it runs rather than what it
+/// finds:
+///
+/// - **Never in `mcp` mode.** The server is spawned and killed constantly by its
+///   client, so a check per launch is a network round trip per launch — putting
+///   back exactly the startup cost that shipping one static binary removed.
+/// - **Only when stderr is a terminal.** That is the test for "a human is
+///   watching", and it is stderr rather than stdout precisely because
+///   `$(lucida generate …)` captures stdout while a person still reads stderr.
+///   Scripts, pipelines and agents see nothing.
+/// - **Printed to stderr, never stdout.** stdout carries the written path and
+///   nothing else; that is load-bearing enough elsewhere to be worth restating.
+/// - **After the command, not before.** The work is not delayed by a network
+///   call, and a short timeout means a slow GitHub costs a few seconds at exit
+///   rather than blocking a render.
+/// - **Silent on every failure.** No network, rate-limited, unparseable
+///   response, unwritable cache — none of that is worth a word. A notice that
+///   could not be fetched is not news.
+pub fn notify_if_due(current: &str) {
+    if config::var(OPT_OUT).is_some() {
+        return;
+    }
+
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+
+    let Some(stamp) = stamp_path() else { return };
+    if !is_due(last_checked(&stamp), SystemTime::now()) {
+        return;
+    }
+
+    // Written before the request, not after: a GitHub that is down or
+    // rate-limiting should cost one attempt a day, not one per invocation.
+    record_check(&stamp);
+
+    let Ok(updater) = Updater::with_timeout(Duration::from_secs(5)) else {
+        return;
+    };
+    let Ok(release) = updater.latest() else { return };
+
+    let latest = release.tag_name.trim_start_matches('v');
+    if is_newer(latest, current).unwrap_or(false) {
+        eprintln!(
+            "note: lucida {latest} is available (this is {current}). \
+             Run `lucida update`, or set {OPT_OUT}=1 to stop checking."
+        );
+    }
+}
+
+fn is_due(last: Option<SystemTime>, now: SystemTime) -> bool {
+    match last {
+        // A clock that has moved backwards makes the elapsed time an error
+        // rather than a small number; treating that as "due" checks once too
+        // often, which is the harmless direction.
+        Some(last) => now.duration_since(last).map_or(true, |d| d >= CHECK_INTERVAL),
+        None => true,
+    }
+}
+
+/// A cache path, not a config path — this is a timestamp Lucida wrote, not a
+/// setting anyone edits, and putting it beside the API keys would invite
+/// treating the config directory as scratch space.
+fn stamp_path() -> Option<PathBuf> {
+    let base = if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Caches"))
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|h| h.join(".cache")))
+    };
+
+    Some(base?.join("lucida").join("last-update-check"))
+}
+
+fn last_checked(path: &Path) -> Option<SystemTime> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let secs: u64 = text.trim().parse().ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+fn record_check(path: &Path) {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, now.as_secs().to_string());
 }
 
 /// Whether `exe` lives under a cargo bin directory.
@@ -415,6 +598,38 @@ mod tests {
     }
 
     #[test]
+    fn a_check_is_due_once_a_day_and_survives_a_backwards_clock() {
+        let now = SystemTime::now();
+
+        assert!(is_due(None, now), "a machine that has never checked is due");
+        assert!(is_due(Some(now - CHECK_INTERVAL), now));
+        assert!(is_due(Some(now - CHECK_INTERVAL * 3), now));
+        assert!(!is_due(Some(now), now), "twice in a row is not due");
+        assert!(!is_due(Some(now - Duration::from_secs(60)), now));
+
+        // A stamp in the future — a clock that moved backwards, or a file
+        // copied between machines — makes the elapsed time an error rather
+        // than a small number. Checking once too often is the harmless
+        // direction; never checking again is not.
+        assert!(is_due(Some(now + CHECK_INTERVAL), now));
+    }
+
+    #[test]
+    fn the_stamp_is_a_cache_path_not_a_config_path() {
+        // Beside the API keys would invite treating the config directory as
+        // scratch space, and this is a timestamp Lucida wrote rather than a
+        // setting anyone edits.
+        let Some(path) = stamp_path() else { return };
+        let text = path.to_string_lossy();
+        assert!(text.contains("lucida"), "{text}");
+        assert!(
+            text.contains("ache") || text.contains("Caches"),
+            "not under a cache directory: {text}"
+        );
+        assert!(!text.contains("config.env"), "{text}");
+    }
+
+    #[test]
     fn a_cargo_installed_binary_is_recognised() {
         let home = PathBuf::from("/tmp/cargo-home-fixture");
         unsafe { std::env::set_var("CARGO_HOME", &home) };
@@ -453,7 +668,7 @@ mod tests {
             http: reqwest::blocking::Client::new(),
             api: format!("{}/releases/latest", server.url()),
         };
-        updater.run(false).unwrap();
+        updater.run(Mode::Check).unwrap();
 
         let requests = server.finish();
         assert_eq!(requests.len(), 1, "a check must not download anything");
@@ -464,6 +679,34 @@ mod tests {
     }
 
     #[test]
+    fn asking_with_no_terminal_refuses_rather_than_installing() {
+        // The test harness has no terminal on stdin, which is the same
+        // situation as a cron job or a CI step — and the one where installing
+        // without being asked would be exactly the unattended self-replacement
+        // this design does not do.
+        let body = r#"{"tag_name":"v99.0.0","assets":[
+            {"name":"lucida-99.0.0-macos-universal",
+             "browser_download_url":"{{server}}/download"}]}"#;
+        let server = serve(vec![Reply::json(body)]);
+
+        let updater = Updater {
+            http: reqwest::blocking::Client::new(),
+            api: format!("{}/releases/latest", server.url()),
+        };
+
+        let message = updater.run(Mode::Ask).unwrap_err().to_string();
+        assert!(message.contains("no terminal to confirm at"), "{message}");
+        assert!(message.contains("--yes"), "{message}");
+
+        let requests = server.finish();
+        assert_eq!(
+            requests.len(),
+            1,
+            "it must refuse before downloading anything"
+        );
+    }
+
+    #[test]
     fn an_unavailable_release_api_names_the_releases_page() {
         let server = serve(vec![Reply::status(403, r#"{"message":"rate limit"}"#)]);
         let updater = Updater {
@@ -471,7 +714,7 @@ mod tests {
             api: format!("{}/releases/latest", server.url()),
         };
 
-        let message = updater.run(false).unwrap_err().to_string();
+        let message = updater.run(Mode::Check).unwrap_err().to_string();
         assert!(message.contains("rate-limit"), "{message}");
         assert!(message.contains(RELEASES_PAGE), "{message}");
         server.finish();

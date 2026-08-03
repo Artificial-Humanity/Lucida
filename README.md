@@ -59,9 +59,25 @@ Or build it: `git clone …` then `cargo build --release`, binary at
 ### Updating
 
 ```console
-$ lucida update --check     # report what is available
-$ lucida update             # install it
+$ lucida update
+Current version    0.6.0
+Available version  0.7.0
+
+A newer version is available. Would you like to update? [y/N]
 ```
+
+```console
+$ lucida update
+Current version    0.6.0
+Available version  0.6.0
+
+You have the latest version of Lucida.
+```
+
+`--check` reports without offering to install; `--yes` installs without asking,
+for automation. Without a terminal to answer at, `lucida update` refuses rather
+than assuming yes — a scripted update that installed silently would be the one
+thing this deliberately does not do.
 
 It knows how it was installed. A downloaded binary replaces itself — verifying
 the published checksum, then swapping atomically — with no toolchain involved. A
@@ -69,9 +85,11 @@ copy installed by cargo is left alone and the `cargo install --force` line is
 printed instead, because overwriting it would leave cargo managing a file it did
 not build, and the next `cargo install` would silently revert the update.
 
-Nothing checks for updates on its own. The MCP server is launched and killed
-constantly by its client, so a check at startup would be a network round trip
-per launch — and an unasked-for network call is a surprise whatever it costs.
+**Nothing ever updates itself.** At most once a day, on an interactive terminal,
+Lucida prints one line noting that a newer release exists — and installs
+nothing. Set `LUCIDA_NO_UPDATE_CHECK=1` to silence it. The check never runs in
+`mcp` mode or when output is not a terminal, so scripts, pipelines and agents
+see nothing and pay no network round trip.
 
 ## Configuration
 
@@ -94,6 +112,7 @@ $ lucida config                         # what this process sees, and from where
 | `LUCIDA_COMFYUI_AUTH` | ComfyUI credentials, if it is fenced. `user:password`, a complete `Bearer …` / `Basic …` header, or a bare token. Sent on every request including the image download |
 | `LUCIDA_COMFYUI_CA` | Path to a PEM certificate, to trust a private CA |
 | `LUCIDA_CONFIG` | Path to the config file, overriding where it is looked for |
+| `LUCIDA_NO_UPDATE_CHECK` | Set to silence the daily "a newer release exists" notice |
 
 You only need the ones for providers you actually use. Keys come from each
 provider's own dashboard.

@@ -44,6 +44,10 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("LUCIDA_COMFYUI_URL", "Where ComfyUI is listening"),
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),
     ("LUCIDA_COMFYUI_CA", "PEM certificate for a private CA"),
+    (
+        "LUCIDA_NO_UPDATE_CHECK",
+        "Set to silence the daily \"a newer release exists\" notice",
+    ),
 ];
 
 /// Names Lucida used to read and no longer does, with what replaced each.

@@ -226,6 +226,10 @@ enum Command {
         /// Report what is available without installing it
         #[arg(long)]
         check: bool,
+
+        /// Install without asking. For automation, where there is nobody to prompt
+        #[arg(short = 'y', long, conflicts_with = "check")]
+        yes: bool,
     },
 
     /// Run as an MCP server over stdio
@@ -233,19 +237,41 @@ enum Command {
 }
 
 fn main() {
-    if let Err(e) = run() {
+    let cli = Cli::parse();
+
+    // `mcp` is excluded because its client spawns and kills it constantly, so a
+    // check there is a network round trip per launch; `update` because it has
+    // just done this properly and would otherwise say it twice.
+    let announce = !matches!(cli.command, Command::Mcp | Command::Update { .. });
+
+    if let Err(e) = run(cli) {
         eprintln!("error: {e:#}");
+        // Deliberately no update notice on the way out: the error is what the
+        // reader needs, and appending unrelated news to a failure is noise.
         std::process::exit(1);
+    }
+
+    // After the work, never before — so a slow or unreachable GitHub costs a
+    // few seconds at exit rather than delaying a render. It installs nothing.
+    if announce {
+        update::notify_if_due(env!("CARGO_PKG_VERSION"));
     }
 }
 
-fn run() -> Result<()> {
-    match Cli::parse().command {
+fn run(cli: Cli) -> Result<()> {
+    match cli.command {
         Command::Mcp => mcp::serve(),
 
         Command::Models { provider } => list_models(Backend::parse(&provider)?),
 
-        Command::Update { check } => update::Updater::new()?.run(!check),
+        Command::Update { check, yes } => {
+            let mode = match (check, yes) {
+                (true, _) => update::Mode::Check,
+                (_, true) => update::Mode::Yes,
+                _ => update::Mode::Ask,
+            };
+            update::Updater::new()?.run(mode)
+        }
 
         Command::Config { init, set, remove } => match (set, remove) {
             (Some(name), _) => set_config(&name),
