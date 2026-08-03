@@ -19,6 +19,7 @@ mod masked;
 mod mcp;
 mod openai;
 mod provider;
+mod setup;
 mod skill;
 mod stability;
 #[cfg(test)]
@@ -222,6 +223,21 @@ enum Command {
         remove: Option<String>,
     },
 
+    /// Wire Lucida into Claude Code and the Claude app
+    Setup {
+        /// Set up for one project rather than the whole machine
+        #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
+        project: Option<PathBuf>,
+
+        /// Show what would be done, and stop
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Apply without asking. For automation, where there is nobody to prompt
+        #[arg(short = 'y', long, conflicts_with = "dry_run")]
+        yes: bool,
+    },
+
     /// Print the agent skill, for a client's skills directory
     Skill,
 
@@ -267,6 +283,20 @@ fn run(cli: Cli) -> Result<()> {
         Command::Mcp => mcp::serve(),
 
         Command::Models { provider } => list_models(Backend::parse(&provider)?),
+
+        Command::Setup {
+            project,
+            dry_run,
+            yes,
+        } => {
+            let scope = match project {
+                Some(dir) => setup::Scope::Project(
+                    std::fs::canonicalize(&dir).unwrap_or(dir),
+                ),
+                None => setup::Scope::User,
+            };
+            setup::run(scope, dry_run, yes)
+        }
 
         Command::Skill => {
             skill::print();

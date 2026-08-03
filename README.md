@@ -257,6 +257,7 @@ a ComfyUI in a container or on another machine works with no shared mount.
 | `lucida check <operation>` | Resumes a video render by operation id — after a timeout, or from a different shell |
 | `lucida models` | What a provider can reach, and what it can be asked for |
 | `lucida config` | What settings this process can see |
+| `lucida setup` | Wires Lucida into Claude Code and the Claude app |
 | `lucida skill` | Prints the agent skill, for a client's skills directory |
 | `lucida update` | Replaces this binary with the latest release; `--check` only reports |
 | `lucida mcp` | Runs as an MCP server over stdio |
@@ -318,15 +319,43 @@ know which node an upload belongs to.
 
 ## Use as an MCP server
 
-Register it once, for every project:
-
 ```console
-claude mcp add --scope user lucida -- /path/to/lucida mcp
+$ lucida setup
+Lucida  /Users/you/.local/bin/lucida
+Scope   user — every project on this machine
+
+  Claude Code   register MCP server (--scope user)
+  skill         write ~/.claude/skills/lucida/SKILL.md
+  Claude app    add mcpServers.lucida to ~/Library/…/claude_desktop_config.json
+
+Apply this? [y/N]
 ```
 
-Verify with `claude mcp list`, which should report `✔ Connected`. If keys live
-in your shell rather than a config file, read the note under
-[Configuration](#configuration) first — it is the failure this setup hits most.
+It shows the plan before touching anything, and the first line names the binary
+it will register — which matters, because it registers whichever copy you ran.
+`--project [DIR]` scopes it to one project instead, `--dry-run` stops after the
+plan, and `--yes` skips the question.
+
+Claude Code's own CLI does the registering, because the tool that owns a config
+format should be the one to write it. Restart both afterwards; each reads its
+server list at startup.
+
+**The Claude app's skills are uploaded, not files on disk**, so `setup` prints
+the path and leaves that one step to you: Settings → Skills → Add → Upload a
+skill. Everything else it does itself.
+
+### Other clients
+
+Any MCP client can run Lucida as a stdio server. Most take a command and
+arguments:
+
+```json
+{ "command": "/path/to/lucida", "args": ["mcp"] }
+```
+
+and `lucida skill` prints the skill for clients that support them. Deliberately
+no per-client instructions here: directory layouts are theirs to change, and a
+list of them would be stale before it was useful.
 
 Four tools are exposed:
 
