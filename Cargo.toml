@@ -31,6 +31,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 libc = "0.2.189"
 
+# Verifying the checksum published alongside each release binary, for
+# `lucida update`. A dependency rather than a hand-rolled SHA-256: the function
+# is well specified and easy to test, but hand-rolled hashing is the kind of
+# thing a reader has to audit rather than trust, and this one is already
+# audited. RustCrypto, MIT/Apache-2.0, no runtime.
+sha2 = "0.10"
+
 [profile.release]
 strip = true
 lto = true

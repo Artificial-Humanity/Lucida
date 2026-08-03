@@ -22,6 +22,7 @@ mod provider;
 mod stability;
 #[cfg(test)]
 mod testserver;
+mod update;
 mod video;
 
 use anyhow::{Context, Result};
@@ -48,9 +49,21 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
                   capabilities differ per model — run `lucida models --provider bfl`.\n\n\
                   Stability reads STABILITY_API_KEY; OpenAI reads OPENAI_API_KEY, \
                   and model access there is granted per project.\n\n\
-                  Any of these can live in a config file; see `lucida config`."
+                  Any of these can live in a config file; see `lucida config`.",
+    disable_version_flag = true
 )]
 struct Cli {
+    /// Print version
+    ///
+    /// clap's own flag is `-V`; this one is `-v`, with the uppercase spelling
+    /// kept as an alias. A version flag is exactly what a wrapper script calls,
+    /// and breaking one to save a keystroke would be a poor trade.
+    ///
+    /// This does spend `-v`, which conventionally means `--verbose`. There is no
+    /// verbosity flag today, and one would need a different letter.
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -208,6 +221,13 @@ enum Command {
         remove: Option<String>,
     },
 
+    /// Replace this binary with the latest release
+    Update {
+        /// Report what is available without installing it
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Run as an MCP server over stdio
     Mcp,
 }
@@ -224,6 +244,8 @@ fn run() -> Result<()> {
         Command::Mcp => mcp::serve(),
 
         Command::Models { provider } => list_models(Backend::parse(&provider)?),
+
+        Command::Update { check } => update::Updater::new()?.run(!check),
 
         Command::Config { init, set, remove } => match (set, remove) {
             (Some(name), _) => set_config(&name),

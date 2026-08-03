@@ -34,12 +34,9 @@ worth reading from the provider directly.
 
 ## Install
 
-```console
-cargo install --git https://github.com/Artificial-Humanity/Lucida
-```
-
-Or take a prebuilt binary from the
-[latest release](https://github.com/Artificial-Humanity/Lucida/releases/latest):
+Take a prebuilt binary from the
+[latest release](https://github.com/Artificial-Humanity/Lucida/releases/latest).
+No toolchain, no runtime — one file:
 
 - **macOS** — `lucida-<version>-macos-universal`, covering Apple Silicon and
   Intel. It is unsigned, so first run needs
@@ -48,8 +45,33 @@ Or take a prebuilt binary from the
   libc or OpenSSL dependency.
 - **Windows** — `lucida-<version>-x86_64-windows.exe`.
 
+Each has a `.sha256` beside it.
+
+With Rust installed, `cargo` works too:
+
+```console
+cargo install --git https://github.com/Artificial-Humanity/Lucida
+```
+
 Or build it: `git clone …` then `cargo build --release`, binary at
 `target/release/lucida`.
+
+### Updating
+
+```console
+$ lucida update --check     # report what is available
+$ lucida update             # install it
+```
+
+It knows how it was installed. A downloaded binary replaces itself — verifying
+the published checksum, then swapping atomically — with no toolchain involved. A
+copy installed by cargo is left alone and the `cargo install --force` line is
+printed instead, because overwriting it would leave cargo managing a file it did
+not build, and the next `cargo install` would silently revert the update.
+
+Nothing checks for updates on its own. The MCP server is launched and killed
+constantly by its client, so a check at startup would be a network round trip
+per launch — and an unasked-for network call is a surprise whatever it costs.
 
 ## Configuration
 
@@ -177,6 +199,7 @@ a ComfyUI in a container or on another machine works with no shared mount.
 | `lucida check <operation>` | Resumes a video render by operation id — after a timeout, or from a different shell |
 | `lucida models` | What a provider can reach, and what it can be asked for |
 | `lucida config` | What settings this process can see |
+| `lucida update` | Replaces this binary with the latest release; `--check` only reports |
 | `lucida mcp` | Runs as an MCP server over stdio |
 
 `--help` on any of them lists its options and notes which providers honour each.
