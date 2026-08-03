@@ -40,13 +40,30 @@ pub fn print() {
 mod tests {
     use super::*;
 
+    /// Parsed by lines rather than by byte offsets into `\n`.
+    ///
+    /// The offset version asserted `starts_with("---\n")` and passed everywhere
+    /// it was written, then failed on the Windows CI runner: git checks text
+    /// files out as CRLF there, so `include_str!` embedded `---\r\n`. The same
+    /// shape of mistake as reading the clock once per call — a platform
+    /// assumption with no platform named in it, invisible to the machine that
+    /// wrote it.
+    ///
+    /// `.gitattributes` now pins these files to LF, which is the real fix and
+    /// keeps `lucida skill` emitting the bytes the repository holds. This test
+    /// is deliberately tolerant anyway: it should be checking that a client can
+    /// read the frontmatter, not which line ending arrived.
     #[test]
     fn the_skill_has_the_frontmatter_a_client_needs() {
-        assert!(SKILL.starts_with("---\n"), "no frontmatter block");
-        let end = SKILL[4..].find("\n---\n").expect("unterminated frontmatter");
-        let front = &SKILL[4..4 + end];
+        let mut lines = SKILL.lines();
+        assert_eq!(lines.next().map(str::trim), Some("---"), "no frontmatter block");
+
+        let front: Vec<&str> = lines.by_ref().take_while(|l| l.trim() != "---").collect();
+        assert!(!front.is_empty(), "unterminated frontmatter");
+        let front = front.join("\n");
 
         assert!(front.contains("name: lucida"), "{front}");
+
         // The description is what a client matches on to decide the skill is
         // relevant, so an empty one makes the file unreachable rather than
         // merely terse.
@@ -99,6 +116,21 @@ mod tests {
         ] {
             assert!(!lower.contains(count), "the skill counts providers: `{count}`");
         }
+    }
+
+    /// `lucida skill` promises the bytes the repository holds, and that promise
+    /// is only true if the checkout does not rewrite them.
+    ///
+    /// Guards `.gitattributes`: without `eol=lf`, a Windows checkout embeds
+    /// CRLF and the shipped skill differs from the repository's by a byte on
+    /// every line. Nothing else would notice — the file still parses, still
+    /// renders, still installs.
+    #[test]
+    fn the_embedded_skill_is_lf_on_every_platform() {
+        assert!(
+            !SKILL.contains('\r'),
+            "the embedded skill contains CR — has .gitattributes lost `*.md text eol=lf`?"
+        );
     }
 
     #[test]

@@ -1,0 +1,20 @@
+# Line endings, pinned rather than left to the platform.
+#
+# `skills/lucida/SKILL.md` is compiled into the binary with `include_str!`, and
+# `lucida skill` promises to emit the same bytes the repository holds. Git
+# checks text files out as CRLF on Windows by default, which quietly makes that
+# false there — the embedded skill gains a `\r` on every line, and the frontmatter
+# no longer starts with `---\n`. That failed only on the Windows CI runner, and
+# only after the skill shipped.
+#
+# Shell scripts are here for a harder reason: a CRLF `install.sh` does not run
+# at all. `#!/bin/sh\r` names an interpreter that does not exist, and the error
+# is famously unhelpful.
+*.md text eol=lf
+*.sh text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+
+# PowerShell is conventionally CRLF and does not care either way.
+*.ps1 text eol=crlf
