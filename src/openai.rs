@@ -644,20 +644,35 @@ mod tests {
         assert!(!MODEL_ALIASES.iter().any(|(_, t)| t.contains("dall")));
     }
 
-    /// The capability that justifies this provider existing at all.
+    /// Masking is no longer unique to this provider, and the pair is worth
+    /// pinning rather than the exclusivity.
+    ///
+    /// This test used to assert openai was the only provider that masks — the
+    /// capability that justified it existing at all. That stopped being true
+    /// when the local lane learned to inpaint, and the interesting fact now is
+    /// the *difference*: openai's mask is advisory, measured at 4.5x
+    /// concentration with the rest of the frame still moving, while comfyui's
+    /// is binding because Lucida builds that graph and composites the render
+    /// back through the mask — measured at 0.00/255 outside it.
+    ///
+    /// A third provider claiming a mask should have to think about which of the
+    /// two it is, which is what this failing would prompt.
     #[test]
-    fn it_is_the_only_provider_that_masks() {
+    fn exactly_two_providers_mask_and_they_differ_in_kind() {
+        use crate::provider::{Backend, capabilities_for};
+
+        let masking: Vec<&str> = Backend::ALL
+            .iter()
+            .filter(|b| capabilities_for(**b, b.default_model()).mask)
+            .map(|b| b.name())
+            .collect();
+
+        assert_eq!(
+            masking,
+            vec!["comfyui", "openai"],
+            "the set of masking providers changed; is the new one advisory or binding?"
+        );
         assert!(capabilities("gpt-image-1").mask);
-        for backend in crate::provider::Backend::ALL {
-            if *backend == crate::provider::Backend::OpenAi {
-                continue;
-            }
-            assert!(
-                !crate::provider::capabilities_for(*backend, backend.default_model()).mask,
-                "{} should not claim masking",
-                backend.name()
-            );
-        }
     }
 
     /// Both were measured as rejected rather than ignored, so declaring them

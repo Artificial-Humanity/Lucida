@@ -228,6 +228,13 @@ $ lucida models --provider comfyui
 which lists the models that provider can currently reach, the aliases Lucida
 accepts for them, and exactly what it can be asked for.
 
+**Two providers accept a mask, and they mean different things by it.** On
+`openai` a mask is *advisory* — it concentrates the change without confining it,
+so pixels outside can still move, and anything needing them preserved has to
+composite the result back itself. On `comfyui` it is **binding**: Lucida builds
+that graph, so it composites the render through the mask before returning it,
+and every pixel outside comes back byte-identical. Measured, not asserted.
+
 **Nothing is silently dropped.** A parameter the chosen provider cannot honour
 is an error naming one that can, not an image that quietly ignored you:
 

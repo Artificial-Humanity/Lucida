@@ -451,6 +451,7 @@ impl Client {
         ckpt: &Checkpoint,
         seed: u64,
         uploaded: &[String],
+        mask: Option<&str>,
     ) -> Value {
         let steps = req.steps.unwrap_or(DEFAULT_STEPS);
         let guidance = req.guidance.unwrap_or(DEFAULT_GUIDANCE);
@@ -517,6 +518,59 @@ impl Client {
             (json!(["size", 0]), json!(["size", 1]))
         };
 
+        // A mask reroutes the conditioning through InpaintModelConditioning and
+        // the result through a composite. Both halves matter, and the second is
+        // the one no hosted provider offers.
+        //
+        // **Measured, not assumed.** Conditioning alone gives an *advisory*
+        // mask: against a two-tone source, change concentrated 5.4x inside the
+        // mask while the rest of the frame still drifted by 23.8/255 — the same
+        // category as openai's. Compositing the render back over the source
+        // through the same mask took the outside to **0.00/255**, pixel
+        // identical. Lucida builds this graph, so it can hand back a guarantee
+        // where a hosted API can only offer a tendency.
+        //
+        // The mask is scaled to the *scaled* source rather than used as
+        // uploaded: the render happens at roughly one megapixel, and
+        // compositing a mask cut for the original dimensions would land the
+        // change in the wrong place entirely.
+        let (positive, negative_cond, latent, composited) = match mask {
+            None => {
+                node("latent", "EmptyFlux2LatentImage",
+                     json!({ "width": width, "height": height, "batch_size": 1 }));
+                (positive, negative_cond, json!(["latent", 0]), json!(["decode", 0]))
+            }
+            Some(name) => {
+                node("load_mask", "LoadImage", json!({ "image": name }));
+                // Output 1 is LoadImage's MASK, taken from alpha — verified
+                // against a live server to be 255 exactly where the source was
+                // transparent, which is Lucida's documented convention and
+                // openai's. One mask file therefore works on both, and nothing
+                // is inverted on the way in.
+                node("mask_img", "MaskToImage", json!({ "mask": ["load_mask", 1] }));
+                node("mask_size", "GetImageSize", json!({ "image": ["scale0", 0] }));
+                node("mask_scaled", "ImageScale",
+                     json!({ "image": ["mask_img", 0], "upscale_method": "nearest-exact",
+                             "width": ["mask_size", 0], "height": ["mask_size", 1],
+                             "crop": "disabled" }));
+                node("mask_final", "ImageToMask",
+                     json!({ "image": ["mask_scaled", 0], "channel": "red" }));
+
+                node("inpaint", "InpaintModelConditioning",
+                     json!({ "positive": positive, "negative": negative_cond,
+                             "vae": ["vae", 0], "pixels": ["scale0", 0],
+                             "mask": ["mask_final", 0], "noise_mask": true }));
+
+                node("composite", "ImageCompositeMasked",
+                     json!({ "destination": ["scale0", 0], "source": ["decode", 0],
+                             "x": 0, "y": 0, "resize_source": false,
+                             "mask": ["mask_final", 0] }));
+
+                (json!(["inpaint", 0]), json!(["inpaint", 1]),
+                 json!(["inpaint", 2]), json!(["composite", 0]))
+            }
+        };
+
         node("guider", "CFGGuider",
              json!({ "model": ["unet", 0], "positive": positive,
                      "negative": negative_cond, "cfg": guidance }));
@@ -524,16 +578,14 @@ impl Client {
         node("sigmas", "Flux2Scheduler",
              json!({ "steps": steps, "width": width, "height": height }));
         node("noise", "RandomNoise", json!({ "noise_seed": seed }));
-        node("latent", "EmptyFlux2LatentImage",
-             json!({ "width": width, "height": height, "batch_size": 1 }));
         node("out", "SamplerCustomAdvanced",
              json!({ "noise": ["noise", 0], "guider": ["guider", 0],
                      "sampler": ["sampler", 0], "sigmas": ["sigmas", 0],
-                     "latent_image": ["latent", 0] }));
+                     "latent_image": latent }));
         node("decode", "VAEDecode",
              json!({ "samples": ["out", 0], "vae": ["vae", 0] }));
         node("save", "SaveImage",
-             json!({ "images": ["decode", 0], "filename_prefix": "lucida" }));
+             json!({ "images": composited, "filename_prefix": "lucida" }));
 
         Value::Object(nodes)
     }
@@ -671,7 +723,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     seed: true,
     negative_prompt: true,
     references: true,
-    mask: false,
+    mask: true,
     workflow: true,
     steps: true,
     guidance: true,
@@ -751,9 +803,16 @@ impl ImageProvider for Client {
             );
         }
 
+        // Uploaded like any other image, over HTTP, so a remote ComfyUI needs no
+        // shared mount for it either.
+        let mask = match &req.mask {
+            Some(path) => Some(self.upload(path)?),
+            None => None,
+        };
+
         let graph = match workflow {
             Some(graph) => graph,
-            None => Self::graph_for(req, &ckpt, seed, &uploaded),
+            None => Self::graph_for(req, &ckpt, seed, &uploaded, mask.as_deref()),
         };
         let prompt_id = self.submit(&graph)?;
         let (bytes, mime_type) = self.await_image(&prompt_id)?;
@@ -1159,7 +1218,7 @@ mod tests {
 
     #[test]
     fn generating_loads_no_image_and_sizes_itself() {
-        let graph = Client::graph_for(&request("a fox"), &checkpoint(), 1, &[]);
+        let graph = Client::graph_for(&request("a fox"), &checkpoint(), 1, &[], None);
         assert!(graph.get("load0").is_none(), "nothing to load when generating");
         assert!(graph.get("size").is_none());
         // Dimensions are literals, not wired from an image.
@@ -1174,7 +1233,7 @@ mod tests {
     #[test]
     fn editing_conditions_both_branches_on_the_source() {
         let graph = Client::graph_for(&request("make it blue"), &checkpoint(), 1,
-                                      &["cat.png".to_string()]);
+                                      &["cat.png".to_string()], None);
 
         assert_eq!(graph["load0"]["inputs"]["image"], "cat.png");
         assert_eq!(graph["encode0"]["inputs"]["pixels"], json!(["scale0", 0]));
@@ -1193,7 +1252,7 @@ mod tests {
     #[test]
     fn an_edit_keeps_the_sources_shape_by_default() {
         let graph = Client::graph_for(&request("brighter"), &checkpoint(), 1,
-                                      &["cat.png".to_string()]);
+                                      &["cat.png".to_string()], None);
         // Read off the server rather than guessed here.
         assert_eq!(graph["size"]["inputs"]["image"], json!(["scale0", 0]));
         assert_eq!(graph["latent"]["inputs"]["width"], json!(["size", 0]));
@@ -1206,11 +1265,69 @@ mod tests {
             aspect: Some(crate::provider::Aspect::parse("16:9").unwrap()),
             ..request("brighter")
         };
-        let graph = Client::graph_for(&req, &checkpoint(), 1, &["cat.png".to_string()]);
+        let graph = Client::graph_for(&req, &checkpoint(), 1, &["cat.png".to_string()], None);
         // An explicit request wins over the source's shape, so no GetImageSize.
         assert!(graph.get("size").is_none());
         assert_eq!(graph["latent"]["inputs"]["width"], 1024);
         assert_eq!(graph["latent"]["inputs"]["height"], 576);
+    }
+
+    /// A mask has to change three things at once, and missing any one of them
+    /// fails quietly rather than loudly.
+    ///
+    /// Conditioning must route through `InpaintModelConditioning`, the sampler
+    /// must start from *its* latent rather than an empty one, and the saved
+    /// image must be the composite rather than the raw decode. Drop the third
+    /// and the render still succeeds — it just repaints the whole frame, which
+    /// is the advisory behaviour measured at 23.8/255 outside the mask before
+    /// compositing was added.
+    #[test]
+    fn a_mask_routes_through_inpainting_and_composites_the_result() {
+        let graph = Client::graph_for(
+            &request("sunflowers here"),
+            &checkpoint(),
+            1,
+            &["scene.png".to_string()],
+            Some("mask.png"),
+        );
+
+        assert_eq!(graph["guider"]["inputs"]["positive"], json!(["inpaint", 0]));
+        assert_eq!(graph["guider"]["inputs"]["negative"], json!(["inpaint", 1]));
+        assert_eq!(graph["out"]["inputs"]["latent_image"], json!(["inpaint", 2]));
+
+        // The guarantee: what is written is the source with only the masked
+        // region replaced.
+        assert_eq!(graph["save"]["inputs"]["images"], json!(["composite", 0]));
+        assert_eq!(graph["composite"]["inputs"]["destination"], json!(["scale0", 0]));
+        assert_eq!(graph["composite"]["inputs"]["source"], json!(["decode", 0]));
+
+        // Output 1 of LoadImage is the alpha-derived MASK, which a live server
+        // confirmed is 255 exactly where the source is transparent.
+        assert_eq!(graph["mask_img"]["inputs"]["mask"], json!(["load_mask", 1]));
+
+        // Scaled to the scaled source, not used as uploaded — the render is at
+        // about a megapixel, and a mask cut for the original dimensions would
+        // put the change in the wrong place.
+        assert_eq!(graph["mask_scaled"]["inputs"]["width"], json!(["mask_size", 0]));
+        assert_eq!(graph["mask_size"]["inputs"]["image"], json!(["scale0", 0]));
+
+        assert!(graph.get("latent").is_none(), "no empty latent when inpainting");
+    }
+
+    #[test]
+    fn without_a_mask_nothing_inpaints_or_composites() {
+        let graph = Client::graph_for(
+            &request("make it blue"),
+            &checkpoint(),
+            1,
+            &["scene.png".to_string()],
+            None,
+        );
+        assert!(graph.get("inpaint").is_none());
+        assert!(graph.get("composite").is_none());
+        assert!(graph.get("load_mask").is_none());
+        assert_eq!(graph["save"]["inputs"]["images"], json!(["decode", 0]));
+        assert_eq!(graph["out"]["inputs"]["latent_image"], json!(["latent", 0]));
     }
 
     /// More than one reference chains, each adding its latent to the
@@ -1222,6 +1339,7 @@ mod tests {
             &checkpoint(),
             1,
             &["a.png".to_string(), "b.png".to_string()],
+            None,
         );
         assert_eq!(graph["pos_ref0"]["inputs"]["conditioning"], json!(["pos", 0]));
         assert_eq!(

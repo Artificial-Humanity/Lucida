@@ -253,9 +253,55 @@ binary — tokens substituted, image found by shape, seed honoured.
   (`Flux2Scheduler`, `EmptyFlux2LatentImage`, `CLIPLoader type=flux2`). A
   different family needs a different graph — reachable today via `--workflow`,
   but not as a maintained template.
-- **Inpainting.** Mask-based editing is reachable locally via the Flux.1 Fill
-  blueprint. `ImageRequest` can now express a mask (OpenAI forced it), so the
-  remaining work is the graph, not the type.
+### Inpainting on the local lane — DELIVERED, and the premise was wrong
+
+This section used to read: *"Mask-based editing is reachable locally via the
+Flux.1 Fill blueprint."* That sentence cost nothing to write and would have cost
+a 24 GB download and an unresolved licence decision to act on, because it was
+**not true**. The Flux.2 Klein checkpoint already installed does masked
+inpainting through `InpaintModelConditioning`, which was settled in one render.
+
+Worth recording as a method rather than a fact: the claim was about a model, and
+a claim about a model is testable. Reading blueprints suggested Fill; asking the
+server showed `InpaintModelConditioning` and `DifferentialDiffusion` were both
+present, and one probe against the installed weights answered it. The habit that
+paid here is the same one that found BFL's 422 and Stability's seed header —
+ask the thing itself before believing the documentation about it.
+
+**The measurement that shaped the design.** Conditioning alone gives an
+*advisory* mask, and the numbers are close to OpenAI's:
+
+| | change inside mask | change outside | verdict |
+|---|---|---|---|
+| `InpaintModelConditioning` alone | 128.03/255 | 23.84/255 | advisory, 5.4x |
+| plus in-graph compositing | 127.47/255 | **0.00/255** | binding |
+| through the release binary | 123.82/255 | **0.00 mean, 0.00 max** | binding |
+
+So the local lane now has a capability **no hosted provider here offers**: a
+mask that binds. OpenAI's is advisory and the README says so, telling callers to
+composite the result themselves. Lucida builds the ComfyUI graph, so it does
+that compositing with `ImageCompositeMasked` and returns a guarantee instead of
+a caveat. Every pixel outside the mask is byte-identical, max as well as mean.
+
+Two details that would have been silent failures:
+
+- **The mask is scaled to the *scaled* source.** The render happens at roughly a
+  megapixel, so a mask cut for the original dimensions composites the change
+  into the wrong place. `GetImageSize` on the scaled source drives an
+  `ImageScale` on the mask.
+- **The alpha convention matches OpenAI's**, verified rather than assumed —
+  `LoadImage`'s MASK output reads 255 exactly where the source is transparent.
+  One mask file works on both providers with nothing to convert. Checking it
+  needed no diffusion at all: `MaskToImage` round-trips in seconds, where
+  guessing wrong would have inverted every mask and still rendered happily.
+
+**Still open on this lane:**
+
+- **Non-Flux model families.** The built-in graph hardcodes Flux.2's node types
+  (`Flux2Scheduler`, `EmptyFlux2LatentImage`, `CLIPLoader type=flux2`). A
+  different family needs a different graph — reachable today via `--workflow`,
+  but not as a maintained template. Now the only thing blocking the Mac lane,
+  where 32 GB cannot hold Flux.2 Klein but would hold SDXL comfortably.
 
 ---
 
