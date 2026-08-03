@@ -274,6 +274,17 @@ the agent session dies.
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
 
+### The skill
+
+[`skills/lucida/SKILL.md`](skills/lucida/SKILL.md) carries what a tool schema
+structurally cannot: how to choose a provider for a job, how to iterate when a
+render is close but wrong, and which outcomes differ from what was asked for. It
+states no capabilities at all — those come from `image_providers` at call time,
+so the skill cannot go stale as providers change.
+
+Point a skill-aware client at it, or copy it into that client's skills
+directory.
+
 ## Troubleshooting
 
 Errors from a provider are reported as the provider gave them, with the status
