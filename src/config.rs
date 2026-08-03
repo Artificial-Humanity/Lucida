@@ -73,14 +73,24 @@ pub fn replacement_for(name: &str) -> Option<&'static str> {
         .map(|(_, new)| *new)
 }
 
-/// A retired name this process can still see, from either source.
+/// Retired names this process can see **whose replacement is still missing**.
 ///
-/// Reported by `lucida config` and by the credential error, so the diagnosis is
-/// "you have the old name" rather than "you have no key".
+/// Reported by `lucida config`, so the diagnosis is "you have the old name"
+/// rather than "you have no key".
+///
+/// The condition is the whole point. Once the replacement is set the migration
+/// is finished, and the old name is just another variable in the environment
+/// that Lucida does not read — no different from the hundred others. Reporting
+/// it anyway would be a permanent notice about a non-problem, actionable only by
+/// editing a shell profile for tidiness, and a notice that cannot be acted on is
+/// one people learn to skip past. That costs the notices that do matter.
+///
+/// So this fires exactly while it is load-bearing: when someone has the old key
+/// and nothing else, and would otherwise be told they have no key at all.
 pub fn retired_in_use() -> Vec<(&'static str, &'static str)> {
     RETIRED_KEYS
         .iter()
-        .filter(|(old, _)| origin(old).is_some())
+        .filter(|(old, new)| origin(old).is_some() && var(new).is_none())
         .copied()
         .collect()
 }

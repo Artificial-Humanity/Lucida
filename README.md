@@ -156,9 +156,11 @@ provider's own dashboard.
 
 > **`GOOGLE_API_KEY` was renamed to `GEMINI_API_KEY`** and is no longer read.
 > Everything Lucida reaches on Google is the Gemini API — images and Veo alike —
-> so one name covers both. If you have the old one, `lucida config` says so by
-> name rather than reporting a missing key, and `lucida config --remove
-> GOOGLE_API_KEY` clears it from the file.
+> so one name covers both. If you have the old one and not the new one, `lucida
+> config` says so by name rather than reporting a missing key, and `lucida
+> config --remove GOOGLE_API_KEY` clears it from the file. Once `GEMINI_API_KEY`
+> is set the migration is done and nothing mentions the old name again, whether
+> or not a stale export is still lying around.
 
 **`lucida config`** prints whether each setting is present and where it came
 from — never a value — so its output is safe to paste into a bug report.

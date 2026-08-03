@@ -97,11 +97,26 @@ esac
 # A renamed setting must be diagnosed, not merely absent. Someone holding
 # GOOGLE_API_KEY has a key that is present and correct, so "no API key found"
 # would send them to check the one thing that is not wrong.
-out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin GOOGLE_API_KEY=x "$BIN" config 2>&1)
+#
+# A separate HOME with no config file, because the sandbox above now holds a
+# GEMINI_API_KEY — and the notice is deliberately silent once the replacement
+# is set. Reusing that sandbox would assert the opposite of the behaviour.
+migration=$(mktemp -d)
+out=$(env -i HOME="$migration" PATH=/usr/bin:/bin GOOGLE_API_KEY=x "$BIN" config 2>&1)
 case "$out" in
   *"no longer read"*GEMINI_API_KEY*) pass "a retired key name names its replacement" ;;
   *) fail "retired GOOGLE_API_KEY was not reported: $out" ;;
 esac
+
+# …and once the replacement is set, the migration is over and the old name is
+# just another variable Lucida does not read. A permanent notice about a
+# non-problem is one people learn to skip past.
+out=$(env -i HOME="$migration" PATH=/usr/bin:/bin GOOGLE_API_KEY=x GEMINI_API_KEY=y "$BIN" config 2>&1)
+case "$out" in
+  *"no longer read"*) fail "the retired name was still reported after migrating: $out" ;;
+  *) pass "a completed migration says nothing about the old name" ;;
+esac
+rm -rf "$migration"
 
 # …and setting it must be refused rather than written, since a written value
 # nothing reads is the silent drop this design exists to refuse.
