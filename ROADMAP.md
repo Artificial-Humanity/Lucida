@@ -564,9 +564,27 @@ Three things worth keeping from that:
 
 ## 4. Independent of providers
 
-- **Code signing.** macOS binaries are unsigned, so first run needs the
-  quarantine attribute cleared; Windows shows a SmartScreen warning. An Apple
-  Developer account is available; this is scheduling, not blocking.
+- **Code signing — deliberately waiting on the organization account.** A
+  Developer ID certificate is issued to the team that creates it and **cannot be
+  transferred between an individual and an organization account**. Signing under
+  a personal account now would mean re-issuing later and shipping a build whose
+  signing identity changes underneath users, which reads exactly like the thing
+  signing exists to rule out. So this waits on the Artificial Humanity org
+  enrollment (D-U-N-S in progress, 2026-08-02). Owner decision.
+
+  **The installer lowered the urgency, which is worth recording so the delay is
+  not mistaken for drift.** macOS sets the quarantine attribute from browsers
+  and LaunchServices, not from curl — so a binary arriving through `install.sh`
+  is never evaluated by Gatekeeper and needs no `xattr -d`. Unsigned now costs a
+  warning only on the path where someone downloads from the releases page in a
+  browser, and Windows SmartScreen.
+
+  When it does land, two things about a bare CLI binary that catch people out:
+  `--options runtime` and `--timestamp` are required for notarization, and
+  **`stapler` cannot staple a standalone executable** — only a `.app`, `.pkg` or
+  `.dmg`. A notarized bare binary is checked online instead, so shipping a
+  `.pkg` is the only way to get an offline ticket. Signing also has to happen
+  *after* `lipo`, since fusing strips signatures.
 - **crates.io.** Deliberately not published yet. `cargo install --git` works and
   the name is still free. Worth doing once the API surface settles — a published
   crate name is harder to walk back than a repo rename.
