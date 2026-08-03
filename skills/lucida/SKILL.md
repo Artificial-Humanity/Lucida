@@ -5,9 +5,9 @@ description: Generating and editing images and video with Lucida — choosing a 
 
 # Lucida
 
-Lucida generates and edits images across five providers and video through Veo,
-as an MCP server (`generate_image`, `image_providers`, `start_video`,
-`check_video`) or a CLI (`lucida generate|edit|video|check|models|config`).
+Lucida generates and edits images, and generates video, as an MCP server
+(`generate_image`, `image_providers`, `start_video`, `check_video`) or a CLI
+(`lucida generate|edit|video|check|models|config`).
 
 **This file deliberately contains no capability facts.** Which provider takes a
 seed, a mask, a negative prompt or a given aspect ratio changes as providers ship

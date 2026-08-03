@@ -257,6 +257,7 @@ a ComfyUI in a container or on another machine works with no shared mount.
 | `lucida check <operation>` | Resumes a video render by operation id — after a timeout, or from a different shell |
 | `lucida models` | What a provider can reach, and what it can be asked for |
 | `lucida config` | What settings this process can see |
+| `lucida skill` | Prints the agent skill, for a client's skills directory |
 | `lucida update` | Replaces this binary with the latest release; `--check` only reports |
 | `lucida mcp` | Runs as an MCP server over stdio |
 
@@ -361,10 +362,22 @@ reads the message and adapts instead of the call simply dying.
 structurally cannot: how to choose a provider for a job, how to iterate when a
 render is close but wrong, and which outcomes differ from what was asked for. It
 states no capabilities at all — those come from `image_providers` at call time,
-so the skill cannot go stale as providers change.
+so the skill cannot go stale as providers change. Tests enforce that: naming a
+provider, a model family, or a count of providers fails the build.
 
-Point a skill-aware client at it, or copy it into that client's skills
-directory.
+The binary carries it, so you do not need the repository:
+
+```console
+$ lucida skill > ~/.claude/skills/lucida/SKILL.md
+```
+
+It is compiled in with `include_str!`, which means the file in the repository is
+the file that ships and it updates with `lucida update` — you cannot be running
+one version while holding another version's skill.
+
+It prints rather than installing because skill directories differ by client —
+`~/.claude/skills`, a project's `.agents/skills`, others — and Lucida has no way
+to know which you mean. Redirecting puts that choice where it belongs.
 
 ## Troubleshooting
 

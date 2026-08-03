@@ -19,6 +19,7 @@ mod masked;
 mod mcp;
 mod openai;
 mod provider;
+mod skill;
 mod stability;
 #[cfg(test)]
 mod testserver;
@@ -221,6 +222,9 @@ enum Command {
         remove: Option<String>,
     },
 
+    /// Print the agent skill, for a client's skills directory
+    Skill,
+
     /// Replace this binary with the latest release
     Update {
         /// Report what is available without installing it
@@ -263,6 +267,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Mcp => mcp::serve(),
 
         Command::Models { provider } => list_models(Backend::parse(&provider)?),
+
+        Command::Skill => {
+            skill::print();
+            Ok(())
+        }
 
         Command::Update { check, yes } => {
             let mode = match (check, yes) {
