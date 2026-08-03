@@ -15,11 +15,16 @@
 //! place is still self-replaceable, while a cargo-managed binary must never be
 //! written over.
 //!
-//! **Nothing here assumes a Rust toolchain.** A cargo command is only ever
-//! printed to someone whose binary is already sitting in a cargo directory,
-//! which is to say someone who used cargo to put it there. Everyone else gets a
-//! self-contained download and replace: no compiler, no toolchain, nothing but
-//! the binary replacing itself.
+//! **Nothing here assumes a Rust toolchain.** cargo is only ever involved for
+//! someone whose binary is already sitting in a cargo directory, which is to say
+//! someone who used cargo to put it there. Everyone else gets a self-contained
+//! download and replace: no compiler, no toolchain, nothing but the binary
+//! replacing itself.
+//!
+//! Both paths end in an installed update rather than in advice. A cargo-managed
+//! copy is rebuilt by running cargo — pinned to the release tag, so what gets
+//! installed is the version that was just offered rather than whatever `main`
+//! has become.
 //!
 //! # Nothing updates itself
 //!
@@ -190,17 +195,7 @@ impl Updater {
         let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
 
         match install_kind(&exe) {
-            // Printed rather than run. `cargo install` can take minutes and
-            // wants its own output on the terminal; wrapping it would hide a
-            // compile error behind a spinner.
-            Install::Cargo => {
-                println!(
-                    "\nThis copy was installed by cargo ({}), so cargo should \
-                     replace it:\n\n  cargo install --git {REPO} --force",
-                    exe.display()
-                );
-                Ok(())
-            }
+            Install::Cargo => reinstall_with_cargo(&exe, &release.tag_name),
             Install::Standalone => self.replace(&exe, &release, latest),
         }
     }
@@ -397,6 +392,66 @@ fn record_check(path: &Path) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(path, now.as_secs().to_string());
+}
+
+/// The `cargo install` arguments for a given release tag.
+///
+/// **`--tag` rather than the default branch, which is the part worth getting
+/// right.** `cargo install --git <url>` builds whatever `main` happens to be,
+/// so an update that had just announced "0.7.0 is available" would install
+/// something else — main with whatever has landed since — and then report a
+/// version the release page has never heard of. The tag installs the release
+/// that was actually offered.
+fn cargo_args(tag: &str) -> Vec<String> {
+    ["install", "--git", REPO, "--tag", tag, "--force"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Rebuilds a cargo-installed copy, by running cargo.
+///
+/// Earlier this only printed the command, on the reasoning that `cargo install`
+/// takes minutes and wants its own output on the terminal. The second half of
+/// that is right and the conclusion did not follow: a child process inherits
+/// this terminal by default, so cargo's progress and any compile error arrive
+/// exactly as they would if it had been typed. What printing actually achieved
+/// was making the user copy a line — a dead end at the moment they had just
+/// said yes.
+///
+/// Falling back to printing when cargo cannot be found is still right, and is
+/// the only case where a command is handed over rather than run.
+fn reinstall_with_cargo(exe: &Path, tag: &str) -> Result<()> {
+    let args = cargo_args(tag);
+    let printable = format!("cargo {}", args.join(" "));
+
+    // Respects CARGO, which is set when this is itself invoked from cargo, and
+    // names the toolchain's own binary rather than whatever is first on PATH.
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+
+    println!(
+        "\nThis copy was installed by cargo ({}), so cargo replaces it — which \
+         means building from source, and that takes a few minutes.\n\n  {printable}\n",
+        exe.display()
+    );
+
+    // Inheriting stdio, which is the whole point: cargo's output is the
+    // progress report, and its compile errors are the diagnosis.
+    match std::process::Command::new(&cargo).args(&args).status() {
+        Ok(status) if status.success() => {
+            println!("\nUpdated to {tag}.");
+            Ok(())
+        }
+        Ok(status) => bail!(
+            "`{printable}` exited with {status}, so nothing was replaced — the \
+             copy you are running is untouched.\n\n\
+             cargo's own output above says why."
+        ),
+        Err(e) => bail!(
+            "could not run cargo ({e}), so this copy cannot be rebuilt here.\n\n\
+             Run it yourself where cargo is available:\n\n  {printable}"
+        ),
+    }
 }
 
 /// Whether `exe` lives under a cargo bin directory.
@@ -627,6 +682,21 @@ mod tests {
             "not under a cache directory: {text}"
         );
         assert!(!text.contains("config.env"), "{text}");
+    }
+
+    #[test]
+    fn the_cargo_reinstall_is_pinned_to_the_release_tag() {
+        let args = cargo_args("v0.7.0");
+        assert_eq!(
+            args,
+            vec!["install", "--git", REPO, "--tag", "v0.7.0", "--force"]
+        );
+
+        // Without --tag, cargo builds the default branch — so an update that
+        // announced 0.7.0 would install whatever main had become, then report a
+        // version the release page has never heard of.
+        assert!(args.contains(&"--tag".to_string()));
+        assert!(args.contains(&"--force".to_string()));
     }
 
     #[test]

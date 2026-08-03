@@ -79,11 +79,17 @@ for automation. Without a terminal to answer at, `lucida update` refuses rather
 than assuming yes — a scripted update that installed silently would be the one
 thing this deliberately does not do.
 
-It knows how it was installed. A downloaded binary replaces itself — verifying
-the published checksum, then swapping atomically — with no toolchain involved. A
-copy installed by cargo is left alone and the `cargo install --force` line is
-printed instead, because overwriting it would leave cargo managing a file it did
-not build, and the next `cargo install` would silently revert the update.
+It knows how it was installed, and either way it finishes the job rather than
+handing you a command. A downloaded binary replaces itself — verifying the
+published checksum, then swapping atomically — with no toolchain involved. A
+cargo-installed copy is rebuilt by running cargo, pinned to the release tag so
+you get the version you were just offered rather than whatever `main` has
+become; cargo's own output goes straight to your terminal, since that build
+takes a few minutes and its errors are the diagnosis.
+
+The two are kept apart because overwriting a cargo-managed binary would leave
+cargo believing it manages a file it did not build, and the next
+`cargo install` would silently revert the update.
 
 **Nothing ever updates itself.** At most once a day, on an interactive terminal,
 Lucida prints one line noting that a newer release exists — and installs
