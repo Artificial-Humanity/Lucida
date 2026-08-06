@@ -550,3 +550,14 @@ core renders and one low-quality gpt-image-1 render. Every other question
 was answered by a validation error, which renders nothing and bills
 nothing. That is the technique worth carrying forward: ask the API in the
 way that costs nothing before paying it.
+
+---
+
+## 9. Range bookkeeping — added 2026-08-06
+
+This review predates the review convention adopted into [AGENTS.md](../AGENTS.md) §4
+(timestamped filenames, SHA-bounded ranges); it was a full-tree read rather than a
+commit-range review, and its follow-ups (§7–§8) ran through the v0.5.2 release. For §4
+purposes its **end SHA is `c31e495`** (*Record that v0.5.2 shipped, and what the answers
+cost*, 2026-08-02 — the repo's HEAD as of this addendum). The next review starts at the
+commit immediately following `c31e495`.
