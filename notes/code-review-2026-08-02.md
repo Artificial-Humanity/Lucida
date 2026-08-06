@@ -559,5 +559,6 @@ This review predates the review convention adopted into [AGENTS.md](../AGENTS.md
 (timestamped filenames, SHA-bounded ranges); it was a full-tree read rather than a
 commit-range review, and its follow-ups (§7–§8) ran through the v0.5.2 release. For §4
 purposes its **end SHA is `c31e495`** (*Record that v0.5.2 shipped, and what the answers
-cost*, 2026-08-02 — the repo's HEAD as of this addendum). The next review starts at the
-commit immediately following `c31e495`.
+cost*, 2026-08-02). Seventeen commits (the v0.6.0 → v0.9.0 releases, through `f5ecf17`)
+have landed since, unreviewed. The next review starts at the commit immediately following
+`c31e495` and picks them up.
