@@ -13,8 +13,8 @@ for Lucida.
 >
 > Maintained since **2026-08-06**, when the changelog + code-review cycle (AGENTS.md §3–§4)
 > was adopted here to match the convention Prosodia already runs. History before that date
-> lives in `git log` and [code-review-2026-08-02.md](code-review-2026-08-02.md), which
-> narrates everything through the v0.5.2 release.
+> lives in `git log` (the 2026-08-02 full-tree review, which narrated everything through
+> v0.5.2, is in git history — superseded reviews are deleted per §4).
 
 ---
 
