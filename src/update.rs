@@ -369,6 +369,15 @@ fn is_due(last: Option<SystemTime>, now: SystemTime) -> bool {
 fn stamp_path() -> Option<PathBuf> {
     let base = if cfg!(target_os = "macos") {
         home().map(|h| h.join("Library/Caches"))
+    } else if cfg!(target_os = "windows") {
+        // `%LOCALAPPDATA%` is where Windows keeps per-machine state that need not
+        // roam, which is exactly what a timestamp is — it worked in
+        // `%USERPROFILE%\.cache` too, since the directory is created either way,
+        // but a dotfile cache directory is a convention from another platform.
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| home().map(|h| h.join(".cache")))
     } else {
         std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
@@ -677,11 +686,24 @@ mod tests {
         let Some(path) = stamp_path() else { return };
         let text = path.to_string_lossy();
         assert!(text.contains("lucida"), "{text}");
-        assert!(
-            text.contains("ache") || text.contains("Caches"),
-            "not under a cache directory: {text}"
-        );
         assert!(!text.contains("config.env"), "{text}");
+
+        // Each platform's own location for machine-local state a tool generated.
+        // Windows keeps that in %LOCALAPPDATA% rather than in a dotfile cache
+        // directory borrowed from another platform — with `.cache` still accepted
+        // there, since that is where the fallback lands when the variable is
+        // unset.
+        let accepted: &[&str] = if cfg!(target_os = "macos") {
+            &["Caches"]
+        } else if cfg!(target_os = "windows") {
+            &["Local", "cache"]
+        } else {
+            &["cache"]
+        };
+        assert!(
+            accepted.iter().any(|marker| text.contains(marker)),
+            "not under this platform's cache location (wanted one of {accepted:?}): {text}"
+        );
     }
 
     #[test]

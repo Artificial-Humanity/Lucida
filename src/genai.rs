@@ -82,11 +82,13 @@ impl Client {
     /// "Google" named more accurately. The retired name is still recognised in
     /// [`no_key`], purely to say what happened.
     pub fn from_env() -> Result<Self> {
+        // No empty-value check: `config::var` treats a blank value as absent in
+        // both sources, so a key that arrives here is non-blank by construction.
+        // The guard that used to be here reported "GEMINI_API_KEY is set but
+        // empty" and had been unreachable since the config file landed — and an
+        // unreachable branch is worse than no branch, because it reads as
+        // evidence that the case can happen.
         let api_key = crate::config::var("GEMINI_API_KEY").ok_or_else(no_key)?;
-
-        if api_key.trim().is_empty() {
-            bail!("GEMINI_API_KEY is set but empty");
-        }
 
         let http = reqwest::blocking::Client::builder()
             // 4K renders are genuinely slow; the default 30s times out under load.

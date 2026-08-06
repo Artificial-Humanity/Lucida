@@ -78,16 +78,29 @@ jobs:
           ./install.ps1
           & "$env:LUCIDA_INSTALL_DIR\lucida.exe" --version
 
+      # The pin is derived, not written down. A literal `v0.7.0` here made this
+      # job depend on that one release existing forever — and pruning old
+      # releases is already contemplated (v0.5.0 is incomplete and its deletion
+      # is an open decision), so the check would eventually have failed for a
+      # reason that had nothing to do with the installer. The second-newest
+      # release is by definition not the latest, which is the whole property
+      # under test.
       - name: A pinned version installs that version, not the latest
         if: matrix.os != 'windows-latest'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           LUCIDA_INSTALL_DIR: ${{ runner.temp }}/lucida-pinned
-          LUCIDA_VERSION: v0.7.0
         run: |
-          sh install.sh
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+                  --jq 'map(select(.draft == false)) | .[1].tag_name // ""')
+          if [ -z "$tag" ]; then
+            echo "only one release exists, so there is no older version to pin against"
+            exit 0
+          fi
+          LUCIDA_VERSION="$tag" sh install.sh
           got=$("$LUCIDA_INSTALL_DIR/lucida" --version)
+          want="lucida ${tag#v}"
           case "$got" in
-            "lucida 0.7.0") echo "ok: $got" ;;
-            *) echo "LUCIDA_VERSION was ignored: got $got"; exit 1 ;;
+            "$want") echo "ok: pinned $tag and got \"$got\", not the latest" ;;
+            *) echo "LUCIDA_VERSION was ignored: wanted \"$want\", got \"$got\""; exit 1 ;;
           esac
