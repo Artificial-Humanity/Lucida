@@ -135,21 +135,28 @@ fn provider_summary() -> String {
             // The provider's own default, not an empty string: capabilities can
             // depend on the model, and BFL with no model reports no editing.
             let caps = capabilities_for(*backend, backend.default_model());
-            let mut notes: Vec<&str> = Vec::new();
+            let mut notes: Vec<String> = Vec::new();
             if caps.seed {
-                notes.push("seed");
+                notes.push("seed".into());
             }
             if caps.negative_prompt {
-                notes.push("negative prompt");
+                notes.push("negative prompt".into());
             }
             if caps.references {
-                notes.push("editing");
+                notes.push("editing".into());
             }
             if caps.steps {
-                notes.push("steps/guidance");
+                notes.push("steps/guidance".into());
             }
             if !caps.size {
-                notes.push("NO size control");
+                notes.push("NO size control".into());
+            }
+            // Masking carries its kind, because the kind is what decides between
+            // the providers offering it — and because the tagline printed right
+            // beside this had openai as "the ONLY provider that can mask" for a
+            // release after the local lane started masking better.
+            if caps.mask.accepted() {
+                notes.push(format!("masks, {}", caps.mask.kind()));
             }
             format!(
                 "- {}{}: {} [{}] Output carries: {}.",
@@ -176,11 +183,7 @@ fn providers_where(predicate: fn(&crate::provider::Capabilities) -> bool) -> Str
         .filter(|b| predicate(&capabilities_for(**b, b.default_model())))
         .map(|b| b.name())
         .collect();
-    match names.split_last() {
-        None => "no providers".to_string(),
-        Some((last, [])) => (*last).to_string(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-    }
+    crate::provider::join_and(&names)
 }
 
 fn image_schema() -> Value {
@@ -197,11 +200,12 @@ fn image_schema() -> Value {
              drop. Call image_providers for live capabilities and which are \
              actually reachable.\n\n\
              Pass reference_images to edit an existing picture ({}); pass mask as \
-             well to concentrate the change on part of one ({}, advisory).",
+             well to concentrate the change on part of one ({}, and what that \
+             guarantees differs per provider — see the mask parameter).",
             Backend::ALL.len(),
             provider_summary(),
             providers_where(|c| c.references),
-            providers_where(|c| c.mask)
+            providers_where(|c| c.mask.accepted())
         ),
         "inputSchema": {
             "type": "object",
@@ -270,14 +274,17 @@ fn image_schema() -> Value {
                 },
                 "mask": {
                     "type": "string",
+                    // Both the provider list and the semantics are generated. The
+                    // semantics used to be a hand-written "ADVISORY, not binding"
+                    // beside a computed list, which sent agents to re-composite a
+                    // render that had already come back pixel-exact.
                     "description": format!(
                         "Path to a PNG concentrating an edit on part of the image: \
                          its TRANSPARENT pixels are what changes. Supported by {}, \
-                         and requires reference_images. ADVISORY, not binding — \
-                         measured at about twice the change inside the mask as \
-                         outside, with the rest of the picture regenerated too. \
-                         Composite over the original if untouched pixels matter.",
-                        providers_where(|c| c.mask)
+                         and requires reference_images. What it guarantees depends \
+                         on the provider. {}",
+                        providers_where(|c| c.mask.accepted()),
+                        crate::provider::mask_semantics()
                     )
                 },
                 "reference_images": {
@@ -597,7 +604,7 @@ fn describe_providers() -> String {
             caps.negative_prompt,
             caps.references,
             caps.size,
-            if caps.mask { "accepted (advisory)" } else { "false" },
+            caps.mask.describe(),
             caps.workflow,
             caps.steps,
             caps.guidance,
@@ -663,6 +670,55 @@ fn check_video(args: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tagline may say why to pick a provider. It may not claim a capability
+    /// only one provider has, because that is a fact about the *set*, and the set
+    /// is what changes.
+    ///
+    /// openai's read "the ONLY provider that can mask an edit to part of an
+    /// image" — the reason the provider was added at all, and false from the
+    /// release where the local lane learned to inpaint. `provider_summary` states
+    /// which providers mask and what their masks mean immediately beside the
+    /// tagline, computed from `MaskSupport`, so an exclusivity claim here can
+    /// only ever contradict the line it sits on.
+    #[test]
+    fn no_tagline_claims_masking_is_exclusive() {
+        for backend in Backend::ALL {
+            let tagline = capabilities_for(*backend, backend.default_model())
+                .tagline
+                .to_lowercase();
+            assert!(
+                !(tagline.contains("mask") && tagline.contains("only")),
+                "{}'s tagline claims exclusive masking — which providers mask is \
+                 generated from MaskSupport, and that set has already changed once",
+                backend.name()
+            );
+        }
+    }
+
+    /// Masking appears in the generated note list, so the summary answers "can
+    /// this provider mask, and does the mask bind" without any tagline having to.
+    #[test]
+    fn the_summary_states_each_masking_providers_kind() {
+        let summary = provider_summary();
+        for backend in Backend::ALL {
+            let caps = capabilities_for(*backend, backend.default_model());
+            let line = summary
+                .lines()
+                .find(|l| l.starts_with(&format!("- {}", backend.name())))
+                .unwrap_or_else(|| panic!("{} is missing from the summary", backend.name()));
+
+            assert_eq!(
+                line.contains("masks"),
+                caps.mask.accepted(),
+                "the summary disagrees with {}'s capabilities: {line}",
+                backend.name()
+            );
+            if caps.mask.accepted() {
+                assert!(line.contains(caps.mask.kind()), "{line}");
+            }
+        }
+    }
 
     /// The schema must not re-acquire a hard enum on a parameter whose legal
     /// values differ per provider — that is exactly the lie this design removes.

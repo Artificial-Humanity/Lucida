@@ -258,6 +258,141 @@ impl Provenance {
     }
 }
 
+/// Whether a provider takes a mask, and whether the mask is a promise.
+///
+/// This was a `bool` until the review after v0.9.0, and that review is the whole
+/// argument for the type. Both masking providers were `mask: true`, so the
+/// difference between them — one concentrates a change, the other guarantees the
+/// rest of the picture survives — could only live in prose. It lived in prose on
+/// seven surfaces: the `--mask` help, `lucida models`, two MCP descriptions, the
+/// `image_providers` probe, this module's own refusal text, and the shipped
+/// skill. When the local lane learned to bind, exactly one of the seven was
+/// updated, and the probe an agent is told to believe was among the six that
+/// were not.
+///
+/// So the distinction is a value now, and every surface reporting it reads
+/// [`Self::describe`] or [`mask_semantics`]. The same move [`Provenance`] made,
+/// for the same reason: a capability that varies has to be a variant, or the
+/// variation ends up in sentences nobody updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskSupport {
+    /// No mask at all.
+    No,
+    /// Accepted, and it concentrates the change without confining it.
+    ///
+    /// Measured on `gpt-image-1.5`: asking for a change inside a lower-right box
+    /// moved 58/255 inside it and 29/255 outside — twice the change where it was
+    /// asked for, and the rest of the picture regenerated anyway, losing an
+    /// object nowhere near the mask. `gpt-image-2` concentrates 4.5x rather than
+    /// 2x, which is better and still not a guarantee.
+    Advisory,
+    /// Accepted, and pixels outside it come back unchanged.
+    ///
+    /// Only reachable where Lucida builds the render graph itself, and not for
+    /// free even there: conditioning through `InpaintModelConditioning` alone is
+    /// merely advisory, measured at 23.8/255 outside the mask. Compositing the
+    /// render back through the same mask takes the outside to **0.00/255**, mean
+    /// and max, through the release binary.
+    Binding,
+}
+
+impl MaskSupport {
+    /// Whether a mask can be passed at all.
+    pub fn accepted(self) -> bool {
+        !matches!(self, Self::No)
+    }
+
+    /// The adjective, for prose supplying its own sentence.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::No => "not accepted",
+            Self::Advisory => "advisory",
+            Self::Binding => "binding",
+        }
+    }
+
+    /// What the caller has to do about it, which is the part that differs.
+    pub fn guarantee(self) -> &'static str {
+        match self {
+            Self::No => "no mask can be passed",
+            Self::Advisory => {
+                "the change is concentrated but not confined, and the rest of the \
+                 picture is regenerated too — composite over the original yourself \
+                 if untouched pixels matter"
+            }
+            Self::Binding => {
+                "Lucida composites the render back through the mask, so pixels \
+                 outside it come back unchanged — measured at 0.00/255, which \
+                 leaves nothing for the caller to composite"
+            }
+        }
+    }
+
+    /// One line for a capability listing.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Advisory => "accepted, advisory — the change is concentrated, not confined",
+            Self::Binding => "accepted, binding — pixels outside it come back unchanged",
+        }
+    }
+}
+
+/// The providers whose mask means a given thing.
+pub fn mask_providers(kind: MaskSupport) -> Vec<&'static str> {
+    Backend::ALL
+        .iter()
+        .filter(|b| capabilities_for(**b, b.default_model()).mask == kind)
+        .map(|b| b.name())
+        .collect()
+}
+
+/// Every provider that takes a mask, the ones that guarantee something first.
+///
+/// Ordered rather than alphabetical because this list is read as a remedy, and
+/// the provider whose mask actually binds is the better answer to "where can I
+/// mask instead".
+pub fn mask_accepting_providers() -> Vec<&'static str> {
+    let mut names = mask_providers(MaskSupport::Binding);
+    names.extend(mask_providers(MaskSupport::Advisory));
+    names
+}
+
+/// Masking across providers, in generated sentences.
+///
+/// The paragraph every agent-facing surface needs, and the reason it is computed:
+/// each of those surfaces already generated its *provider list* while
+/// hand-writing the word "advisory" beside it, so the list stayed true through
+/// two new providers and the semantics went wrong the first time they forked.
+pub fn mask_semantics() -> String {
+    let mut parts = Vec::new();
+    for kind in [MaskSupport::Binding, MaskSupport::Advisory] {
+        let names = mask_providers(kind);
+        if !names.is_empty() {
+            parts.push(format!(
+                "On {} the mask is {}: {}",
+                join_and(&names),
+                kind.kind(),
+                kind.guarantee()
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        return "No provider currently accepts a mask.".to_string();
+    }
+    format!("{}.", parts.join(". "))
+}
+
+/// `a`, `a and b`, `a, b and c` — the form a sentence needs rather than a table.
+pub fn join_and(names: &[&str]) -> String {
+    match names.split_last() {
+        None => "no providers".to_string(),
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// What a provider can actually be asked for.
 ///
 /// The point of publishing this is `check`: a parameter the provider cannot
@@ -289,19 +424,14 @@ pub struct Capabilities {
     pub seed: bool,
     pub negative_prompt: bool,
     pub references: bool,
-    /// Whether the provider *accepts* a mask naming where to concentrate an edit.
+    /// Whether the provider accepts a mask naming where to concentrate an edit,
+    /// and what that mask guarantees.
     ///
-    /// Deliberately not "restricts an edit to part of the image", which is what
-    /// this said until it was measured. On `gpt-image-1.5` a mask is **advisory**:
-    /// asking for a change in a lower-right box produced a mean difference of
-    /// 58/255 inside it and 29/255 outside — twice the change where asked for,
-    /// and the rest of the picture regenerated anyway, losing an object that was
-    /// nowhere near the mask.
-    ///
-    /// So this is a real capability and a weaker one than the name suggests.
-    /// Anyone needing pixels outside the mask preserved has to composite the
-    /// result back over the original themselves.
-    pub mask: bool,
+    /// Deliberately not a `bool`, which is what it was while the answer was
+    /// "openai, and it is advisory". Two providers mask now and they mean
+    /// different things by it — see [`MaskSupport`], which is also where the
+    /// measurements live.
+    pub mask: MaskSupport,
     /// Whether the provider can render a caller-supplied workflow.
     pub workflow: bool,
     pub steps: bool,
@@ -383,14 +513,17 @@ impl Capabilities {
         }
 
         if req.mask.is_some() {
-            if !self.mask {
+            if !self.mask.accepted() {
+                // Both halves generated. The hand-written version of this named
+                // only `openai` and called every mask advisory, which by v0.9.0
+                // sent people away from the one provider whose mask binds.
                 bail!(
                     "`{me}` does not accept a mask, so `--mask` cannot be \
                      honoured.\n\n\
-                     Use the `openai` provider, which does — though note that even \
-                     there a mask is advisory: it concentrates the change without \
-                     guaranteeing the rest of the picture survives. Measured at \
-                     roughly twice the change inside the mask as outside."
+                     Use one of: {}. What a mask guarantees differs between them, \
+                     and that difference is usually the reason to prefer one:\n\n{}",
+                    join_and(&mask_accepting_providers()),
+                    mask_semantics()
                 );
             }
             if req.references.is_empty() {
@@ -724,6 +857,69 @@ mod tests {
         );
         // An alias still resolves to its target, whatever the caller typed.
         assert_eq!(crate::bfl::resolve_model("FLUX"), crate::bfl::resolve_model("flux"));
+    }
+
+    /// The generated mask paragraph has to cover every provider that masks, and
+    /// name the kind for each — that is the whole reason it is generated.
+    ///
+    /// What this would have caught: after v0.9.0 the local lane bound its mask
+    /// and six of the seven surfaces that describe masking still said
+    /// "advisory", because each of them generated the provider *list* beside a
+    /// hand-written semantics claim. A provider added with a mask now appears
+    /// here automatically, and one added with the wrong kind fails the openai
+    /// pair test.
+    #[test]
+    fn the_mask_paragraph_covers_every_masking_provider_and_names_its_kind() {
+        let text = mask_semantics();
+
+        for backend in Backend::ALL {
+            let caps = capabilities_for(*backend, backend.default_model());
+            if caps.mask.accepted() {
+                assert!(
+                    text.contains(backend.name()),
+                    "{} masks but is missing from the generated paragraph: {text}",
+                    backend.name()
+                );
+                assert!(text.contains(caps.mask.kind()), "{text}");
+            }
+        }
+
+        // The remedy order is load-bearing: a caller sent away from a provider
+        // that cannot mask should be pointed first at the one whose mask is a
+        // guarantee, which is the reason to prefer it.
+        let accepting = mask_accepting_providers();
+        assert_eq!(accepting.first(), Some(&"comfyui"), "{accepting:?}");
+    }
+
+    /// The refusal has to name a way forward, and — since v0.9.0 — the right one.
+    ///
+    /// The hand-written version named `openai` and called every mask advisory,
+    /// so it sent people away from the only provider whose mask guarantees
+    /// anything. Both halves are computed now.
+    #[test]
+    fn refusing_a_mask_names_the_provider_whose_mask_binds() {
+        let caps = capabilities_for(Backend::Google, "");
+        let req = ImageRequest {
+            mask: Some("mask.png".into()),
+            ..Default::default()
+        };
+
+        let error = caps.check(&req).unwrap_err().to_string();
+        assert!(error.contains("comfyui"), "{error}");
+        assert!(error.contains("binding"), "{error}");
+    }
+
+    /// A mask with nothing to apply it to is refused before the capability
+    /// question, since "which provider" is not the problem there.
+    #[test]
+    fn a_mask_without_a_reference_image_says_so() {
+        let caps = capabilities_for(Backend::OpenAi, "gpt-image-2");
+        let req = ImageRequest {
+            mask: Some("mask.png".into()),
+            ..Default::default()
+        };
+        let error = caps.check(&req).unwrap_err().to_string();
+        assert!(error.contains("no image"), "{error}");
     }
 
     /// The ambiguity worth pinning down: local checkpoints and hosted endpoints

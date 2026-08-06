@@ -87,9 +87,13 @@ than hidden, so read what comes back rather than assuming the request was met.
   for `.png` may be written as `.jpg`. The CLI prints the real path on stdout
   alone, which is why `$(lucida generate …)` composes; the MCP result reports it
   too. Use what comes back when referencing the file afterwards.
-- **A mask, where supported, is advisory rather than binding.** Pixels outside
-  it may still change. If they must survive, composite the result back over the
-  original yourself.
+- **What a mask guarantees differs by provider, so read the capability report
+  before acting on one.** On some, the masked region is only where the change is
+  *concentrated*, and pixels outside it move as well; on others Lucida
+  guarantees they do not. Compositing the result back over the original is the
+  remedy in the first case and a way to degrade an exact render in the second —
+  so check rather than assume. The mask entry in the capability report states
+  which kind you have.
 - **A local render can take minutes and reports elapsed time while it works.**
   It has not hung.
 

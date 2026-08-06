@@ -118,6 +118,32 @@ mod tests {
         }
     }
 
+    /// The same rot in a different vocabulary — and the one the two bans above
+    /// could not see.
+    ///
+    /// v0.9.0 made one provider's mask binding, and this file went on calling
+    /// every mask advisory: a capability fact, stated in the file whose entire
+    /// design is to state none. The name ban missed it because the sentence
+    /// named no provider, and the count ban missed it because it counted
+    /// nothing. It shipped inside the binary, and an agent that believed it
+    /// would re-composite a render already measured pixel-exact.
+    ///
+    /// These two words are the only vocabulary for which kind of mask a provider
+    /// has, so their presence here means the answer has been written down
+    /// somewhere it cannot be kept current. It belongs in `image_providers` and
+    /// `lucida models`, both generated from `MaskSupport` itself.
+    #[test]
+    fn the_skill_states_no_capability_semantics() {
+        let lower = SKILL.to_lowercase();
+        for claim in ["advisory", "binding"] {
+            assert!(
+                !lower.contains(claim),
+                "the skill says `{claim}` — which kind of mask a provider has is a \
+                 capability fact, and it belongs in image_providers"
+            );
+        }
+    }
+
     /// `lucida skill` promises the bytes the repository holds, and that promise
     /// is only true if the checkout does not rewrite them.
     ///

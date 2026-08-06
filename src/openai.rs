@@ -27,7 +27,8 @@
 //! therefore be established by asking rather than by rendering.
 
 use crate::provider::{
-    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, Provenance,
+    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, MaskSupport,
+    Provenance,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -121,10 +122,17 @@ pub fn capabilities(model: &str) -> Capabilities {
 
     Capabilities {
         provider: "openai",
-        tagline: "gpt-image. Paid, seconds, and the ONLY provider that can mask an \
-                  edit to part of an image. No seed and no negative prompt at all; \
-                  gpt-image-2 takes free dimensions while the rest take three \
-                  fixed sizes.",
+        // The masking claim is gone from here on purpose. It read "the ONLY
+        // provider that can mask an edit to part of an image", which was the
+        // reason this provider was added and was false from v0.9.0 — while
+        // sitting in the one field whose doc comment says it lives beside the
+        // capabilities so that it stays true. Whether a provider masks, and what
+        // its mask means, is generated from `mask` below; a tagline says why
+        // someone would pick this provider over another that also does.
+        tagline: "gpt-image. Paid, seconds, and the fastest way to mask an edit — \
+                  no local server, no model download. No seed and no negative \
+                  prompt at all; gpt-image-2 takes free dimensions while the rest \
+                  take three fixed sizes.",
         aspect: if free {
             AspectSupport::Free {
                 multiple_of: PIXEL_GRID,
@@ -140,7 +148,11 @@ pub fn capabilities(model: &str) -> Capabilities {
         // Likewise "Unknown parameter: 'negative_prompt'".
         negative_prompt: false,
         references: true,
-        mask: true,
+        // Advisory on every model in the family, and the numbers differ only in
+        // degree: gpt-image-2 concentrates 4.5x, gpt-image-1.5 twice, and both
+        // regenerate the rest of the picture. Nothing here builds the graph, so
+        // there is no way to make it bind — see `comfy.rs` for the one that does.
+        mask: MaskSupport::Advisory,
         workflow: false,
         steps: false,
         guidance: false,
@@ -655,15 +667,18 @@ mod tests {
     /// is binding because Lucida builds that graph and composites the render
     /// back through the mask — measured at 0.00/255 outside it.
     ///
-    /// A third provider claiming a mask should have to think about which of the
-    /// two it is, which is what this failing would prompt.
+    /// It also used to ask that question in a message rather than in the type,
+    /// and the answer was carried in prose on seven surfaces while `mask` stayed
+    /// a `bool`. Six of them still said "advisory" a release after the local
+    /// lane began to bind. Now the kind *is* the capability, so this asserts the
+    /// variants and a third masking provider has to pick one.
     #[test]
     fn exactly_two_providers_mask_and_they_differ_in_kind() {
-        use crate::provider::{Backend, capabilities_for};
+        use crate::provider::{Backend, MaskSupport, capabilities_for, mask_providers};
 
         let masking: Vec<&str> = Backend::ALL
             .iter()
-            .filter(|b| capabilities_for(**b, b.default_model()).mask)
+            .filter(|b| capabilities_for(**b, b.default_model()).mask.accepted())
             .map(|b| b.name())
             .collect();
 
@@ -672,7 +687,10 @@ mod tests {
             vec!["comfyui", "openai"],
             "the set of masking providers changed; is the new one advisory or binding?"
         );
-        assert!(capabilities("gpt-image-1").mask);
+
+        assert_eq!(mask_providers(MaskSupport::Binding), vec!["comfyui"]);
+        assert_eq!(mask_providers(MaskSupport::Advisory), vec!["openai"]);
+        assert_eq!(capabilities("gpt-image-1").mask, MaskSupport::Advisory);
     }
 
     /// Both were measured as rejected rather than ignored, so declaring them

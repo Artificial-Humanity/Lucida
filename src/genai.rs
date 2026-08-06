@@ -6,7 +6,8 @@
 //! breaking 3.0 on the way.
 
 use crate::provider::{
-    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, Provenance,
+    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, MaskSupport,
+    Provenance,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -176,7 +177,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     // Veo takes one; the image models do not.
     negative_prompt: false,
     references: true,
-    mask: false,
+    mask: MaskSupport::No,
     workflow: false,
     steps: false,
     guidance: false,

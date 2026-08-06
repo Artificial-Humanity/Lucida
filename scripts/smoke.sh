@@ -175,6 +175,18 @@ case "$out" in
   *)                                     fail "unexpected --aspect output: $out" ;;
 esac
 
+# What a mask guarantees, out of the binary that shipped rather than out of a
+# unit test. v0.9.0 made one provider's mask binding and six of the seven
+# surfaces describing it went on saying "advisory" — including the probe an agent
+# is told to believe. Every one of those surfaces now reads the same enum, so
+# checking one through a fresh process checks the mechanism.
+out=$(env -u GEMINI_API_KEY "$BIN" generate "x" --mask m.png 2>&1 || true)
+case "$out" in
+  *comfyui*binding*) pass "a refused mask names the provider whose mask binds" ;;
+  *advisory*)        fail "the mask refusal offers only an advisory mask: $out" ;;
+  *)                 fail "unexpected --mask output: $out" ;;
+esac
+
 # --- a provider that is not there -----------------------------------------
 # The likeliest failure for the local lane by a wide margin, and it must name the
 # server and the variable rather than surfacing a raw connection error.

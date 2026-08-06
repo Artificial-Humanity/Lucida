@@ -24,7 +24,8 @@
 //!   is a new axis: until now a provider had one answer for everyone.
 
 use crate::provider::{
-    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, Provenance,
+    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, MaskSupport,
+    Provenance,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -97,7 +98,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         // Measured, not assumed: no FLUX endpoint takes one.
         negative_prompt: false,
         references: edits,
-        mask: false,
+        mask: MaskSupport::No,
         workflow: false,
         steps: tunable,
         guidance: tunable,

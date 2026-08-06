@@ -103,7 +103,14 @@ struct ImageOptions {
     workflow: Option<String>,
 
     /// Concentrate an edit on part of the image: a PNG whose TRANSPARENT pixels
-    /// are what changes. openai only, and advisory — the rest may still change.
+    /// are what changes. Not every provider takes one, and what it guarantees
+    /// differs — `lucida models --provider <name>` says which.
+    //
+    // Deliberately naming no provider and claiming no semantics. A clap help
+    // string must be a literal, so this is one of the hand-written surfaces that
+    // cannot be generated (2026-08-02 review §5.1) — and it said "openai only,
+    // and advisory" for a release after both halves stopped being true. A
+    // pointer at the generated answer is the one sentence that stays correct.
     #[arg(long)]
     mask: Option<String>,
 
@@ -863,10 +870,7 @@ fn list_models(backend: Backend) -> Result<()> {
     println!("  negative prompt {}", yes_no(caps.negative_prompt));
     println!("  reference image {}", yes_no(caps.references));
     println!("  own workflow    {}", yes_no(caps.workflow));
-    println!(
-        "  mask            {}",
-        if caps.mask { "accepted (advisory)" } else { "no" }
-    );
+    println!("  mask            {}", caps.mask.describe());
     println!("  steps           {}", yes_no(caps.steps));
     println!("  guidance        {}", yes_no(caps.guidance));
     println!("  output carries  {}", caps.provenance.describe());
@@ -1110,6 +1114,58 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `--mask` help is the only mask surface that cannot be generated, so
+    /// it is the one that has to be guarded.
+    ///
+    /// A clap attribute takes a literal, which is why this string is
+    /// hand-maintained — and it is where "openai only, and advisory" survived a
+    /// release after both halves had stopped being true. Any provider name or
+    /// either semantics word here means a fact was copied out of `MaskSupport`
+    /// into a place nothing updates; the help may only point at the answer that
+    /// is generated.
+    ///
+    /// The banned names come from `Backend::ALL`, so a sixth provider is covered
+    /// the day it lands rather than the day someone remembers this test.
+    #[test]
+    fn the_mask_help_states_no_capability_fact() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let generate = command
+            .get_subcommands()
+            .find(|c| c.get_name() == "generate")
+            .expect("no `generate` subcommand");
+        let mask = generate
+            .get_arguments()
+            .find(|a| a.get_id() == "mask")
+            .expect("no `--mask` argument");
+        let help = mask
+            .get_help()
+            .expect("`--mask` has no help")
+            .to_string()
+            .to_lowercase();
+
+        for backend in Backend::ALL {
+            assert!(
+                !help.contains(backend.name()),
+                "the --mask help names `{}` — which providers mask is generated, \
+                 and a literal here cannot follow it",
+                backend.name()
+            );
+        }
+        for claim in ["advisory", "binding"] {
+            assert!(
+                !help.contains(claim),
+                "the --mask help says `{claim}` — the kind of mask a provider has \
+                 lives in MaskSupport, and every generated surface reads it"
+            );
+        }
+
+        // Saying what it does not contain is only useful alongside where the
+        // answer is — the same bargain the skill makes.
+        assert!(help.contains("lucida models"), "{help}");
+    }
 
     #[test]
     fn png_dimensions_come_from_the_ihdr_chunk() {

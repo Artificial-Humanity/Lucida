@@ -12,7 +12,8 @@
 //! it means a ComfyUI on another machine works exactly as well as a local one.
 
 use crate::provider::{
-    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, Provenance,
+    AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, MaskSupport,
+    Provenance,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -723,7 +724,11 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     seed: true,
     negative_prompt: true,
     references: true,
-    mask: true,
+    // The only binding mask anywhere here, and it is binding because Lucida
+    // builds this graph: `graph_for` composites the render back through the mask
+    // rather than trusting the sampler to stay inside it. Measured at 0.00/255
+    // outside the mask, against 23.8/255 from the inpaint conditioning alone.
+    mask: MaskSupport::Binding,
     workflow: true,
     steps: true,
     guidance: true,
