@@ -30,7 +30,9 @@
 //! sync. It also keeps the parser to a few lines and adds no dependency, which
 //! is the same reasoning that kept a JSON-RPC crate out of `mcp.rs`.
 
+use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -253,6 +255,18 @@ pub fn search_paths() -> Vec<PathBuf> {
         );
     }
 
+    // Same bargain on Windows, where `%APPDATA%` is the native answer. It is a
+    // separate variable rather than a subdirectory of the profile, so it has to
+    // be read even though `home()` now resolves — an `XDG_CONFIG_HOME` that
+    // happens to be set on Windows would otherwise be the only entry.
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        paths.push(appdata.join("lucida").join("config.env"));
+    }
+
     paths
 }
 
@@ -261,10 +275,31 @@ pub fn preferred_path() -> Option<PathBuf> {
     search_paths().into_iter().next()
 }
 
+/// `HOME`, or `USERPROFILE` where there is none — which is stock Windows.
+///
+/// This read `HOME` alone until 2026-08-06, while `update.rs` and `setup.rs` both
+/// read the pair. On PowerShell, cmd, or a GUI-launched client there is no `HOME`
+/// and no `XDG_CONFIG_HOME`, so [`search_paths`] came back empty: no file was
+/// ever found, and `config --init` and `--set` had nowhere to write. The case
+/// that failed is the one this module exists for — a client that inherits no
+/// shell and can therefore only read a file.
+///
+/// It stayed invisible because the Windows CI job runs `scripts/smoke.sh` under
+/// bash, and git-bash *sets* `HOME`. So the check that "the config file is read
+/// with no environment" passed in an environment no native Windows user has.
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
+    home_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+/// Split from [`home`] so the Windows case is testable on a machine that is not
+/// Windows — which is where this needed testing, given that the platform's own
+/// CI lane could not see the bug.
+fn home_from(home: Option<OsString>, user_profile: Option<OsString>) -> Option<PathBuf> {
+    [home, user_profile]
+        .into_iter()
+        .flatten()
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .find(|p| !p.as_os_str().is_empty())
 }
 
 /// Parses `KEY=value` lines.
@@ -333,6 +368,78 @@ fn warn_if_readable_by_others(path: &Path) {
 
 #[cfg(not(unix))]
 fn warn_if_readable_by_others(_path: &Path) {}
+
+/// Replaces a file's contents without ever leaving it truncated.
+///
+/// Stage beside the target, then rename — the house pattern, already earning its
+/// keep in `update.rs`'s `install_over`. A rename within one directory either
+/// happens or does not, so a crash, a signal or a full disk mid-write leaves the
+/// original exactly as it was, where a truncating `fs::write` leaves a file that
+/// is half a config and wholly unparseable.
+///
+/// Worth the four extra lines because of *whose* files these are. `config.env`
+/// may hold the only copy of an API key, and the desktop app's config holds other
+/// servers' registrations — neither is a file Lucida created, and both are ones a
+/// caller would have to reconstruct by hand.
+///
+/// Staged in the target's own directory rather than a temp dir, since a rename
+/// across filesystems is a copy-and-delete and hands the guarantee straight back.
+///
+/// `private` restricts the staged file *before* the rename, which is the reason
+/// this takes the flag rather than leaving it to the caller: a file chmodded
+/// after the write is world-readable for the moment it first holds a secret.
+pub fn write_replacing(path: &Path, body: &str, private: bool) -> Result<()> {
+    let staged = staging_path(path);
+
+    let staged_then = |result: Result<()>| -> Result<()> {
+        if result.is_err() {
+            // A staged file left behind is litter in someone's config directory,
+            // and one holding a key is worse than litter.
+            let _ = std::fs::remove_file(&staged);
+        }
+        result
+    };
+
+    staged_then(
+        std::fs::write(&staged, body).with_context(|| format!("writing {}", staged.display())),
+    )?;
+
+    if private {
+        staged_then(restrict_to_owner(&staged))?;
+    }
+
+    staged_then(
+        std::fs::rename(&staged, path)
+            .with_context(|| format!("replacing {} with {}", path.display(), staged.display())),
+    )
+}
+
+/// Where the replacement is written before it takes the target's name.
+///
+/// Dot-prefixed so it does not show up in a directory listing between the write
+/// and the rename, and carrying the pid so two Lucidas running at once cannot
+/// stage over each other.
+fn staging_path(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!(".{name}.lucida-{}", std::process::id()))
+}
+
+/// Restricts a file to its owner.
+///
+/// Done rather than left to the umask because these files are intended to hold an
+/// API key, and the default umask on most systems leaves them readable by the
+/// whole group.
+#[cfg(unix)]
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub fn restrict_to_owner(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 /// A starter file, written by `lucida config --init`.
 pub fn template() -> String {
@@ -460,6 +567,105 @@ mod tests {
     #[test]
     fn the_template_parses_to_nothing() {
         assert!(parse(&template()).is_empty());
+    }
+
+    /// The replacement lands whole, and nothing is left beside it.
+    ///
+    /// The property that matters is the one a test cannot easily provoke — an
+    /// interrupted write leaving the original intact — so what is checked here is
+    /// the mechanism that provides it: the target is never the file being written
+    /// to, and the staging file does not outlive the rename.
+    #[test]
+    fn a_replacement_is_staged_and_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("lucida-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.env");
+
+        std::fs::write(&path, "GEMINI_API_KEY=old\n").unwrap();
+        write_replacing(&path, "GEMINI_API_KEY=new\n", true).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "GEMINI_API_KEY=new\n"
+        );
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(left, vec!["config.env"], "a staging file survived: {left:?}");
+
+        // The staging path is in the target's own directory — a rename across
+        // filesystems is a copy, which would give the guarantee back.
+        assert_eq!(staging_path(&path).parent(), path.parent());
+        assert_ne!(staging_path(&path), path);
+
+        // Private means private by the time the file has a name anyone reads,
+        // rather than a chmod that follows the write of a key.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "mode {:o}", mode & 0o777);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The one-line bug that made the config file unreachable on the platform
+    /// that needs it most.
+    ///
+    /// Stock Windows sets `USERPROFILE` and no `HOME`, so reading only `HOME`
+    /// left `search_paths()` empty — and an empty search list is not an error
+    /// anywhere, it is simply a file that is never found. Pinned as a pure
+    /// function because the Windows CI lane runs under git-bash, which sets
+    /// `HOME` and therefore cannot represent this at all.
+    #[test]
+    fn the_home_directory_falls_back_to_the_windows_spelling() {
+        let home = || Some(OsString::from("/home/someone"));
+        let profile = || Some(OsString::from(r"C:\Users\someone"));
+
+        // Unix: HOME, as before.
+        assert_eq!(
+            home_from(home(), None),
+            Some(PathBuf::from("/home/someone"))
+        );
+        // Stock Windows: no HOME at all.
+        assert_eq!(
+            home_from(None, profile()),
+            Some(PathBuf::from(r"C:\Users\someone"))
+        );
+        // Both (git-bash, which is why CI never saw the gap): HOME still wins,
+        // so this changes nothing where it already worked.
+        assert_eq!(
+            home_from(home(), profile()),
+            Some(PathBuf::from("/home/someone"))
+        );
+        // An exported-but-empty HOME falls through rather than resolving to it —
+        // the same reading of "empty means absent" that `var` applies.
+        assert_eq!(
+            home_from(Some(OsString::new()), profile()),
+            Some(PathBuf::from(r"C:\Users\someone"))
+        );
+        assert_eq!(home_from(None, None), None);
+        assert_eq!(home_from(Some(OsString::new()), None), None);
+    }
+
+    /// Whatever the platform, there is somewhere to put a key.
+    ///
+    /// The failure this guards is not a wrong path but an *empty list*: no file
+    /// found, nowhere for `config --init` to write, and `preferred_path()`
+    /// returning `None` so the messages that tell someone where to put a key
+    /// silently drop that half.
+    #[test]
+    fn some_config_location_is_always_offered() {
+        // Uses the real environment deliberately: on any machine CI runs on,
+        // at least one of HOME / USERPROFILE / XDG_CONFIG_HOME / APPDATA is set.
+        assert!(
+            preferred_path().is_some(),
+            "no config location on {}: search_paths() is empty",
+            std::env::consts::OS
+        );
     }
 
     #[test]

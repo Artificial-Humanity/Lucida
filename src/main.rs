@@ -622,8 +622,7 @@ fn remove_config(name: &str) -> Result<()> {
     if !body.is_empty() {
         body.push('\n');
     }
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    restrict_permissions(&path)?;
+    config::write_replacing(&path, &body, true)?;
 
     eprintln!("Removed {name} from {}.", path.display());
 
@@ -702,7 +701,10 @@ fn set_config(name: &str) -> Result<()> {
     }
 
     let path = config::preferred_path()
-        .context("could not determine a config location: neither HOME nor XDG_CONFIG_HOME is set")?;
+        .context(
+            "could not determine a config location: none of XDG_CONFIG_HOME, HOME or \
+             USERPROFILE is set",
+        )?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -721,8 +723,7 @@ fn set_config(name: &str) -> Result<()> {
 
     let mut body = lines.join("\n");
     body.push('\n');
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    restrict_permissions(&path)?;
+    config::write_replacing(&path, &body, true)?;
 
     // The value is never echoed — the whole point of taking it on stdin.
     eprintln!(
@@ -747,7 +748,10 @@ fn set_config(name: &str) -> Result<()> {
 
 fn init_config() -> Result<()> {
     let path = config::preferred_path()
-        .context("could not determine a config location: neither HOME nor XDG_CONFIG_HOME is set")?;
+        .context(
+            "could not determine a config location: none of XDG_CONFIG_HOME, HOME or \
+             USERPROFILE is set",
+        )?;
 
     if path.exists() {
         // Never clobber a file that may hold the only copy of a key.
@@ -761,9 +765,7 @@ fn init_config() -> Result<()> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    std::fs::write(&path, config::template())
-        .with_context(|| format!("writing {}", path.display()))?;
-    restrict_permissions(&path)?;
+    config::write_replacing(&path, &config::template(), true)?;
 
     eprintln!(
         "Wrote {}.\n\nEvery line is commented out, so nothing changed yet. \
@@ -771,23 +773,6 @@ fn init_config() -> Result<()> {
         path.display()
     );
     println!("{}", path.display());
-    Ok(())
-}
-
-/// Creates the file readable only by its owner.
-///
-/// Done at creation rather than left to the umask, because the file is intended
-/// to hold an API key and the default umask on most systems leaves it readable
-/// by the whole group.
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restricting permissions on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 

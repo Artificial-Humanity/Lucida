@@ -256,6 +256,24 @@ fn merge_desktop_config(path: &Path, exe: &Path) -> Result<()> {
         bail!("{} does not contain a JSON object", path.display());
     }
 
+    // Indexing auto-creates objects through `Null`, which is what makes the
+    // missing-`mcpServers` case need no handling at all — but serde_json's
+    // `IndexMut` *panics* on a key that is present and not an object. So
+    // `"mcpServers": []` in someone's config would abort the process, from inside
+    // the one function whose stated promise is to treat that file gently. The
+    // not-an-object case above already gets a sentence; this deserves the same.
+    match config.get("mcpServers") {
+        None | Some(Value::Null) => {}
+        Some(value) if value.is_object() => {}
+        Some(other) => bail!(
+            "{}'s `mcpServers` is {} rather than an object, so Lucida cannot be \
+             added to it without discarding what is there.\n\n\
+             Correct or remove that key and run `lucida setup` again.",
+            path.display(),
+            json_kind(other)
+        ),
+    }
+
     config["mcpServers"]["lucida"] = json!({
         "command": exe.to_string_lossy(),
         "args": ["mcp"],
@@ -263,8 +281,25 @@ fn merge_desktop_config(path: &Path, exe: &Path) -> Result<()> {
 
     let mut body = serde_json::to_string_pretty(&config)?;
     body.push('\n');
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+
+    // Staged and renamed rather than truncated in place. This file is not
+    // Lucida's — it holds other servers' registrations and unrelated preferences
+    // — and a crash or a full disk partway through a truncating write leaves
+    // someone with none of it. Not private: it is the app's own config, and
+    // nothing Lucida writes into it is a secret.
+    crate::config::write_replacing(path, &body, false)
+}
+
+/// What a JSON value is, for a message about the wrong kind of thing being there.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
 fn claude_code_has_lucida(exe: &Path) -> bool {
@@ -319,12 +354,66 @@ fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Finds `program` on `PATH`, under any name the platform considers executable.
+///
+/// The bare name alone was enough until Windows became a release platform. There
+/// `claude` on `PATH` is `claude.exe` or `claude.cmd` depending on how it was
+/// installed, the extensionless file does not exist, and the whole of `setup`
+/// then failed quietly: the Claude Code steps and the skill write were skipped,
+/// and a machine without the desktop app reported "found neither Claude Code nor
+/// the Claude app" while `claude` ran fine in the same terminal.
 fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    // Only Windows makes the extension part of finding a program; elsewhere the
+    // name on PATH is the name of the file.
+    let pathext = cfg!(target_os = "windows").then(|| std::env::var("PATHEXT").unwrap_or_default());
+    let names = candidate_names(program, pathext.as_deref());
+
     std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(program);
-        candidate.is_file().then_some(candidate)
+        names
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.is_file())
     })
+}
+
+/// The filenames `program` could have, given `PATHEXT`.
+///
+/// `None` means a platform that does not use executable extensions. A pure
+/// function because that is what makes the Windows answer checkable from Linux —
+/// and this is a case where the platform's own CI lane is no help: it runs the
+/// smoke script under git-bash, which resolves `claude` the POSIX way.
+///
+/// `PATHEXT` rather than a hardcoded pair, because it is the list the shell
+/// itself consults, and a machine that has added `.ps1` to it means that. The
+/// conventional four are a fallback for an unset or empty value, since taking it
+/// literally would reproduce the bug this fixes.
+fn candidate_names(program: &str, pathext: Option<&str>) -> Vec<String> {
+    let Some(pathext) = pathext else {
+        return vec![program.to_string()];
+    };
+
+    let mut extensions: Vec<String> = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|ext| !ext.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if extensions.is_empty() {
+        extensions = [".com", ".exe", ".bat", ".cmd"]
+            .iter()
+            .map(|ext| (*ext).to_string())
+            .collect();
+    }
+
+    // The bare name first: a PATH entry can hold an extensionless shim, and a
+    // file that is there is a better answer than one that might be.
+    let mut names = vec![program.to_string()];
+    names.extend(extensions.into_iter().map(|ext| match ext.strip_prefix('.') {
+        Some(bare) => format!("{program}.{bare}"),
+        None => format!("{program}.{ext}"),
+    }));
+    names
 }
 
 /// Paths are printed with `~` because the full ones are long enough to wrap,
@@ -423,6 +512,104 @@ mod tests {
         assert!(after["preferences"].is_object());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An `mcpServers` of the wrong kind is an error, not a panic.
+    ///
+    /// `config["mcpServers"]["lucida"] = …` reads as total and is not:
+    /// serde_json's `IndexMut` creates objects through `Null` but panics on a
+    /// value that is present and not an object. A config holding
+    /// `"mcpServers": []` — which nothing prevents — would therefore abort
+    /// `lucida setup` with a backtrace, from the function documented as treating
+    /// that file gently.
+    #[test]
+    fn a_malformed_server_list_is_refused_rather_than_panicking() {
+        let dir = std::env::temp_dir().join(format!("lucida-setup-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for (label, body) in [
+            ("an array", r#"{"mcpServers":[]}"#),
+            ("a string", r#"{"mcpServers":"none"}"#),
+            ("a number", r#"{"mcpServers":3}"#),
+        ] {
+            let path = dir.join("claude_desktop_config.json");
+            std::fs::write(&path, body).unwrap();
+
+            let error = merge_desktop_config(&path, Path::new("/opt/lucida"))
+                .expect_err(&format!("{label} was accepted"))
+                .to_string();
+            assert!(error.contains(label), "{error}");
+            assert!(error.contains("lucida setup"), "must say what to do: {error}");
+
+            // And the file it refused to understand is left exactly as it was.
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        }
+
+        // `null` is not malformed — it is the shape indexing was relied on to
+        // fill in, and it still is.
+        let path = dir.join("claude_desktop_config.json");
+        std::fs::write(&path, r#"{"mcpServers":null}"#).unwrap();
+        merge_desktop_config(&path, Path::new("/opt/lucida")).unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["mcpServers"]["lucida"]["command"], "/opt/lucida");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The rewrite goes through a staged file, and does not leave it behind.
+    ///
+    /// A rename either happens or does not, which is the point — but a staging
+    /// file left in someone's config directory is its own small mess, and this is
+    /// the cheap half of the guarantee to check.
+    #[test]
+    fn merging_leaves_no_staging_file_behind() {
+        let dir = std::env::temp_dir().join(format!("lucida-setup-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude_desktop_config.json");
+        std::fs::write(&path, r#"{"preferences":{"theme":"dark"}}"#).unwrap();
+
+        merge_desktop_config(&path, Path::new("/opt/lucida")).unwrap();
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(left, vec!["claude_desktop_config.json"], "{left:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What `setup` looks for, pinned per platform on any platform.
+    ///
+    /// The bug: `claude` on a Windows `PATH` is `claude.exe` or `claude.cmd`, the
+    /// bare name is not a file, and so detection failed while `claude` worked in
+    /// the same terminal — silently, because an undetected client contributes no
+    /// steps by design.
+    #[test]
+    fn a_program_is_looked_for_under_every_executable_extension() {
+        // Unix: one name, the one asked for.
+        assert_eq!(candidate_names("claude", None), vec!["claude"]);
+
+        // Windows, with a real PATHEXT: the shell's own list, case-folded,
+        // because the files on disk are lowercase.
+        let names = candidate_names("claude", Some(".COM;.EXE;.BAT;.CMD;.VBS"));
+        assert_eq!(names.first().unwrap(), "claude", "the bare name comes first");
+        for expected in ["claude.exe", "claude.cmd", "claude.bat", "claude.vbs"] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+
+        // An unset or empty PATHEXT falls back rather than reproducing the bug:
+        // an empty extension list would leave only the bare name again.
+        for empty in ["", "   ", ";;"] {
+            let names = candidate_names("claude", Some(empty));
+            assert!(names.contains(&"claude.exe".to_string()), "{names:?}");
+            assert!(names.contains(&"claude.cmd".to_string()), "{names:?}");
+        }
+
+        // A list written without the leading dots still produces one dot each.
+        let names = candidate_names("claude", Some("EXE;CMD"));
+        assert!(names.contains(&"claude.exe".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("..")), "{names:?}");
     }
 
     #[test]
