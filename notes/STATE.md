@@ -19,7 +19,8 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
 - **Five image providers + Veo video, all verified live** (google, comfyui, bfl, stability,
   openai). Wire behaviour is pinned by the recorded-response tests; as of 2026-08-06:
   **138 tests** passing (125 at the review close), clippy clean at `-D warnings`, all smoke
-  checks green.
+  checks green — and **CI green on all three platforms at `aa55e95`**, which is what puts the
+  Windows fixes below on a real Windows runner rather than on a pure-function test alone.
 - **The v0.6→v0.9 range was reviewed 2026-08-06 and every finding is now closed**
   (`83680b5`, `1c49c47`, `05e9aac` — see the pointer below for what each one was).
   The headline fix is structural: **whether a mask binds is a value, not prose.**
