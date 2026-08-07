@@ -4,34 +4,6 @@ Generate and edit images and video — as a CLI, or as an MCP server so coding
 agents can make their own assets. Images come from Google Gemini, a local
 ComfyUI, hosted FLUX, Stability AI or OpenAI; video comes from Veo.
 
-Named for the [camera lucida](https://en.wikipedia.org/wiki/Camera_lucida), the
-optical device that let artists trace what they saw onto paper.
-
-```console
-$ lucida generate "a minimalist e-ink reading icon, flat vector, single weight" \
-    --out public/icon.png --aspect 1:1
-
-$ lucida edit hero.png "replace the background with a warmer gradient"
-
-$ lucida generate "a brass astrolabe on dark slate" \
-    --provider comfyui --seed 12345 --negative "text, watermark"
-
-$ lucida video "a red maple leaf drifting down against white" --out clip.mp4
-
-$ lucida models --provider bfl
-```
-
-One static binary. No Python, no virtualenv, no dependency resolution at startup
-— which matters most in the MCP case, where the server is launched and killed
-constantly and any stray write to stdout corrupts the protocol.
-
-**What this file deliberately does not cover:** what each provider charges, how
-fast it is, which models it offers today, or what provenance marking its output
-carries. Those belong to the providers, they change without notice, and a copy
-of them here would be wrong before it was stale. `lucida models --provider
-<name>` asks the provider and prints the live answer; pricing and policy are
-worth reading from the provider directly.
-
 ## Install
 
 ```console
@@ -47,23 +19,15 @@ irm https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.ps
 That picks the binary for your platform, verifies its published checksum,
 installs it to `~/.local/bin` (or `%LOCALAPPDATA%\Programs\lucida`), and tells
 you if that directory is not on your PATH. `LUCIDA_INSTALL_DIR` chooses
-somewhere else; `LUCIDA_VERSION=v0.7.0` pins a version instead of taking the
+somewhere else; `LUCIDA_VERSION=v0.9.0` pins a version instead of taking the
 latest. Nothing needs a toolchain, and nothing needs sudo.
 
-**Reading a script before piping it into a shell is a good habit, and this one
-is written to reward it:**
+Or download it first and read it:
 
 ```console
 curl -fsSL https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.sh -o install.sh
 less install.sh && sh install.sh
 ```
-
-The specific hazard of `curl | sh` is not hypothetical: if the transfer drops
-halfway, your shell executes the half that arrived. [`install.sh`](install.sh)
-is therefore entirely function definitions with a single call on the last line,
-so a truncated copy defines a few functions and does nothing at all. It is
-checked that way rather than asserted — CI runs both installers against the live
-release on all three platforms.
 
 <details>
 <summary>Other ways in</summary>
@@ -91,16 +55,16 @@ Or from a clone: `cargo build --release`, binary at `target/release/lucida`.
 
 ```console
 $ lucida update
-Current version    0.6.0
-Available version  0.7.0
+Current version    0.9.0
+Available version  0.9.1
 
 A newer version is available. Would you like to update? [y/N]
 ```
 
 ```console
 $ lucida update
-Current version    0.6.0
-Available version  0.6.0
+Current version    0.9.1
+Available version  0.9.1
 
 You have the latest version of Lucida.
 ```
@@ -127,6 +91,45 @@ Lucida prints one line noting that a newer release exists — and installs
 nothing. Set `LUCIDA_NO_UPDATE_CHECK=1` to silence it. The check never runs in
 `mcp` mode or when output is not a terminal, so scripts, pipelines and agents
 see nothing and pay no network round trip.
+
+## Usage
+
+```console
+$ lucida generate "a minimalist e-ink reading icon, flat vector, single weight" \
+    --out public/icon.png --aspect 1:1
+
+$ lucida generate "abstract gradient mesh, deep indigo into amber" \
+    --out public/og-image.png --aspect 16:9 --size 1200
+
+$ lucida edit public/og-image.png "warm the background" --out public/og-warm.png
+
+$ lucida edit product.png "replace the label text" \
+    --mask label-area.png --provider comfyui
+
+$ lucida generate "a brass astrolabe on dark slate" \
+    --provider comfyui --seed 12345 --negative "text, watermark"
+
+$ lucida video "a red maple leaf drifting down against white" --out clip.mp4
+$ lucida check operations/xyz --out clip.mp4
+
+$ lucida models --provider comfyui
+
+$ lucida setup
+```
+
+One static binary. No Python, no virtualenv, no dependency resolution at startup
+— which matters most in the MCP case, where the server is launched and killed
+constantly and any stray write to stdout corrupts the protocol.
+
+**What this file deliberately does not cover:** what each provider charges, how
+fast it is, which models it offers today, or what provenance marking its output
+carries. Those belong to the providers, they change without notice, and a copy
+of them here would be wrong before it was stale. `lucida models --provider
+<name>` asks the provider and prints the live answer; pricing and policy are
+worth reading from the provider directly.
+
+Named for the [camera lucida](https://en.wikipedia.org/wiki/Camera_lucida), the
+optical device that let artists trace what they saw onto paper.
 
 ## Configuration
 
