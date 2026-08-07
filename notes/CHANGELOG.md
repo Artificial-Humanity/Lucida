@@ -18,12 +18,24 @@ for Lucida.
 
 ---
 
-## 2026-08-06
+## Working section — unreleased
 
-Everything below closes a finding from the 2026-08-06 code review, which evaluated
-`069f72d`…`f5ecf17` (v0.6.0 → v0.9.0). Verified on Linux at the end of the run: 138 tests
-(from 125), `cargo clippy --all-targets -- -D warnings` clean, all `scripts/smoke.sh`
-checks passing against the release build.
+_No entries yet. The next cycle opens with the first code commit after v0.9.1._
+
+---
+
+## v0.9.1 — released 2026-08-07
+
+The whole version is the 2026-08-06 code review, closed. Nothing new was added to the tool:
+every item below fixes something the review found, and the headline one is structural rather
+than a correction — whether a mask binds is a value now, not prose repeated on eight
+surfaces.
+
+Released from `main` with the verification trio green on this machine (138 tests, up from
+125; `cargo clippy --all-targets -- -D warnings` clean; all `scripts/smoke.sh` checks against
+the release build) and CI green on all three platforms.
+
+### 2026-08-06 — closing the review of `069f72d`…`f5ecf17` (v0.6.0 → v0.9.0)
 
 ### Added
 
@@ -84,4 +96,5 @@ checks passing against the release build.
 
 ---
 
-_Entries above this line open the log; earlier history is `git log`._
+_v0.9.1 is the first version this log covers. Everything before it is `git log` and the
+release notes on GitHub — the log opened 2026-08-06 with no backfill._
