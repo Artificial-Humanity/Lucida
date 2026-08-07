@@ -13,7 +13,7 @@
 #
 # Settings:
 #   $env:LUCIDA_INSTALL_DIR   where to put it (default: %LOCALAPPDATA%\Programs\lucida)
-#   $env:LUCIDA_VERSION       a tag to pin, e.g. v0.7.1 (default: the latest release)
+#   $env:LUCIDA_VERSION       a tag to pin, e.g. v0.9.0 (default: the latest release)
 #   $env:GITHUB_TOKEN         used if set, purely to avoid the unauthenticated
 #                             rate limit — no scopes are needed for public releases
 

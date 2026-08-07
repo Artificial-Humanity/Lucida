@@ -18,7 +18,7 @@
 #
 # Settings:
 #   LUCIDA_INSTALL_DIR   where to put it (default: ~/.local/bin)
-#   LUCIDA_VERSION       a tag to pin, e.g. v0.7.1 (default: the latest release)
+#   LUCIDA_VERSION       a tag to pin, e.g. v0.9.0 (default: the latest release)
 #   GITHUB_TOKEN         used if set, purely to avoid the unauthenticated
 #                        rate limit — no scopes are needed for public releases
 

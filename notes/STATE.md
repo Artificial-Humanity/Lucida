@@ -16,8 +16,17 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
 - **v0.9.0 (2026-08-03) closed the v0.6.0 → v0.9.0 run** (17 commits, through `f5ecf17`):
   self-update, one-line install on all three platforms, `lucida setup` wiring itself into
   Claude, the binary carrying its own skill, a **binding** mask on the local lane,
-  Lucida-scoped keys beating shell exports, and CI on all three platforms. v0.5.0 is still
-  present and still incomplete (no Windows asset); deleting it remains the owner's call.
+  Lucida-scoped keys beating shell exports, and CI on all three platforms.
+- **Only v0.9.0 and v0.9.1 are published releases (pruned 2026-08-07)** — the eleven releases
+  from v0.1.0 through v0.8.0 were deleted, taking the incomplete v0.5.0 (no Windows asset)
+  with them. The baseline is deliberate: `lucida update` arrived in v0.7.0, so nothing below
+  it could update itself at all, and every surviving release self-updates by both paths. **The
+  thirteen git tags were kept** — `cargo install --tag` resolves against tags, not releases,
+  and they are the history the deleted release notes used to carry. CI is unaffected: its
+  pinned-version check derives the second-newest non-draft release (`05e9aac`) rather than
+  hardcoding one, and now resolves v0.9.0. GitHub destroys a release's download counters with
+  the release, so they were captured first:
+  [release-downloads-at-prune-20260807.md](release-downloads-at-prune-20260807.md).
 - **Five image providers + Veo video, all verified live** (google, comfyui, bfl, stability,
   openai). Wire behaviour is pinned by the recorded-response tests; as of 2026-08-06:
   **138 tests** passing (125 at the review close), clippy clean at `-D warnings`, all smoke
@@ -33,13 +42,15 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   two Windows path gaps, atomic config writes, the `mcpServers` panic, and the three
   in-passing items.
 - **Carried forward, deliberately:** the openai `--size 4K` area ceiling (unmeasured — it
-  costs an over-budget render) and the v0.5.0 deletion decision (still present, still
-  missing its Windows asset; owner's call).
+  costs an over-budget render). The v0.5.0 deletion decision is closed — see the prune above.
 
 ## Pointers
 
 - Change history — [CHANGELOG.md](CHANGELOG.md) (maintained per AGENTS.md §3 since
-  2026-08-06; v0.9.1 is the first version it covers, and history before that is `git log`
-  plus the GitHub release notes)
+  2026-08-06; v0.9.1 is the first version it covers). History before that is **`git log` and
+  the thirteen tags** — the release notes below v0.9.0 were destroyed by the 2026-08-07 prune,
+  so the tags are now the only pointer into that range.
+- Download counts destroyed by the prune —
+  [release-downloads-at-prune-20260807.md](release-downloads-at-prune-20260807.md)
 - Latest code review — [code-review-20260806-151318.md](code-review-20260806-151318.md)
   (records the evaluated range; the next review resumes at its end SHA per AGENTS.md §4)
