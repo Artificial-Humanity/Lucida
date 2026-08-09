@@ -1,11 +1,15 @@
 # Roadmap
 
-Lucida speaks to three providers: Google (images via Gemini, video via Veo), a
-local ComfyUI, and hosted FLUX from Black Forest Labs. This records where it goes
-next and, more usefully, what has to be true first.
+Lucida speaks to seven providers as of v1.0.1 — **images** from Google Gemini, a
+local ComfyUI, hosted FLUX from Black Forest Labs, Stability AI and OpenAI;
+**video** from Veo, Runway and Kling. This records where it goes next and, more
+usefully, what has to be true first.
 
 Nothing below the "Done" section is committed work. Items are ordered by what
 unblocks what, not by enthusiasm.
+
+§ 5 is the current coverage matrix and the ordered work list; § 6 is an open
+question rather than a plan.
 
 ---
 
@@ -781,3 +785,81 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
    unverified rather than known-absent, and each needs a free probe before it is
    worth an opinion. ComfyUI is the interesting one: video there is a workflow
    graph rather than an endpoint, so `--workflow` may already cover it.
+
+---
+
+## 6. Defaults — an open question, not a plan
+
+**Owner, 2026-08-09**, recorded to be answered later rather than now: can the
+experience be streamlined by mapping defaults? The range runs from *a default
+provider, overridden only when the user says otherwise* to *defaults for
+provider, for model within a provider, one set for image and another for video,
+and so on*.
+
+### What exists today, so the question starts from fact
+
+There is already a default mechanism; it is simply not the user's.
+
+- **Provider** is inferred from the model id (`infer_backend`), falling through
+  to **google** when nothing matches. So google is the implicit default, chosen
+  in code.
+- **Model** comes from `Backend::default_model()` / `VideoBackend::default_model()`
+  — one hardcoded default per provider, per medium.
+- `--provider` alone picks a provider *and* supplies that provider's default
+  model, which is the closest thing to the simple end of what is being asked for.
+
+So the question is not "should there be defaults" — there are. It is **whose
+defaults, and where they are stated**.
+
+### Why it is worth doing
+
+It serves exactly the user the per-credential rule serves. Someone holding one
+subscription types `--provider bfl` on every single invocation, or lets a render
+route to google and fail for want of a key they do not have. A default is most
+valuable to the person with the *fewest* options, which is the opposite of how
+configuration usually works.
+
+### The tensions to resolve before designing it
+
+These are the reasons this is a question and not a ticket.
+
+1. **Silence is the thing this tool refuses.** Lucida's whole argument is that
+   nothing is dropped or substituted quietly. A default that routes a render to
+   a provider the user did not name is the same class of event — *unless it says
+   so*. Any design has to report the resolved provider and **where the default
+   came from**, the way `lucida config` already names the source of every
+   setting. `--dry-run` gives that for free; the default path would need it too.
+
+2. **A default must never become a fallback.** If the default provider cannot
+   honour a flag, the answer stays a refusal naming one that can — not a silent
+   hop to another provider. Falling back would spend money somewhere the user
+   never chose, and would undo the one guarantee the capability system exists to
+   make.
+
+3. **It interacts with the shipped skill, and resolves cleanly.** The skill now
+   says to ask the user which provider to use when the probe shows a real choice
+   — *and not to ask when they have already made it*. **A configured default is
+   that choice, made once instead of per render.** So defaults do not fight that
+   guidance, they satisfy it; the skill would need one line saying a configured
+   default counts as the user having answered.
+
+4. **Where does it live, and how far up the ladder?** The config file already
+   exists, already survives having no shell, and its settings list is already
+   held exhaustive by tests — so `LUCIDA_DEFAULT_PROVIDER` and friends would cost
+   little and be documented automatically. The real risk is the elaborate end:
+   per-medium, per-provider, per-model defaults are a profile system, and profile
+   systems get configured once by their author and by nobody else. Worth asking
+   what the *smallest* version is that removes the repetition, and shipping only
+   that until something demands more.
+
+5. **Per-project or per-user?** An agent working in one repository may want a
+   different default from the machine's. `LUCIDA_CONFIG` already names a file
+   outright, so a project-local answer may already exist without new machinery.
+
+### The question to answer
+
+Not "what should the defaults be", but: **what is the smallest default mechanism
+that removes real repetition, states itself out loud, and cannot become a silent
+substitution?** If the answer is "a default provider per medium, reported on
+every render", that is a small change to `KNOWN_KEYS` and two resolution sites.
+Anything larger should have to justify itself against that.

@@ -113,6 +113,15 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   the owner's leaning is to punt until OpenAI announces something official. Matrix and ordered
   work list: [ROADMAP.md](../ROADMAP.md) § 5. The pause on new providers does **not** block
   this — it meant new *providers*, not new endpoints.
+- **Open question, parked deliberately (owner, 2026-08-09):** *defaults*. Can the experience
+  be streamlined by mapping them — from a simple default provider up to per-medium,
+  per-provider, per-model? [ROADMAP.md](../ROADMAP.md) § 6 frames it rather than answering it.
+  The load-bearing point: **defaults already exist, they are just not the user's** (google is
+  the fall-through in `infer_backend`, and each provider has a hardcoded `default_model`), so
+  the question is whose defaults and where they are stated. Two constraints any design must
+  meet: it has to **say what it resolved and why**, since a silent route is the class of thing
+  this tool refuses; and a default must **never become a fallback**, or a refusal turns into
+  spending money at a provider nobody chose.
 - **Phase 3's video work shipped in v1.0.0.** The `VideoProvider` trait landed
   and video now has **three providers**: Veo, Runway (its own gen4 models only) and Kling
   (direct — all eight versions, three quality tiers). `--duration` answers the ROADMAP's open
