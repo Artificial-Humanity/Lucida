@@ -551,8 +551,18 @@ gets correspondingly vaguer. `Capabilities` would have gained variants for
 concepts the rest of the product has no use for — duration and voice — to
 describe outputs that share nothing with a picture but the API key.
 
-Reopen only on a stated need for audio in the studio's own work, not on a
-provider making it easy. It will keep being easy.
+**The likely home is a separate tool, not a later Lucida phase** (owner, same
+day). Lyria alone would never be the end of it: the coverage principle this
+project runs on — a lane exists so that someone holding *that* subscription gets
+the full width of what they pay for — applied to audio means ElevenLabs and its
+peers, which is a provider portfolio the size of Lucida's own. That belongs to a
+tool whose capability vocabulary is voices, takes and durations, not one whose
+vocabulary is aspect ratios and masks. Sharing a repository would make both
+schemas vaguer and neither better.
+
+So this is a boundary rather than a rejection. Reopen only as its own project, or
+on a stated need for audio in the studio's own work — never on a provider making
+it easy. It will keep being easy.
 
 ---
 

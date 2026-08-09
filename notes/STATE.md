@@ -110,8 +110,11 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   worth having in writing: both model ids were confirmed live on the existing Gemini key, on
   plain `generateContent` (simpler than any video lane), with Gemini TTS beside them on the
   same credential. **Cheapness is a temptation, not a reason.** Lucida is images and video.
-  Reasoning in [ROADMAP.md](../ROADMAP.md) § "Audio — out of scope"; reopen on a stated need,
-  not on a provider making it easy.
+  A **boundary, not a rejection**: the likely home is a separate tool, because the coverage
+  principle applied to audio means ElevenLabs and its peers — a provider portfolio the size of
+  Lucida's, wanting a vocabulary of voices and takes rather than aspect ratios and masks.
+  Reasoning in [ROADMAP.md](../ROADMAP.md) § "Audio — out of scope"; reopen as its own
+  project, not as a Lucida phase.
 
 ## Pointers
 
