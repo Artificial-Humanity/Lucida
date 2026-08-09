@@ -317,7 +317,26 @@ fn no_key() -> anyhow::Error {
 
 fn read_image_as_inline(path: &str) -> Result<(String, String)> {
     let bytes = std::fs::read(path).with_context(|| format!("reading reference image {path}"))?;
-    let mime = match Path::new(path)
+    Ok((mime_of(path, &bytes).to_string(), STANDARD.encode(&bytes)))
+}
+
+/// What a file actually is, falling back to what it is called.
+///
+/// The bytes decide, because the extension is a claim by whoever named the file
+/// and this one is sent to Google as `mimeType` on the request. A JPEG saved as
+/// `.png` — which every screenshot tool and half the download folders in the
+/// world contain — was declared as PNG and rejected by the API for a reason that
+/// named neither the file nor the mismatch.
+///
+/// `sniff_mime` covers PNG, JPEG and WebP by magic number. The extension is
+/// consulted only for what it cannot recognise, which today is GIF, and the last
+/// resort stays PNG: it is what Lucida writes, so it is the best guess for a file
+/// with no signature this knows and no useful name.
+fn mime_of(path: &str, bytes: &[u8]) -> &'static str {
+    if let Some(sniffed) = crate::sniff_mime(bytes) {
+        return sniffed;
+    }
+    match Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
@@ -327,8 +346,7 @@ fn read_image_as_inline(path: &str) -> Result<(String, String)> {
         Some("webp") => "image/webp",
         Some("gif") => "image/gif",
         _ => "image/png",
-    };
-    Ok((mime.to_string(), STANDARD.encode(&bytes)))
+    }
 }
 
 fn extract_image(payload: &Value) -> Result<GeneratedImage> {
@@ -422,6 +440,27 @@ mod tests {
     use super::*;
     use crate::provider::{Aspect, Size};
     use crate::testserver::{Reply, serve};
+
+    /// The bytes outrank the name. `sniff_mime` was built to end exactly this
+    /// guess and this lane kept guessing anyway — so a JPEG saved as `.png`, of
+    /// which every download folder holds several, was declared as PNG and
+    /// rejected by an API error that named neither the file nor the mismatch.
+    #[test]
+    fn a_reference_image_is_typed_by_its_bytes_not_its_extension() {
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0];
+        assert_eq!(mime_of("screenshot.png", &jpeg), "image/jpeg");
+        assert_eq!(mime_of("no-extension", &jpeg), "image/jpeg");
+
+        let png = [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(mime_of("mislabelled.jpg", &png), "image/png");
+
+        // The extension still answers for what the sniffer does not know, which
+        // today is GIF — dropping the fallback would have quietly retyped every
+        // GIF as PNG.
+        assert_eq!(mime_of("loop.gif", b"GIF89a...."), "image/gif");
+        // And PNG remains the last resort, because it is what Lucida writes.
+        assert_eq!(mime_of("mystery.dat", b"\x00\x01\x02\x03"), "image/png");
+    }
 
     /// The key travels as `x-goog-api-key`, never as a `?key=` query parameter —
     /// which would put it in shell history, proxy logs and crash reports. Only

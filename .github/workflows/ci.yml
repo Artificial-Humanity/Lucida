@@ -27,21 +27,36 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `--locked` throughout. The lockfile is committed, and without this flag
+      # cargo is free to quietly update it to satisfy a build — so CI could go
+      # green against a dependency set that is not the one in the repository, and
+      # the difference would first show up as a release that does not reproduce.
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
       # The tests reach no network: every provider is answered by
       # `src/testserver.rs` on a loopback port. A run that starts talking to a
       # real API is a bug in the test, not a flaky provider.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Smoke test the built binary
         run: |
-          cargo build --release
+          cargo build --locked --release
           BIN=target/release/lucida
           if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           ./scripts/smoke.sh "$BIN"
+
+  # Six dependencies, all of them load-bearing and one of them a TLS stack. An
+  # advisory against any of those is not something to learn about from a user, and
+  # nothing else in this repository would ever mention it.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ github.token }}
 
   # The installers name the release assets, which makes them one more
   # hand-written list of platform facts — and this repository has already had

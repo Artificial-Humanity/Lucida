@@ -101,13 +101,11 @@ impl Client {
         if let Some(path) = &req.image {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("reading source image {path}"))?;
-            let mime = if path.to_ascii_lowercase().ends_with(".jpg")
-                || path.to_ascii_lowercase().ends_with(".jpeg")
-            {
-                "image/jpeg"
-            } else {
-                "image/png"
-            };
+            // Sniffed, not guessed from the name — a still being animated is
+            // exactly the sort of file that arrives from a screenshot tool with
+            // an extension that does not match its bytes, and the declared type
+            // is what Veo validates against.
+            let mime = crate::sniff_mime(&bytes).unwrap_or("image/png");
             instance.insert(
                 "image".into(),
                 json!({ "bytesBase64Encoded": STANDARD.encode(&bytes), "mimeType": mime }),

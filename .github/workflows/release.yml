@@ -15,7 +15,25 @@ permissions:
   contents: write
 
 jobs:
+  # Nothing ships until the suite has run against the exact commit being tagged.
+  #
+  # It did not, before: each build job smoke-tested its own binary, and smoke
+  # checks are shallow by design — they confirm the thing starts, prints its
+  # version, and refuses a bad flag. A tag could therefore publish three
+  # platform binaries having never run `cargo test` at all. In practice the
+  # release always followed a green CI run on main, which is a habit rather than
+  # a gate, and a habit does not survive a hotfix tagged in a hurry.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
   macos:
+    needs: verify
     # A universal binary rather than two downloads. Apple Silicon runners carry
     # both SDKs, so one job covers Apple Silicon and Intel.
     runs-on: macos-latest
@@ -29,8 +47,8 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
 
       - name: Fuse into a universal binary
         env:
@@ -64,6 +82,7 @@ jobs:
             ${{ env.ASSET }}.sha256
 
   linux:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -76,7 +95,7 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get update && sudo apt-get install -y musl-tools
-          cargo build --release --target x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl
           NAME="lucida-${TAG#v}-x86_64-linux-musl"
           cp target/x86_64-unknown-linux-musl/release/lucida "$NAME"
           echo "ASSET=$NAME" >> "$GITHUB_ENV"
@@ -112,6 +131,7 @@ jobs:
             ${{ env.ASSET }}.sha256
 
   windows:
+    needs: verify
     runs-on: windows-latest
     # bash throughout, so the same smoke script runs on all three platforms.
     defaults:
@@ -126,7 +146,7 @@ jobs:
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --locked --release --target x86_64-pc-windows-msvc
           NAME="lucida-${TAG#v}-x86_64-windows.exe"
           cp target/x86_64-pc-windows-msvc/release/lucida.exe "$NAME"
           echo "ASSET=$NAME" >> "$GITHUB_ENV"
