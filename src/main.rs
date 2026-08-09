@@ -1087,8 +1087,71 @@ pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
     }
 }
 
-/// Writes `bytes` to `path`, creating parent directories, and returns the
+/// Writes `bytes` to `path` without ever leaving it truncated.
+///
+/// Stage beside the target, then rename. A rename within one directory either
+/// happens or does not, so a crash, a signal or a full disk mid-write leaves
+/// whatever was there before exactly as it was — where a truncating `fs::write`
+/// leaves a file that is part one image and part another, or no image at all.
+///
+/// Staged in the target's own directory rather than a temp dir, because a rename
+/// across filesystems is a copy-and-delete and hands the guarantee straight back.
+///
+/// `private` restricts the staged file *before* the rename: a file chmodded
+/// after the write is world-readable for the moment it first holds a secret.
+pub fn write_atomically(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    let staged = staging_path(path);
+
+    let staged_then = |result: Result<()>| -> Result<()> {
+        if result.is_err() {
+            // A staged file left behind is litter in someone's directory, and
+            // one holding a key is worse than litter.
+            let _ = std::fs::remove_file(&staged);
+        }
+        result
+    };
+
+    staged_then(
+        std::fs::write(&staged, bytes).with_context(|| format!("writing {}", staged.display())),
+    )?;
+
+    if private {
+        staged_then(config::restrict_to_owner(&staged))?;
+    }
+
+    staged_then(
+        std::fs::rename(&staged, path)
+            .with_context(|| format!("replacing {} with {}", path.display(), staged.display())),
+    )
+}
+
+/// Where a pending write lives until it takes the target's name.
+///
+/// Dot-prefixed so it does not appear in a directory listing between the write
+/// and the rename. Stamped with the process id so two Lucidas cannot stage over
+/// each other, and with a counter because two writes can now be in flight
+/// *within* one process — a batch render, or two MCP tool calls — and two
+/// writers sharing a staging path would produce exactly the torn file this
+/// exists to prevent.
+fn staging_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        ".{name}.lucida-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+/// Writes an image to `path`, creating parent directories, and returns the
 /// absolute path actually written.
+///
+/// Atomic, and not incidentally: `lucida edit` defaults its output to its own
+/// *input*, so the file being overwritten here is routinely the user's original
+/// and the only copy of it. A truncating write that failed halfway — a full
+/// disk, a signal — destroyed the source and the edit together.
 pub fn write_image(path: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
     let path = path.as_ref();
 
@@ -1099,7 +1162,7 @@ pub fn write_image(path: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
 
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    write_atomically(path, bytes, false)?;
 
     Ok(std::fs::canonicalize(path)
         .map(strip_unc_prefix)
@@ -1121,6 +1184,57 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The property that matters — an interrupted write leaving the previous
+    /// file intact — is the one a test cannot easily provoke, so what is checked
+    /// is the mechanism that provides it: the bytes are never written to the
+    /// target's own name, and the staging file lands in the target's own
+    /// directory. A rename across filesystems is a copy-and-delete, which would
+    /// hand the guarantee straight back.
+    #[test]
+    fn a_staged_write_never_touches_the_target_until_it_is_whole() {
+        let path = std::path::Path::new("/tmp/gallery/cat.png");
+        let staged = staging_path(path);
+
+        assert_ne!(staged, path);
+        assert_eq!(staged.parent(), path.parent());
+        assert!(
+            staged.file_name().unwrap().to_string_lossy().starts_with('.'),
+            "the staging file shows up in a listing mid-write: {}",
+            staged.display()
+        );
+    }
+
+    /// Two writes can be in flight at once — a batch, or two MCP tool calls —
+    /// and two writers sharing a staging path would produce exactly the torn
+    /// file staging exists to prevent.
+    #[test]
+    fn concurrent_writes_do_not_share_a_staging_path() {
+        let path = std::path::Path::new("image.png");
+        assert_ne!(staging_path(path), staging_path(path));
+    }
+
+    /// `lucida edit` defaults its output to its own input, so the file being
+    /// overwritten is routinely the user's original and the only copy of it.
+    #[test]
+    fn writing_an_image_over_itself_leaves_a_whole_file() {
+        let dir = std::env::temp_dir().join(format!("lucida-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cat.png");
+
+        std::fs::write(&path, b"original").unwrap();
+        write_image(&path, b"edited").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"edited");
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(left, vec!["cat.png"], "a staging file survived: {left:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A started render must always be collectable from the terminal, and the
     /// only thing that makes it so is the operation id being on screen. It was

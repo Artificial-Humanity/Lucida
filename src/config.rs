@@ -371,57 +371,18 @@ fn warn_if_readable_by_others(_path: &Path) {}
 
 /// Replaces a file's contents without ever leaving it truncated.
 ///
-/// Stage beside the target, then rename — the house pattern, already earning its
-/// keep in `update.rs`'s `install_over`. A rename within one directory either
-/// happens or does not, so a crash, a signal or a full disk mid-write leaves the
-/// original exactly as it was, where a truncating `fs::write` leaves a file that
-/// is half a config and wholly unparseable.
+/// Worth the guarantee because of *whose* files these are. `config.env` may hold
+/// the only copy of an API key, and the desktop app's config holds other servers'
+/// registrations — neither is a file Lucida created, and both are ones a caller
+/// would have to reconstruct by hand.
 ///
-/// Worth the four extra lines because of *whose* files these are. `config.env`
-/// may hold the only copy of an API key, and the desktop app's config holds other
-/// servers' registrations — neither is a file Lucida created, and both are ones a
-/// caller would have to reconstruct by hand.
-///
-/// Staged in the target's own directory rather than a temp dir, since a rename
-/// across filesystems is a copy-and-delete and hands the guarantee straight back.
-///
-/// `private` restricts the staged file *before* the rename, which is the reason
-/// this takes the flag rather than leaving it to the caller: a file chmodded
-/// after the write is world-readable for the moment it first holds a secret.
+/// The mechanism is [`crate::write_atomically`], shared with image writes since
+/// 2026-08-09. It was written here first and lived here alone for three
+/// releases, during which `write_image` truncated over the user's original on
+/// every `lucida edit` — the house pattern existing is not the same as the house
+/// using it.
 pub fn write_replacing(path: &Path, body: &str, private: bool) -> Result<()> {
-    let staged = staging_path(path);
-
-    let staged_then = |result: Result<()>| -> Result<()> {
-        if result.is_err() {
-            // A staged file left behind is litter in someone's config directory,
-            // and one holding a key is worse than litter.
-            let _ = std::fs::remove_file(&staged);
-        }
-        result
-    };
-
-    staged_then(
-        std::fs::write(&staged, body).with_context(|| format!("writing {}", staged.display())),
-    )?;
-
-    if private {
-        staged_then(restrict_to_owner(&staged))?;
-    }
-
-    staged_then(
-        std::fs::rename(&staged, path)
-            .with_context(|| format!("replacing {} with {}", path.display(), staged.display())),
-    )
-}
-
-/// Where the replacement is written before it takes the target's name.
-///
-/// Dot-prefixed so it does not show up in a directory listing between the write
-/// and the rename, and carrying the pid so two Lucidas running at once cannot
-/// stage over each other.
-fn staging_path(path: &Path) -> PathBuf {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    path.with_file_name(format!(".{name}.lucida-{}", std::process::id()))
+    crate::write_atomically(path, body.as_bytes(), private)
 }
 
 /// Restricts a file to its owner.
@@ -594,11 +555,6 @@ mod tests {
             .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
             .collect();
         assert_eq!(left, vec!["config.env"], "a staging file survived: {left:?}");
-
-        // The staging path is in the target's own directory — a rename across
-        // filesystems is a copy, which would give the guarantee back.
-        assert_eq!(staging_path(&path).parent(), path.parent());
-        assert_ne!(staging_path(&path), path);
 
         // Private means private by the time the file has a name anyone reads,
         // rather than a chmod that follows the write of a key.
