@@ -23,10 +23,30 @@ for Lucida.
 ### 2026-08-09 — the product review's second tranche, in progress
 
 Towards v0.10, "dependable unattended use". The review's **third and last structural finding
-closes here**. 178 tests, up from 163 at v0.9.2.
+closes here**, so all three are now closed. 186 tests, up from 163 at v0.9.2.
+
+Still open for v0.10: cost visibility and a budget guard, `--json` + meaningful exit codes,
+`--count` batching, and the live canary (which the owner has ruled runs from an ai-lab-0 cron
+rather than GitHub Actions secrets, with the workflow kept `workflow_dispatch`-only).
 
 #### Added
 
+- **`src/ledger.rs`, `lucida ops`, `lucida history`, and the `list_operations` MCP tool**
+  (`b2daf7f`) — an append-only JSONL record of every render, beside `config.env`. Lucida
+  remembered nothing before this: no prompt→file trail, no way to list video operations in
+  flight, no history, and nowhere for cost to accumulate even in principle. The failure it
+  closes is specific — an agent starts a Veo render, hands back an operation id, its session
+  ends, and minutes of billed output become unreachable because the id lives only in a
+  transcript. Outstanding operations are **derived** (a `started` record with no `done` one),
+  so a render collected anywhere drops off the list with nothing told. Writes never fail a
+  render; the file prunes its oldest half at 2 MB; `LUCIDA_NO_LEDGER` switches it off and
+  `lucida config` names the path either way, because it records prompts. **`list_operations`
+  is a deliberate addition to the user-scope MCP surface** (AGENTS.md, Integration
+  Dependencies).
+- **`src/clock.rs`** (`b2daf7f`) — the date arithmetic moves out of `provider.rs` and gains
+  the inverse conversion, so a ledger timestamp is stored as a number and formatted for a
+  human rather than frozen into somebody's idea of a format. `stamp` needed `div_euclid`:
+  written with `/`, 1969 came out as 1970.
 - **`src/cancel.rs`** (`e52cbd5`) — a `Token` (an `Arc<AtomicBool>`), `with()` to install one
   for the duration of a call, and `check()` for poll loops to call between sleeps. Ambient to
   the thread rather than a parameter on `ImageProvider::generate`: threading it through the
@@ -67,6 +87,9 @@ closes here**. 178 tests, up from 163 at v0.9.2.
 - **`lucida setup` named a skill file it never wrote** (`bda08fe`) — with the Claude app and no
   Claude Code CLI, the skill step was never planned but the note telling you to upload it still
   printed.
+- **`Client::generate_video` becomes `await_video`** (`b2daf7f`) — the CLI starts and waits in
+  two visible steps, because the operation id has to exist where it can be written down and a
+  single blocking call hid it inside itself.
 - **Release tags could ship without the suite having run** (`e85f662`) — the three build jobs
   smoke-tested their own binary; `cargo test` ran only on `main`. Also `--locked` everywhere,
   `rust-version = "1.85"`, and the genai MIME guess replaced by `sniff_mime`.

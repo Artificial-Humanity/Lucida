@@ -19,11 +19,21 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   polls retry, and `lucida video --no-wait` exists). Plus: connect timeouts on every HTTP
   client, atomic image writes, shutdown dates that phrase their own tense, and a repository
   description that says what the tool does. 163 tests, up from 138.
-- **The third structural finding is open and is v0.10 work** — the MCP server dispatches on its
-  stdio loop, so a long render blocks `ping`, queues the next tool call, and leaves
-  `notifications/cancelled` unreachable. The plan for it, with the rest of the review, is
-  Phase 2: off-loop dispatch, the render ledger, `--json` + exit codes, credential-free
-  capability printing, and a live canary.
+- **All three structural findings are now closed** (on `main`, unreleased). The third —
+  the MCP server dispatching on its stdio loop — closed at `e52cbd5`: tool calls run on a pool
+  of four, the reading thread answers `ping`/`tools/list` itself, and `notifications/cancelled`
+  is honoured. It had been *unreachable*, because a cancellation carries no id of its own and
+  the loop dropped every id-less message. Cancellation is cooperative and lands only where
+  there is a poll loop; a single blocking POST runs to completion and the charge stands.
+- **Lucida now remembers what it generated** (`b2daf7f`) — an append-only ledger beside
+  `config.env`, read by `lucida ops`, `lucida history` and the new `list_operations` MCP tool.
+  The failure it closes: an agent starts a Veo render, its session ends, and minutes of billed
+  output are unreachable because the operation id lived only in a transcript. It records
+  prompts, so `lucida config` names the file and `LUCIDA_NO_LEDGER` switches it off.
+- **Open for v0.10:** cost visibility and a budget guard, `--json` + meaningful exit codes,
+  `--count` batching, and the live canary — which **runs from an ai-lab-0 cron**, owner's call
+  2026-08-09, with the GitHub workflow kept `workflow_dispatch`-only so the five provider keys
+  gain no second home.
 - **v0.9.1 (2026-08-07)** was the 2026-08-06 code review, closed, and nothing else: no new
   capability, one structural change (mask semantics became a value) and a set of fixes. It is
   the first release the changelog covers.
@@ -62,8 +72,9 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   review is being addressed in full — all three tranches, expansion axes included. So the
   positioning work is live (description and topics done; crates.io once the ledger and video
   APIs settle), and Phase 3 will extract a `VideoProvider` trait, expose the Veo 3.1 knobs,
-  add a second video provider and Lyria audio, and finish Stability's edit endpoints.
-  Aggregators stay declined.
+  add Lyria audio, and finish Stability's edit endpoints. **A second video provider is
+  deferred** — owner 2026-08-09: do the trait and the Veo 3.1 knobs, which cost nothing, and
+  leave the paid signup until it is wanted. Aggregators stay declined.
 
 ## Pointers
 
