@@ -10,6 +10,36 @@ rust-version = "1.85"
 description = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, FLUX, Stability AI or OpenAI — a CLI and an MCP server"
 license = "Apache-2.0"
 
+# Everything below is what crates.io renders on the package page. Absent, the
+# listing has a description and nothing else — no link to the source, and no
+# category or keyword anyone could find it under. Cargo does not warn about it,
+# because none of it is needed to *build*.
+repository = "https://github.com/Artificial-Humanity/Lucida"
+homepage = "https://github.com/Artificial-Humanity/Lucida"
+readme = "README.md"
+
+# Five is the crates.io maximum, so these are the searches worth being found in
+# rather than a description of the tool.
+keywords = ["image-generation", "video", "mcp", "gemini", "comfyui"]
+
+# From crates.io's fixed list; an invented one is rejected at publish time.
+categories = ["command-line-utilities", "multimedia::images", "multimedia::video"]
+
+# A published crate is permanent, so what ships in it is worth stating rather
+# than inheriting from whatever happens to be tracked.
+#
+# `video.mp4` is a 4.9 MB test render committed by accident in `d37737c` — it has
+# nothing to do with building Lucida, and a tenth of the package would have been
+# a video of fog. The notes are this project's internal working documents:
+# CHANGELOG earns its place in a package, a product review does not.
+exclude = [
+    "video.mp4",
+    "notes/product-review-*.md",
+    "notes/code-review-*.md",
+    "notes/release-downloads-*.md",
+    "notes/STATE.md",
+]
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
