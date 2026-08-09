@@ -45,11 +45,21 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   [release-downloads-at-prune-20260807.md](release-downloads-at-prune-20260807.md).
 - **Five image providers + Veo video, all verified live** (google, comfyui, bfl, stability,
   openai). Wire behaviour is pinned by the recorded-response tests; as of 2026-08-09:
-  **201 tests** passing (163 at v0.9.2), clippy clean at `-D warnings`, all smoke checks green
+  **252 tests** passing (163 at v0.9.2), clippy clean at `-D warnings`, all smoke checks green
   — and **CI green on all three platforms**. Windows keeps earning that lane: the atomic-write
   refactor left `config.rs` with an unused import that only exists off Unix, and a ledger test
   used a path that is unwritable on Linux and an ordinary directory on Windows. Local clippy
   could see neither.
+- **Tests come in two layers now** (`3558134`), because `cargo test` had covered everything
+  except the layer a user touches. Unit tests stay inside the file they test; anything that
+  only exists once there is a *process* lives in `tests/cli.rs`, which drives the binary as a
+  black box. `scripts/smoke.sh` is no longer a weaker second suite — it checks what packaging
+  can break and then runs `tests/cli.rs` against the artifact via `LUCIDA_TEST_BIN`, so the
+  musl-static and universal builds get the full depth. The move paid for itself immediately:
+  one bash assertion had been **unreachable** for as long as both its words appeared (an
+  ordered `case` with the failing arm second), and all three MCP `provider` enums turned out
+  to be hand-written literals — the one place a stale list makes a working provider
+  *unreachable*, since a client validates against a JSON Schema `enum` before sending.
 - **The v0.6→v0.9 range was reviewed 2026-08-06 and every finding is now closed**
   (`83680b5`, `1c49c47`, `05e9aac` — see the pointer below for what each one was).
   The headline fix is structural: **whether a mask binds is a value, not prose.**

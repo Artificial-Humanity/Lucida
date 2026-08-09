@@ -20,6 +20,52 @@ for Lucida.
 
 ## Working section — unreleased
 
+### 2026-08-09 — The binary gets tested like everything else
+
+Owner's observation, and it was a fair one: `cargo test` covered every layer except the one a
+user touches. **252 tests, up from 221** — 222 unit and a new 30-test binary-level suite.
+
+#### Added
+
+- **`tests/cli.rs`** (`3558134`) — the shipped binary as a black box: exit codes, `--json`
+  alone on stdout, the config search path resolved from a real environment, the capability
+  refusals, the ledger's runtime-resolved location, and JSON-RPC framing over a real pipe.
+  Every process gets `env_clear` and a private `HOME`, so a credential on the developer's
+  machine cannot turn an assertion into a no-op and the suite runs identically on a laptop
+  and on CI. Nothing reaches a provider; the one socket opened points at a port chosen
+  because nothing is listening on it.
+- **`LUCIDA_TEST_BIN`** (`3558134`) — points that file at a binary other than cargo's, which
+  is how the release workflow now covers the musl-static and lipo-fused artifacts to the same
+  depth as a debug build. Verified to be honoured rather than decorative.
+
+#### Changed
+
+- **`scripts/smoke.sh` stopped being a second, weaker test suite** (`3558134`) — it checks
+  what packaging can break (does the artifact load, does it know its own version) and then
+  runs `tests/cli.rs` against it. One copy of each assertion, and a test in that file asserts
+  the delegation still exists so the two cannot silently fork again.
+- **All three MCP `provider` enums are generated** (`3558134`) from `Backend::ALL` /
+  `VideoBackend::ALL`. They were literals, one of them directly above a `model` description
+  that is generated *because the hand-written version of itself had omitted openai*. This is
+  the worst place in the product for a stale list: a well-behaved client validates against a
+  JSON Schema `enum` before sending, so a provider missing there is **unreachable** rather
+  than undocumented — the call never arrives, and none of the carefully-written refusals get
+  the chance to name it. Nothing would have reported it, because the code behind the missing
+  provider works perfectly. `every_provider_is_selectable_through_the_schema` covers all three
+  surfaces, including `check_video`, where forgetting one strands an operation.
+
+#### Fixed
+
+- **A mask assertion that had stopped asserting** (`3558134`) — an ordered bash `case` whose
+  "offers only an advisory mask" arm sat *after* the arm that matched, and so was unreachable
+  for as long as both words appeared in the message. Rewritten as the property it meant: the
+  refusal must name the provider whose mask *binds*. This is the failure mode that motivated
+  the move — a `#[test]` cannot fail this way, and `set -e` never protected against it.
+- **A wire assertion that could not fail** (`3558134`) — the new provider check matched names
+  against the whole `--help` output, and `--seed` names openai too, so deleting openai from
+  the `--provider` list left it green. Scoped to the one flag's entry and confirmed to bite by
+  breaking it deliberately.
+
 ### 2026-08-09 — Phase 3: video becomes a substitution
 
 The product review's expansion axis #1, and the first work since v0.10.0. Video went from one
