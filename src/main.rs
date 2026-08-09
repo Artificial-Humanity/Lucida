@@ -12,6 +12,7 @@
 //! Google-only for now.
 
 mod bfl;
+mod cancel;
 mod comfy;
 mod config;
 mod genai;

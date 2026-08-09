@@ -184,6 +184,11 @@ impl Client {
         let mut interval = Duration::from_secs(5);
 
         loop {
+            // The operation id has already been printed by `generate_video`, so
+            // a cancellation here loses the wait and not the render.
+            crate::cancel::check()
+                .map_err(|e| anyhow!("{e}\n\nCollect it later with: lucida check {operation}"))?;
+
             if started.elapsed() > deadline {
                 bail!(
                     "gave up after {} minutes; the render may still finish. \

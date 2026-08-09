@@ -641,6 +641,11 @@ impl Client {
         let mut last_report = Instant::now();
 
         loop {
+            // Between polls, never between the submit and the first poll: the
+            // job is queued by now, and leaving without saying so would strand
+            // it on someone's GPU.
+            crate::cancel::check()?;
+
             if started.elapsed() > deadline {
                 bail!(
                     "gave up waiting after {} minutes. The render may still be \

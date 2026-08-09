@@ -40,19 +40,118 @@ use crate::provider::{
     infer_backend,
 };
 use crate::video::{DEFAULT_VIDEO_MODEL, VideoRequest, VideoStatus};
+use crate::cancel;
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// How many tool calls can be in flight at once.
+///
+/// Four rather than one, which is what this server effectively had, and rather
+/// than unbounded, which would let a client with a loop in it start a hundred
+/// paid renders. Four is enough that an agent generating a set of assets is not
+/// serialised, and small enough that the bill for a runaway client is bounded by
+/// something other than its own good behaviour.
+const WORKERS: usize = 4;
+
+/// Requests currently being worked on, so a cancellation can find one.
+type InFlight = Arc<Mutex<HashMap<String, cancel::Token>>>;
+
+/// The output stream, held by whichever worker is writing a line.
+///
+/// Every response goes through this. Two workers finishing at once would
+/// otherwise interleave their JSON mid-line and corrupt the stream for good —
+/// the protocol has no way to resynchronise.
+///
+/// Generic only so tests can supply a `Vec<u8>`; in production it is always
+/// stdout.
+type Out<W> = Arc<Mutex<W>>;
+
+struct Job {
+    id: Value,
+    params: Value,
+    token: cancel::Token,
+}
+
+/// The stdio server.
+///
+/// # Why this is not one loop any more
+///
+/// It was, and the shape was the problem: `dispatch` ran to completion before
+/// the next line was read. A ComfyUI render can hold that for its full
+/// 1800-second deadline, and for all of it the server was deaf. A client's
+/// `ping` went unanswered, which clients using ping as a liveness probe read as
+/// a dead server; a second tool call queued behind the first with no indication
+/// it had even been received; and `notifications/cancelled` could not be honoured
+/// at all, so a user's cancel was a no-op that kept billing.
+///
+/// So: the reading thread only ever reads. It answers `initialize`, `ping` and
+/// `tools/list` itself — they are pure and instant, and liveness must never
+/// depend on a worker being free — and hands `tools/call` to a small pool.
+/// Responses are matched by id, which JSON-RPC allows to come back in any order.
 pub fn serve() -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-
     eprintln!("lucida MCP server ready (default image model: {DEFAULT_MODEL})");
+    let stdin = std::io::stdin();
+    let out = Arc::new(Mutex::new(std::io::stdout()));
+    run(stdin.lock(), out, call_tool)
+}
 
-    for line in stdin.lock().lines() {
+/// The loop itself, over any reader and writer.
+///
+/// Split from [`serve`] so the property this whole change exists for — a `ping`
+/// answered while a render is still going — can be asserted rather than
+/// described. `handle` is the tool dispatcher, which in production is always
+/// `call_tool`; a test supplies one that is deliberately slow, because there is
+/// no other way to hold a worker open on demand.
+fn run<R, W, F>(reader: R, out: Out<W>, handle: F) -> Result<()>
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+    F: Fn(&Value) -> Result<Value> + Send + Clone + 'static,
+{
+    let in_flight: InFlight = Arc::new(Mutex::new(HashMap::new()));
+
+    let (sender, receiver) = mpsc::channel::<Job>();
+    let receiver = Arc::new(Mutex::new(receiver));
+
+    let workers: Vec<_> = (0..WORKERS)
+        .map(|_| {
+            let receiver = Arc::clone(&receiver);
+            let out = Arc::clone(&out);
+            let in_flight = Arc::clone(&in_flight);
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                loop {
+                    // Taken in a statement of its own, and this is load-bearing
+                    // rather than stylistic: a `while let Ok(job) =
+                    // receiver.lock().unwrap().recv()` keeps the scrutinee's
+                    // temporaries — the MutexGuard among them — alive for the
+                    // whole body, so every worker would hold the queue lock for
+                    // the entire render and four workers would behave exactly
+                    // like the one loop this replaces. Written that way first;
+                    // `tool_calls_run_concurrently_rather_than_queueing` failed
+                    // with "only 1 of 4 calls ran at once".
+                    //
+                    // Ending the statement here drops the guard, so a worker
+                    // holds the lock only while *waiting*, never while working.
+                    let job = receiver.lock().unwrap().recv();
+                    let Ok(job) = job else { break };
+
+                    let key = job.id.to_string();
+                    let result = cancel::with(job.token, || guarded(&handle, &job.params));
+                    in_flight.lock().unwrap().remove(&key);
+                    respond(&out, &job.id, result);
+                }
+            })
+        })
+        .collect();
+
+    for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
@@ -66,38 +165,110 @@ pub fn serve() -> Result<()> {
             }
         };
 
-        // No id means a notification: act on it, but never reply. Replying to a
-        // notification is a protocol violation some clients treat as fatal.
+        let method = request["method"].as_str().unwrap_or_default();
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+
+        // Handled before the notification check below, because a cancellation
+        // *is* a notification — it carries no id of its own, only the id of the
+        // request it is cancelling. That is precisely why it used to be
+        // unreachable: the early return dropped it with everything else that had
+        // no id, so the one message whose whole purpose is to stop a paid render
+        // was the one message guaranteed to be ignored.
+        if method == "notifications/cancelled" {
+            let target = params["requestId"].to_string();
+            if let Some(token) = in_flight.lock().unwrap().get(&target) {
+                eprintln!("cancelling request {target}");
+                token.cancel();
+            }
+            continue;
+        }
+
+        // No other id means a notification: act on it, but never reply. Replying
+        // to a notification is a protocol violation some clients treat as fatal.
         let Some(id) = request.get("id").cloned() else {
             continue;
         };
 
-        let method = request["method"].as_str().unwrap_or_default();
-        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        if method == "tools/call" {
+            let token = cancel::Token::new();
+            in_flight
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), token.clone());
+            // Send cannot fail while a worker is alive, and if the pool has gone
+            // the process is on its way down anyway.
+            let _ = sender.send(Job { id, params, token });
+            continue;
+        }
 
-        let response = match dispatch(method, &params) {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(e) => {
-                // -32601 is "method not found", which clients may probe for
-                // (resources/list, prompts/list); everything else is -32603.
-                let code = if e.to_string().starts_with("unknown method") {
-                    -32601
-                } else {
-                    -32603
-                };
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": code, "message": e.to_string() }
-                })
-            }
-        };
+        respond(&out, &id, dispatch(method, &params));
+    }
 
-        writeln!(stdout, "{response}")?;
-        stdout.flush()?;
+    // Stdin closed: the client has gone. Ask everything in flight to stop, then
+    // let the workers finish the line they are writing. Cancellation is
+    // cooperative, so this is quick for anything in a poll loop — and for a
+    // single blocking render it waits, which is right: that call is already paid
+    // for and its result may still be worth writing to disk.
+    for token in in_flight.lock().unwrap().values() {
+        token.cancel();
+    }
+    drop(sender);
+    for worker in workers {
+        let _ = worker.join();
     }
 
     Ok(())
+}
+
+/// Runs a tool call, turning a panic into an error reply.
+///
+/// A panicking worker used to be survivable, because there was no worker: the
+/// process died and the client saw its server exit. With a pool, an unwinding
+/// thread is *quietly* lost — the pool shrinks by one, the request that caused
+/// it never gets a reply, and after four the server accepts calls and answers
+/// none of them, forever, while still passing `ping`. A hang with a healthy
+/// liveness probe is the worst shape a failure can take, so the panic is caught
+/// and reported as what it is.
+fn guarded<F>(handle: &F, params: &Value) -> Result<Value>
+where
+    F: Fn(&Value) -> Result<Value>,
+{
+    let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(params)));
+    called.unwrap_or_else(|_| {
+        anyhow::bail!(
+            "the tool panicked. This is a bug in lucida — the server is still \
+             running and other tools are unaffected. The panic message is in the \
+             server's stderr log."
+        )
+    })
+}
+
+/// Writes one JSON-RPC reply, whole, under the output lock.
+fn respond<W: Write>(out: &Out<W>, id: &Value, result: Result<Value>) {
+    let response = match result {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(e) => {
+            // -32601 is "method not found", which clients may probe for
+            // (resources/list, prompts/list); everything else is -32603.
+            let code = if e.to_string().starts_with("unknown method") {
+                -32601
+            } else {
+                -32603
+            };
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": code, "message": e.to_string() }
+            })
+        }
+    };
+
+    let mut out = out.lock().unwrap();
+    // A failed write means the client's pipe is gone. Nothing useful is left to
+    // do about it here, and panicking on a worker would take the process down
+    // while other renders are still finishing.
+    let _ = writeln!(out, "{response}");
+    let _ = out.flush();
 }
 
 fn dispatch(method: &str, params: &Value) -> Result<Value> {
@@ -877,6 +1048,196 @@ mod tests {
         .to_string();
         assert!(error.contains("workflow"), "must name the conflict: {error}");
         assert!(error.contains("model"));
+    }
+
+    /// Drives the server over a scripted transcript and returns the replies, in
+    /// the order they were written.
+    fn drive<F>(script: &str, handle: F) -> Vec<Value>
+    where
+        F: Fn(&Value) -> Result<Value> + Send + Clone + 'static,
+    {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        run(
+            std::io::Cursor::new(script.to_string()),
+            Arc::clone(&out),
+            handle,
+        )
+        .unwrap();
+
+        let written = out.lock().unwrap().clone();
+        String::from_utf8(written)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a reply was not whole JSON"))
+            .collect()
+    }
+
+    fn request(id: u64, method: &str, params: Value) -> String {
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
+    }
+
+    /// The headline finding, asserted rather than described.
+    ///
+    /// `dispatch` used to run to completion before the next line was read, so a
+    /// ComfyUI render held the loop for up to its 1800-second deadline. For all
+    /// of it the server was deaf: a `ping` went unanswered, which clients using
+    /// ping as a liveness probe read as a dead server.
+    ///
+    /// The tool call here blocks until the test releases it, so the ping can
+    /// only be answered by a reader that is not waiting on the render — and it
+    /// must be answered *first*, which is what "off the loop" means.
+    #[test]
+    fn a_ping_is_answered_while_a_render_is_still_running() {
+        let gate = Arc::new(Mutex::new(false));
+        let held = Arc::clone(&gate);
+
+        let script = format!(
+            "{}\n{}\n",
+            request(1, "tools/call", json!({ "name": "generate_image", "arguments": {} })),
+            request(2, "ping", Value::Null)
+        );
+
+        // Released once the ping has had time to come back, so the render is
+        // genuinely still in flight while the reader is answering.
+        let opener = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            *held.lock().unwrap() = true;
+        });
+
+        let replies = drive(&script, move |_| {
+            while !*gate.lock().unwrap() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(json!({ "content": [] }))
+        });
+        opener.join().unwrap();
+
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["id"], 2, "the ping waited for the render");
+        assert_eq!(replies[1]["id"], 1);
+    }
+
+    /// A cancellation is a *notification*: it carries no id of its own, only the
+    /// id of the request it cancels. `serve` dropped everything without an id
+    /// before looking at the method, so the one message whose whole purpose is
+    /// to stop a paid render was the one message guaranteed to be ignored.
+    #[test]
+    fn a_cancellation_notification_stops_the_work_it_names() {
+        let script = format!(
+            "{}\n{}\n",
+            request(7, "tools/call", json!({ "name": "generate_image", "arguments": {} })),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 7 }
+            })
+        );
+
+        // Polls forever unless cancelled — the test hangs rather than fails if
+        // the notification is dropped again, so the assertion below only ever
+        // runs when cancellation actually arrived.
+        let replies = drive(&script, |_| {
+            loop {
+                cancel::check()?;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["id"], 7);
+        let message = replies[0]["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("cancelled"), "{message}");
+    }
+
+    /// Four workers, so four renders overlap rather than queueing. The handler
+    /// waits for all of them to arrive, which can only happen if they run
+    /// concurrently.
+    #[test]
+    fn tool_calls_run_concurrently_rather_than_queueing() {
+        let arrived = Arc::new(Mutex::new(0usize));
+
+        let script: String = (1..=WORKERS)
+            .map(|n| {
+                request(
+                    n as u64,
+                    "tools/call",
+                    json!({ "name": "generate_image", "arguments": {} }),
+                ) + "\n"
+            })
+            .collect();
+
+        let replies = drive(&script, move |_| {
+            *arrived.lock().unwrap() += 1;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while *arrived.lock().unwrap() < WORKERS {
+                if std::time::Instant::now() > deadline {
+                    anyhow::bail!("only {} of {WORKERS} calls ran at once", arrived.lock().unwrap());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(json!({ "content": [] }))
+        });
+
+        assert_eq!(replies.len(), WORKERS);
+        for reply in &replies {
+            assert!(reply["error"].is_null(), "{reply}");
+        }
+    }
+
+    /// A pool turns a panicking tool call from "the process dies visibly" into
+    /// "one worker vanishes silently". After four, the server would accept calls
+    /// and answer none of them while still passing `ping` — a hang with a
+    /// healthy liveness probe, which is the worst shape a failure can take.
+    #[test]
+    fn a_panicking_tool_call_costs_a_reply_and_not_the_server() {
+        let script: String = (1..=WORKERS + 1)
+            .map(|n| {
+                request(
+                    n as u64,
+                    "tools/call",
+                    json!({ "name": "generate_image", "arguments": { "n": n } }),
+                ) + "\n"
+            })
+            .collect();
+
+        // Every call but the last panics, which is one more panic than there are
+        // workers: without the guard the pool is empty by the time the last
+        // arrives and the test hangs instead of failing.
+        let replies = drive(&script, |params| {
+            if params["arguments"]["n"].as_u64() == Some(WORKERS as u64 + 1) {
+                Ok(json!({ "content": [] }))
+            } else {
+                panic!("deliberate");
+            }
+        });
+
+        assert_eq!(replies.len(), WORKERS + 1);
+        let last = replies
+            .iter()
+            .find(|r| r["id"] == json!(WORKERS + 1))
+            .expect("the call after the panics never got a reply");
+        assert!(last["error"].is_null(), "the pool did not survive: {last}");
+    }
+
+    /// Responses may now come back in any order, so every one has to carry the
+    /// id it answers — and every one has to be a whole line, since two workers
+    /// finishing together would otherwise interleave their JSON and corrupt the
+    /// stream permanently. `drive` parses each line, so a torn write fails here.
+    #[test]
+    fn every_reply_is_one_whole_line_carrying_its_own_id() {
+        let script = format!(
+            "{}\n{}\n{}\n",
+            request(1, "initialize", Value::Null),
+            request(2, "tools/list", Value::Null),
+            request(3, "ping", Value::Null)
+        );
+        let replies = drive(&script, |_| Ok(json!({})));
+
+        let ids: Vec<_> = replies.iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(ids, vec![json!(1), json!(2), json!(3)]);
+        for reply in &replies {
+            assert_eq!(reply["jsonrpc"], "2.0");
+        }
     }
 
     /// The worst silent drop this server had, and the reason the typed accessors

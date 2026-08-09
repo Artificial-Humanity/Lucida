@@ -247,6 +247,11 @@ impl Client {
         let mut announced = String::new();
 
         loop {
+            // Between polls only. The render is submitted and billed by this
+            // point, so a cancellation stops the *waiting*, not the charge —
+            // which is what `cancel::check`'s message says out loud.
+            crate::cancel::check()?;
+
             if started.elapsed() > deadline {
                 bail!(
                     "gave up after {} minutes. The job may still complete; its \

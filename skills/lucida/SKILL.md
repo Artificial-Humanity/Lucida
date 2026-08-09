@@ -96,6 +96,10 @@ than hidden, so read what comes back rather than assuming the request was met.
   which kind you have.
 - **A local render can take minutes and reports elapsed time while it works.**
   It has not hung.
+- **A slow render does not block the server.** Other tool calls run alongside it
+  — up to four at once — and cancelling a request actually stops the waiting.
+  Cancellation does not refund a render already submitted to a paid provider: the
+  charge is incurred when the provider starts work, not when the result is read.
 
 ## Video
 

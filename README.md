@@ -397,6 +397,14 @@ the agent session dies.
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
 
+Tool calls run off the read loop, up to four at a time. The thread reading stdin
+answers `initialize`, `ping` and `tools/list` itself and never waits on a render,
+so a client using ping as a liveness probe gets an answer while a 20-minute
+ComfyUI job is still going, and a second call does not queue behind the first.
+`notifications/cancelled` stops the waiting where there is a poll loop to stop —
+ComfyUI, BFL, Veo. It does not undo a charge: a paid provider bills when it
+starts work, not when the result is read.
+
 ### The skill
 
 [`skills/lucida/SKILL.md`](skills/lucida/SKILL.md) carries what a tool schema
