@@ -20,6 +20,21 @@ for Lucida.
 
 ## Working section — unreleased
 
+_No entries yet. The next cycle opens with the first code commit after v0.9.2._
+
+---
+
+## v0.9.2 — released 2026-08-09
+
+The first tranche of the 2026-08-09 product review: the release the review asked for by name,
+"keep the existing promises". Nothing new is offered — every item is the implementation
+failing to do something the product already claims, and two of the three structural findings
+close here (the third, the MCP server blocking its stdio loop, is v0.10 work).
+
+Released from `main` with the verification trio green (163 tests, up from 138; `cargo clippy
+--all-targets -- -D warnings` clean; all `scripts/smoke.sh` checks) and CI green on all three
+platforms at `8e48b10`.
+
 ### 2026-08-09 — the 2026-08-09 product review, first tranche
 
 Everything below closes a finding in [product-review-20260809.md](product-review-20260809.md),
