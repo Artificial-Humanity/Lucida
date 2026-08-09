@@ -64,12 +64,21 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
 - **Decided 2026-08-09, and it shapes the roadmap:** public adoption *is* a goal, and the
   review is being addressed in full — all three tranches, expansion axes included. So the
   positioning work is live (description and topics done; crates.io once the ledger and video
-  APIs settle), and Phase 3 will extract a `VideoProvider` trait, expose the Veo 3.1 knobs,
-  add Lyria audio, and finish Stability's edit endpoints. **This is the whole of what is
-  left** — v0.9.2 and v0.10.0 between them closed every finding in the review's own suggested
-  sequence for those two versions. **A second video provider is
-  deferred** — owner 2026-08-09: do the trait and the Veo 3.1 knobs, which cost nothing, and
-  leave the paid signup until it is wanted. Aggregators stay declined.
+  APIs settle).
+- **Phase 3's video work is DONE, on `main`, unreleased.** The `VideoProvider` trait landed
+  and video now has **three providers**: Veo, Runway (its own gen4 models only) and Kling
+  (direct — all eight versions, three quality tiers). `--duration` answers the ROADMAP's open
+  question: 8 s is **not** a hard limit, Veo does 4, 6 and 8. 220 tests.
+- **Aggregators remain declined, twice reaffirmed.** Runway's fronted catalogue (Kling, Veo,
+  Seedance, Hailuo, Grok, Gemini) was excluded by the owner on 2026-08-09; fal.ai was probed
+  and declined the same day, because the models it fronts that we want — Kling, Veo, FLUX —
+  are all now reached *directly*, so it would only add a worse second path to lanes we own.
+  Two facts about fal are in the changelog for whoever revisits it: it authenticates with
+  `Authorization: Key` rather than `Bearer`, and it queues a request **without validating**,
+  so AGENTS.md §2's free-validation-error probe — how every provider here was characterised
+  safely — does not work against it.
+- **Left in Phase 3:** Lyria audio (same Gemini key, no new account) and Stability's edit
+  endpoints. **Owner 2026-08-09: no further providers for now.**
 
 ## Pointers
 
