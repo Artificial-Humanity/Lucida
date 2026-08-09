@@ -8,8 +8,10 @@ description: Generating and editing images and video with Lucida — choosing a 
 Lucida generates and edits images, and generates video, as an MCP server
 (`generate_image`, `image_providers`, `start_video`, `check_video`,
 `list_operations`) or a CLI
-(`lucida generate|edit|video|check|ops|history|models|config`). Video has two
-providers now, so `--provider`/`provider` applies there as well as to images.
+(`lucida generate|edit|video|check|ops|history|models|config`). Video has a
+choice of provider too, so `--provider`/`provider` applies there as well as to
+images — which are available, and what each can do, comes from the probe rather
+than from here.
 
 **This file deliberately contains no capability facts.** Which provider takes a
 seed, a mask, a negative prompt or a given aspect ratio changes as providers ship
@@ -129,9 +131,9 @@ the parameter that decides the bill**, and what each provider accepts differs �
 one offers three fixed lengths, the other a range. Probe rather than assume; a
 length the provider cannot render is refused before anything is spent.
 
-Not every video model starts from text. One provider's faster models animate a
-still and cannot render from a prompt alone, and asking them to is a refusal
-naming the fix rather than a silent substitution.
+Not every video model starts from text. Some animate a still and cannot render
+from a prompt alone; asking them to is a refusal naming the fix rather than a
+silent substitution. The probe says which.
 
 ## From a shell, in a script
 
