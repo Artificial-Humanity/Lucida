@@ -103,8 +103,15 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   `Authorization: Key` rather than `Bearer`, and it queues a request **without validating**,
   so AGENTS.md §2's free-validation-error probe — how every provider here was characterised
   safely — does not work against it.
-- **Left in Phase 3:** Lyria audio (same Gemini key, no new account) and Stability's edit
-  endpoints. **Owner 2026-08-09: no further providers for now.**
+- **Left in Phase 3:** Stability's edit endpoints. **Owner 2026-08-09: no further providers
+  for now.**
+- **Audio is out of scope** — owner 2026-08-09, *"this starts to drift into Swiss army MCP."*
+  Lyria was the cheapest expansion on the board and that is precisely why the decision is
+  worth having in writing: both model ids were confirmed live on the existing Gemini key, on
+  plain `generateContent` (simpler than any video lane), with Gemini TTS beside them on the
+  same credential. **Cheapness is a temptation, not a reason.** Lucida is images and video.
+  Reasoning in [ROADMAP.md](../ROADMAP.md) § "Audio — out of scope"; reopen on a stated need,
+  not on a provider making it easy.
 
 ## Pointers
 

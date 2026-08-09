@@ -528,6 +528,32 @@ breach.
 Revisit only if an official, metered API appears. Both objections would have to
 fall, not one.
 
+### Audio — out of scope
+
+**Not implementing.** Owner decision, 2026-08-09: *"we leave audio out — this
+starts to drift into Swiss army MCP."*
+
+Recorded here rather than dropped, because every argument was on the other side
+and the decision was still right. Lyria is served by the Gemini API Lucida
+already talks to, so it needed **no new account, no new key and no new client** —
+`lyria-3-clip-preview` and `lyria-3-pro-preview` were confirmed live on the
+existing credential, both on plain `generateContent`, which is a *simpler* shape
+than the submit/poll/download every video provider needs. Speech was sitting
+beside it on the same key (`gemini-2.5-flash-preview-tts`,
+`gemini-3.1-flash-tts-preview`, three `native-audio` models). It was the cheapest
+expansion available by a wide margin.
+
+That is exactly what makes it worth writing down. **Cheapness is not a reason,
+it is a temptation.** A tool that generates images and video has a shape someone
+can hold in their head; one that also does music and speech is a bag of
+capabilities that happens to share a credential, and the schema an agent reads
+gets correspondingly vaguer. `Capabilities` would have gained variants for
+concepts the rest of the product has no use for — duration and voice — to
+describe outputs that share nothing with a picture but the API key.
+
+Reopen only on a stated need for audio in the studio's own work, not on a
+provider making it easy. It will keep being easy.
+
 ---
 
 ## 3. Cross-cutting consequences
