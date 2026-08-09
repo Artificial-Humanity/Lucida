@@ -204,8 +204,24 @@ fn run_with_stdin(cmd: &mut Command, stdin: &str) -> Run {
     // ended and lets it exit rather than blocking this test forever.
     {
         let mut pipe = child.stdin.take().expect("stdin was piped");
-        pipe.write_all(stdin.as_bytes())
-            .expect("could not write stdin");
+        match pipe.write_all(stdin.as_bytes()) {
+            Ok(()) => {}
+
+            // The child exited without reading its input, and for some of these
+            // commands that *is* the behaviour under test: `config --set` with a
+            // retired name refuses before it ever prompts, so it can be gone
+            // before this write lands. Whether it wins that race depends on
+            // scheduling, which is why this passed locally and on two of three
+            // CI platforms before failing on the third.
+            //
+            // Not a blanket ignore. Anything other than a closed pipe is a fault
+            // in this harness and still panics — and the exit code and output
+            // are collected below either way, so a child that wrongly ignored
+            // its input is still caught by the assertion that follows.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+
+            Err(e) => panic!("could not write stdin: {e}"),
+        }
     }
 
     let done = child
