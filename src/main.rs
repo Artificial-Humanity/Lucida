@@ -21,6 +21,7 @@ mod ledger;
 mod masked;
 mod mcp;
 mod openai;
+mod out;
 mod provider;
 mod retry;
 mod setup;
@@ -71,6 +72,15 @@ struct Cli {
     /// verbosity flag today, and one would need a different letter.
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
+
+    /// Emit one JSON object on stdout instead of prose. Human messages still go
+    /// to stderr, so the document stays clean.
+    ///
+    /// Global rather than per-subcommand: a caller that wants machine output
+    /// wants it from whatever it happens to call, and having to remember which
+    /// subcommands support it is the kind of detail that turns into a bug.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -286,31 +296,48 @@ enum Command {
 
 fn main() {
     let cli = Cli::parse();
+    out::set_json(cli.json);
 
     // `mcp` is excluded because its client spawns and kills it constantly, so a
     // check there is a network round trip per launch; `update` because it has
-    // just done this properly and would otherwise say it twice.
-    let announce = !matches!(cli.command, Command::Mcp | Command::Update { .. });
+    // just done this properly and would otherwise say it twice. `--json` too:
+    // a notice on stderr is harmless, but a caller asking for machine output is
+    // not asking for news.
+    let announce =
+        !matches!(cli.command, Command::Mcp | Command::Update { .. }) && !cli.json;
 
-    if let Err(e) = run(cli) {
-        eprintln!("error: {e:#}");
-        // Deliberately no update notice on the way out: the error is what the
-        // reader needs, and appending unrelated news to a failure is noise.
-        std::process::exit(1);
-    }
+    let code = match run(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            let code = out::code_for(&e);
+            eprintln!("error: {e:#}");
+            out::emit_error(&e, code);
+            // Deliberately no update notice on the way out: the error is what
+            // the reader needs, and appending unrelated news to a failure is
+            // noise.
+            std::process::exit(code);
+        }
+    };
 
     // After the work, never before — so a slow or unreachable GitHub costs a
     // few seconds at exit rather than delaying a render. It installs nothing.
     if announce {
         update::notify_if_due(env!("CARGO_PKG_VERSION"));
     }
+
+    if code != out::OK {
+        std::process::exit(code);
+    }
 }
 
-fn run(cli: Cli) -> Result<()> {
+/// Returns the exit code rather than `()`, because "still working" is an
+/// outcome and not an error — `lucida check` has to be able to say so without
+/// pretending something went wrong.
+fn run(cli: Cli) -> Result<i32> {
     match cli.command {
-        Command::Mcp => mcp::serve(),
+        Command::Mcp => mcp::serve().map(|()| out::OK),
 
-        Command::Models { provider } => list_models(Backend::parse(&provider)?),
+        Command::Models { provider } => list_models(Backend::parse(&provider)?).map(|()| out::OK),
 
         Command::Setup {
             project,
@@ -323,12 +350,12 @@ fn run(cli: Cli) -> Result<()> {
                 ),
                 None => setup::Scope::User,
             };
-            setup::run(scope, dry_run, yes)
+            setup::run(scope, dry_run, yes).map(|()| out::OK)
         }
 
         Command::Skill => {
             skill::print();
-            Ok(())
+            Ok(out::OK)
         }
 
         Command::Update { check, yes } => {
@@ -337,16 +364,16 @@ fn run(cli: Cli) -> Result<()> {
                 (_, true) => update::Mode::Yes,
                 _ => update::Mode::Ask,
             };
-            update::Updater::new()?.run(mode)
+            update::Updater::new()?.run(mode).map(|()| out::OK)
         }
 
         Command::Config { init, set, remove } => match (set, remove) {
-            (Some(name), _) => set_config(&name),
-            (_, Some(name)) => remove_config(&name),
-            _ if init => init_config(),
+            (Some(name), _) => set_config(&name).map(|()| out::OK),
+            (_, Some(name)) => remove_config(&name).map(|()| out::OK),
+            _ if init => init_config().map(|()| out::OK),
             _ => {
                 show_config();
-                Ok(())
+                Ok(out::OK)
             }
         },
 
@@ -357,7 +384,7 @@ fn run(cli: Cli) -> Result<()> {
             opts,
         } => {
             let (request, backend) = opts.into_request(prompt, reference)?;
-            execute(request, backend, out)
+            execute(request, backend, out).map(|()| out::OK)
         }
 
         Command::Edit {
@@ -374,14 +401,25 @@ fn run(cli: Cli) -> Result<()> {
 
             let destination = out.unwrap_or_else(|| PathBuf::from(&image));
             let (request, backend) = opts.into_request(prompt, references)?;
-            execute(request, backend, destination)
+            execute(request, backend, destination).map(|()| out::OK)
         }
 
         Command::Check { operation, out } => {
             match genai::Client::from_env()?.poll_video(&operation)? {
                 video::VideoStatus::Pending => {
+                    // Its own exit code. This used to be 0 with nothing on
+                    // stdout, which a polling script cannot tell apart from a
+                    // render that finished and was written — so a loop built on
+                    // it either spins forever or abandons something already paid
+                    // for.
                     eprintln!("Still rendering. Try again in half a minute.");
-                    Ok(())
+                    out::emit(serde_json::json!({
+                        "ok": true,
+                        "status": "pending",
+                        "operation": operation,
+                        "exit_code": out::PENDING,
+                    }));
+                    Ok(out::PENDING)
                 }
                 video::VideoStatus::Done(bytes) => {
                     let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
@@ -394,8 +432,19 @@ fn run(cli: Cli) -> Result<()> {
                     // started from — the outstanding list is derived from the
                     // log rather than stored, so nothing has to be told.
                     ledger::video_done(&operation, &written.to_string_lossy());
-                    println!("{}", written.display());
-                    Ok(())
+                    if out::json() {
+                        out::emit(serde_json::json!({
+                            "ok": true,
+                            "status": "done",
+                            "operation": operation,
+                            "path": written.to_string_lossy(),
+                            "bytes": bytes.len(),
+                            "exit_code": out::OK,
+                        }));
+                    } else {
+                        println!("{}", written.display());
+                    }
+                    Ok(out::OK)
                 }
             }
         }
@@ -447,10 +496,21 @@ fn run(cli: Cli) -> Result<()> {
             // shell too. Unattended callers want it: a render that outlives the
             // process is fine, a process that must survive the render is not.
             if no_wait {
-                // The id on stdout, where the path goes when we do wait: one
-                // line, the useful part, capturable by a script.
-                println!("{operation}");
-                return Ok(());
+                if out::json() {
+                    out::emit(serde_json::json!({
+                        "ok": true,
+                        "status": "started",
+                        "operation": operation,
+                        "model": resolved,
+                        "estimated_usd": price.against_budget(),
+                        "exit_code": out::OK,
+                    }));
+                } else {
+                    // The id on stdout, where the path goes when we do wait: one
+                    // line, the useful part, capturable by a script.
+                    println!("{operation}");
+                }
+                return Ok(out::OK);
             }
 
             let bytes = client.await_video(&operation)?;
@@ -461,13 +521,26 @@ fn run(cli: Cli) -> Result<()> {
                 bytes.len() as f64 / 1_048_576.0
             );
             ledger::video_done(&operation, &written.to_string_lossy());
-            println!("{}", written.display());
-            Ok(())
+            if out::json() {
+                out::emit(serde_json::json!({
+                    "ok": true,
+                    "status": "done",
+                    "operation": operation,
+                    "path": written.to_string_lossy(),
+                    "model": resolved,
+                    "bytes": bytes.len(),
+                    "estimated_usd": price.against_budget(),
+                    "exit_code": out::OK,
+                }));
+            } else {
+                println!("{}", written.display());
+            }
+            Ok(out::OK)
         }
 
-        Command::Ops => show_operations(),
+        Command::Ops => show_operations().map(|()| out::OK),
 
-        Command::History { count } => show_history(count),
+        Command::History { count } => show_history(count).map(|()| out::OK),
     }
 }
 
@@ -487,6 +560,16 @@ fn show_operations() -> Result<()> {
     }
 
     let open = ledger::outstanding();
+
+    if out::json() {
+        out::emit(serde_json::json!({
+            "ok": true,
+            "operations": open,
+            "exit_code": out::OK,
+        }));
+        return Ok(());
+    }
+
     if open.is_empty() {
         println!("No video renders are waiting to be collected.");
         return Ok(());
@@ -512,6 +595,19 @@ fn show_history(count: usize) -> Result<()> {
     }
 
     let all = ledger::entries();
+
+    if out::json() {
+        let recent: Vec<_> = all.iter().rev().take(count).rev().cloned().collect();
+        out::emit(serde_json::json!({
+            "ok": true,
+            "entries": recent,
+            "estimated_usd_24h": spend::spent_recently(),
+            "budget_usd": spend::budget(),
+            "exit_code": out::OK,
+        }));
+        return Ok(());
+    }
+
     if all.is_empty() {
         println!("Nothing recorded yet.");
         return Ok(());
@@ -1167,8 +1263,30 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
         price.against_budget(),
     );
 
-    // The path alone on stdout, so this composes in a pipeline.
-    println!("{}", written.display());
+    if out::json() {
+        let (width, height) = match image_dimensions(&image.bytes, &image.mime_type) {
+            Some((w, h)) => (Some(w), Some(h)),
+            None => (None, None),
+        };
+        out::emit(serde_json::json!({
+            "ok": true,
+            "status": "done",
+            "path": written.to_string_lossy(),
+            "provider": caps.provider,
+            "model": request.model,
+            "mime": image.mime_type,
+            "bytes": image.bytes.len(),
+            "width": width,
+            "height": height,
+            "seed": image.seed,
+            "provenance": caps.provenance.describe(),
+            "estimated_usd": price.against_budget(),
+            "exit_code": out::OK,
+        }));
+    } else {
+        // The path alone on stdout, so this composes in a pipeline.
+        println!("{}", written.display());
+    }
     Ok(())
 }
 

@@ -493,7 +493,18 @@ impl Capabilities {
     /// Every message names an alternative, because "unsupported" without a way
     /// forward just moves the search to the documentation. This is the same shape
     /// as the `veo-lite` negative-prompt guard, which earned its keep.
+    ///
+    /// Everything this produces is a *refusal* rather than a failure — the
+    /// request was understood and declined before anything was spent — so the
+    /// whole result is tagged as one, and the CLI exits 2 instead of 1. Tagged
+    /// here rather than at each `bail!` because that is the definition of this
+    /// function, and a site added later should not have to remember.
     pub fn check(&self, req: &ImageRequest) -> Result<()> {
+        self.refuse(req)
+            .map_err(|e| anyhow::Error::new(crate::out::Refused(format!("{e:#}"))))
+    }
+
+    fn refuse(&self, req: &ImageRequest) -> Result<()> {
         let me = self.provider;
 
         if req.size.is_some() && !self.size {

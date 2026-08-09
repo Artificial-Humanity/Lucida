@@ -31,7 +31,7 @@
 
 use crate::clock;
 use crate::provider::Backend;
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 /// What one render is expected to cost, in US dollars.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -188,14 +188,17 @@ pub fn check(price: Price, what: &str) -> Result<()> {
         _ => String::new(),
     };
 
-    bail!(
+    // A refusal, not a failure: understood, declined before the money moved, and
+    // naming what to do instead. The CLI exits 2 for it, so a wrapper that
+    // retries on failure does not retry something that cannot succeed.
+    Err(anyhow::Error::new(crate::out::Refused(format!(
         "LUCIDA_BUDGET is ${budget:.2} for a rolling 24 hours, and about \
          ${spent:.2} of that is already spent. This {what} would add roughly \
          ${estimate:.2}.{assumption}\n\n\
          Raise or unset LUCIDA_BUDGET, wait for the window to roll, or use \
          comfyui, which renders locally and costs nothing. `lucida history` \
          shows what the estimate is made of."
-    );
+    ))))
 }
 
 #[cfg(test)]

@@ -401,6 +401,23 @@ the agent session dies.
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
 
+`--json` works on any subcommand and puts one object on stdout — including on
+failure, so a caller never has to switch parsers depending on the outcome. Human
+prose stays on stderr. Exit codes tell four outcomes apart rather than two:
+
+| code | meaning |
+|---|---|
+| 0 | done |
+| 1 | something went wrong |
+| 2 | refused before anything was spent — a capability or a budget said no |
+| 3 | still working; ask again later |
+
+**2 is worth its own code.** A refusal is an answer, not a failure: the request
+was understood and declined before the money moved, and the message names what to
+do instead — so a wrapper that retries on 1 should not retry on 2. And `lucida
+check` used to report "still rendering" with the same 0 as "finished and
+written", which a polling script cannot tell apart.
+
 Every render says what it is expected to cost, before it happens and again
 afterwards, and `LUCIDA_BUDGET` turns that into a cap: a render that would take
 the last 24 hours past it is refused before anything is sent, in the same voice

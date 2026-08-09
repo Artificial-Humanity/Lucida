@@ -210,6 +210,37 @@ case "$out" in
   *)                                              fail "unexpected unreachable output: $out" ;;
 esac
 
+# --- exit codes and --json --------------------------------------------------
+# Everything used to exit 0 or 1, collapsing outcomes a caller has to tell
+# apart. A refusal in particular is not a failure: retrying it cannot succeed,
+# so a wrapper needs to see a different number.
+env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" generate x --provider google --seed 5 >/dev/null 2>&1
+case "$?" in
+  2) pass "a capability refusal exits 2" ;;
+  *) fail "a capability refusal exited $?, not 2" ;;
+esac
+
+env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" generate x --provider nonsense >/dev/null 2>&1
+case "$?" in
+  1) pass "an ordinary error exits 1" ;;
+  *) fail "an ordinary error exited $?, not 1" ;;
+esac
+
+# One JSON object on stdout whatever happens, including on failure — a caller
+# parsing output should not have to switch parsers depending on the outcome.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" --json generate x --provider google --seed 5 2>/dev/null)
+case "$out" in
+  *'"refused":true'*) pass "--json reports a refusal as one document" ;;
+  *)                  fail "no refusal document: $out" ;;
+esac
+
+# Prose must not leak into the document, or it is not parseable.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" --json ops 2>/dev/null)
+case "$out" in
+  '{'*'}') pass "--json writes JSON alone to stdout" ;;
+  *)       fail "stdout was not a bare JSON object: $out" ;;
+esac
+
 # --- the render ledger ------------------------------------------------------
 # A render that has been paid for must be findable afterwards, and the ledger is
 # the only thing that makes that true across sessions. Checked out of the shipped

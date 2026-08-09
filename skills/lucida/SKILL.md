@@ -125,6 +125,14 @@ your context; that pays twice for the same shot.
 Video bills per second of output and is far more expensive than images. Confirm
 before starting one unless you have been asked for it directly.
 
+## From a shell, in a script
+
+`--json` puts one object on stdout for any subcommand, including on failure, so
+there is one shape to parse either way. The exit code distinguishes four
+outcomes: `0` done, `1` something went wrong, `2` refused before anything was
+spent, `3` still working. **Do not retry a 2** — it is an answer rather than a
+failure, and the message names what to do instead.
+
 ## When credentials fail
 
 `lucida config` reports what the running process can see and where each setting
