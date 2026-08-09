@@ -10,7 +10,17 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
 
 ## Current State
 
-- **v0.10.0 is the latest release (2026-08-09)** — *dependable unattended use*, the second
+- **v1.0.0 is the latest release (2026-08-09)** — *video became a substitution, and the tests
+  grew a second layer*. The version number is a claim about **surfaces**, not about being
+  finished: the `ImageProvider` and `VideoProvider` traits, the six MCP tools, the four exit
+  codes, the `--json` documents, the ledger format and the config names are what callers may
+  now build against. Three things earned it — video behind a trait (Veo, Runway, Kling) so it
+  substitutes the way images have since v0.4; a **scope boundary** rather than a backlog, with
+  audio declined on the day it was cheapest to add; and the layer a user touches moved into
+  `cargo test`, which immediately found an unreachable bash assertion and three hand-written
+  MCP `provider` enums. 255 tests, CI green on all three platforms at `11409e1`.
+  **crates.io remains available and unrequested.**
+- **v0.10.0 (2026-08-09)** — *dependable unattended use*, the second
   tranche of the [2026-08-09 product review](product-review-20260809.md). **All three of the
   review's structural findings are now closed.** The MCP server dispatches tool calls on a
   pool of four and answers `ping`/`tools/list` from the reading thread, so a long render no
@@ -33,7 +43,7 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   self-update, one-line install on all three platforms, `lucida setup` wiring itself into
   Claude, the binary carrying its own skill, a **binding** mask on the local lane,
   Lucida-scoped keys beating shell exports, and CI on all three platforms.
-- **v0.9.0 through v0.10.0 are the published releases** (pruned 2026-08-07) — the eleven releases
+- **v0.9.0 through v1.0.0 are the published releases** (pruned 2026-08-07) — the eleven releases
   from v0.1.0 through v0.8.0 were deleted, taking the incomplete v0.5.0 (no Windows asset)
   with them. The baseline is deliberate: `lucida update` arrived in v0.7.0, so nothing below
   it could update itself at all, and every surviving release self-updates by both paths. **The
@@ -84,7 +94,7 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   review is being addressed in full — all three tranches, expansion axes included. So the
   positioning work is live (description and topics done; crates.io once the ledger and video
   APIs settle).
-- **Phase 3's video work is DONE, on `main`, unreleased.** The `VideoProvider` trait landed
+- **Phase 3's video work shipped in v1.0.0.** The `VideoProvider` trait landed
   and video now has **three providers**: Veo, Runway (its own gen4 models only) and Kling
   (direct — all eight versions, three quality tiers). `--duration` answers the ROADMAP's open
   question: 8 s is **not** a hard limit, Veo does 4, 6 and 8. 220 tests.

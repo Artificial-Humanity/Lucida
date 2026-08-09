@@ -20,6 +20,40 @@ for Lucida.
 
 ## Working section — unreleased
 
+*(empty — the entries below collected under v1.0.0 when it was tagged)*
+
+---
+
+## v1.0.0 — released 2026-08-09
+
+**Video became a substitution, and the tests grew a second layer.** The version number is the
+claim worth reading: the surfaces this tool is used through — the `ImageProvider` and
+`VideoProvider` traits, the MCP tool set, the four exit codes, the `--json` documents, the
+ledger format and the config names — are ones callers can now build against and expect to
+survive. Not that the work is finished.
+
+Three things earned it. **Video stopped being one hardcoded lane**: Veo, Runway and Kling
+behind a `VideoProvider` trait, so video is a substitution the way images have been since
+v0.4. **Scope got a boundary** rather than a backlog: audio was declined on the day it was
+cheapest to add, which is the only day a scope decision means anything. And **the layer a
+user actually touches is now tested by `cargo test`** rather than by a shell script in CI —
+which immediately turned up a bash assertion that had been unreachable for months and three
+MCP `provider` enums that were hand-written literals, the one place a stale list makes a
+working provider *unreachable* rather than merely undocumented.
+
+Also in this release: `--dry-run` on every paid command, a `video_providers` probe the shipped
+skill had been promising but not delivering, guidance to ask the user which provider and model
+to use when the choice is theirs, and a `lucida config` that no longer reports an enforced
+spending cap as ignored.
+
+Released from `main` with the verification trio green (**255 tests**, up from 201 at v0.10.0;
+`cargo clippy --all-targets -- -D warnings` clean; all `scripts/smoke.sh` checks against the
+release build) and CI green on all three platforms at `11409e1`.
+
+Not in scope and deliberately so: audio (see `ROADMAP.md` § "Audio — out of scope"), further
+providers (owner, 2026-08-09), and publishing to crates.io — which remains available and
+unrequested.
+
 ### 2026-08-09 — The README, and the setting it was right to omit
 
 Owner: the README had gone stale. It had — and auditing it found a live defect underneath.
@@ -174,6 +208,7 @@ hardcoded lane to three providers behind a trait. 220 tests, up from 201 at v0.1
 ---
 
 ## v0.10.0 — released 2026-08-09
+
 
 **Dependable unattended use** — the second tranche of the 2026-08-09 product review, and with
 it the review's **third and last structural finding**, so all three are closed. The theme is

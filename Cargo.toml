@@ -1,6 +1,6 @@
 [package]
 name = "lucida"
-version = "0.10.0"
+version = "1.0.0"
 edition = "2024"
 # Edition 2024 needs 1.85. Stated so cargo refuses with "requires rustc 1.85 or
 # newer" rather than handing an older toolchain a wall of syntax errors — which
