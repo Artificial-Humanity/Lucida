@@ -51,13 +51,16 @@ pub enum VideoStatus {
 }
 
 impl Client {
-    /// Blocking generate: start, poll to completion, download. Used by the CLI,
-    /// where waiting is fine. The MCP server drives `start_video`/`poll_video`
-    /// separately, because a render outlasts a tool call.
-    pub fn generate_video(&self, req: &VideoRequest) -> Result<Vec<u8>> {
-        let operation = self.start_video(req)?;
-        eprintln!("{}", resume_notice(&operation));
-        let done = self.await_operation(&operation)?;
+    /// Waits for a render already in flight, then downloads it.
+    ///
+    /// The other half of `start_video`, kept separate from it rather than joined
+    /// into one blocking call. The CLI now starts and waits in two visible steps
+    /// so it can print the operation id and write it to the ledger *between*
+    /// them — which is the whole difference between a render that can be
+    /// recovered and one that cannot. A single `generate_video` hid the id inside
+    /// itself, where nothing else could reach it.
+    pub fn await_video(&self, operation: &str) -> Result<Vec<u8>> {
+        let done = self.await_operation(operation)?;
         self.fetch_video(&done)
     }
 

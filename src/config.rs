@@ -50,6 +50,10 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
         "LUCIDA_NO_UPDATE_CHECK",
         "Set to silence the daily \"a newer release exists\" notice",
     ),
+    (
+        "LUCIDA_NO_LEDGER",
+        "Set to stop recording renders (the ledger stores your prompts)",
+    ),
 ];
 
 /// Names Lucida used to read and no longer does, with what replaced each.

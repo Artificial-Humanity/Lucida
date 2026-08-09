@@ -285,6 +285,7 @@ fn dispatch(method: &str, params: &Value) -> Result<Value> {
                 providers_schema(),
                 start_video_schema(),
                 check_video_schema(),
+                list_operations_schema(),
             ]
         })),
         "tools/call" => call_tool(params),
@@ -546,6 +547,56 @@ fn check_video_schema() -> Value {
     })
 }
 
+/// The recovery surface for a render whose session ended.
+///
+/// New in this version, and a deliberate change to the public MCP surface — this
+/// server is registered at user scope, so every agent session on the machine
+/// sees it. It earns that: `start_video` hands back an operation id and the
+/// render outlives the conversation, so without somewhere to read the id back
+/// from, a session that ends mid-render leaves a paid render permanently
+/// unreachable. The id was already the only way in; it just had nowhere to live.
+fn list_operations_schema() -> Value {
+    json!({
+        "name": "list_operations",
+        "description": concat!(
+            "List video renders that were started and never collected, with the ",
+            "operation id needed to finish each one. Use this when a render was ",
+            "started earlier — by you, by a previous session, or from the shell — ",
+            "and its id is no longer to hand. Spends nothing; reads a local file."
+        ),
+        "inputSchema": { "type": "object", "properties": {} }
+    })
+}
+
+fn list_operations() -> Result<String> {
+    if crate::ledger::disabled() {
+        return Ok(
+            "The render ledger is switched off (LUCIDA_NO_LEDGER is set), so no \
+             operations were recorded. A render's id is reported by start_video \
+             at the moment it begins."
+                .to_string(),
+        );
+    }
+
+    let open = crate::ledger::outstanding();
+    if open.is_empty() {
+        return Ok("No video renders are waiting to be collected.".to_string());
+    }
+
+    let mut out = String::from("Video renders started and not yet collected:\n\n");
+    for entry in &open {
+        out.push_str(&format!(
+            "- operation: {}\n  started: {}\n  model: {}\n  prompt: {}\n",
+            entry["operation"].as_str().unwrap_or("?"),
+            crate::clock::stamp(entry["at"].as_i64().unwrap_or(0)),
+            entry["model"].as_str().unwrap_or("?"),
+            entry["prompt"].as_str().unwrap_or(""),
+        ));
+    }
+    out.push_str("\nPass an operation id to check_video with an output path to collect it.");
+    Ok(out)
+}
+
 /// Every tool this server handles.
 ///
 /// Named once so `tools/list` and `tools/call` cannot drift apart — advertising
@@ -556,6 +607,7 @@ const TOOL_NAMES: &[&str] = &[
     "image_providers",
     "start_video",
     "check_video",
+    "list_operations",
 ];
 
 fn call_tool(params: &Value) -> Result<Value> {
@@ -574,6 +626,7 @@ fn call_tool(params: &Value) -> Result<Value> {
         "image_providers" => wrap(Ok(describe_providers())),
         "start_video" => wrap(start_video(args)),
         "check_video" => wrap(check_video(args)),
+        "list_operations" => wrap(list_operations()),
         // Unreachable while the guard above and this match agree, which is what
         // the constant is for.
         other => anyhow::bail!("`{other}` is advertised but not implemented"),
@@ -765,6 +818,13 @@ fn generate_image(args: &Value) -> Result<String> {
     let destination = crate::correct_extension(requested, &image.mime_type);
     let renamed = destination != requested;
     let written = crate::write_image(&destination, &image.bytes)?;
+    crate::ledger::image(
+        caps.provider,
+        &request.model,
+        &request.prompt,
+        &written.to_string_lossy(),
+        image.seed,
+    );
 
     // The dimensions are stated because they are not always the ones requested:
     // an edit on comfyui normalizes to roughly a megapixel, so the result can
@@ -887,6 +947,11 @@ fn start_video(args: &Value) -> Result<String> {
     };
 
     let operation = genai::Client::from_env()?.start_video(&request)?;
+    // Written down before it is reported, because the reporting is the fragile
+    // half: an agent's session can end between this line and the render
+    // finishing, and the id would then exist only in a transcript nobody reads
+    // again. `lucida ops` reads it back.
+    crate::ledger::video_started(&request.model, &request.prompt, &operation);
     Ok(format!(
         "Render started.\n\noperation: {operation}\n\n\
          It typically takes 1-3 minutes. Wait about 30 seconds, then call \
@@ -908,6 +973,7 @@ fn check_video(args: &Value) -> Result<String> {
             let requested = std::path::Path::new(output_path);
             let destination = crate::correct_extension(requested, "video/mp4");
             let written = crate::write_image(&destination, &bytes)?;
+            crate::ledger::video_done(operation, &written.to_string_lossy());
             Ok(format!(
                 "Render complete. Wrote {} ({:.1} MB).",
                 written.display(),

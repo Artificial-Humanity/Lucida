@@ -154,6 +154,7 @@ $ lucida config                         # what this process sees, and from where
 | `LUCIDA_COMFYUI_CA` | Path to a PEM certificate, to trust a private CA |
 | `LUCIDA_CONFIG` | Path to the config file, overriding where it is looked for |
 | `LUCIDA_NO_UPDATE_CHECK` | Set to silence the daily "a newer release exists" notice |
+| `LUCIDA_NO_LEDGER` | Set to stop recording renders. The ledger stores prompts; `lucida config` says where it lives |
 
 You only need the ones for providers you actually use. Keys come from each
 provider's own dashboard.
@@ -267,6 +268,8 @@ a ComfyUI in a container or on another machine works with no shared mount.
 | `lucida edit <image> <prompt>` | Edits an existing image. **Overwrites its input** unless `--out` |
 | `lucida video <prompt>` | Renders with Veo. Takes minutes, and bills per second of output. `--no-wait` prints the operation id and returns |
 | `lucida check <operation>` | Resumes a video render by operation id — after a timeout, an interruption, or from a different shell |
+| `lucida ops` | Video renders started and never collected, each with the command that finishes it |
+| `lucida history` | Recent renders — prompt, provider, file, seed |
 | `lucida models` | What a provider can reach, and what it can be asked for |
 | `lucida config` | What settings this process can see |
 | `lucida setup` | Wires Lucida into Claude Code and the Claude app |
@@ -396,6 +399,14 @@ the agent session dies.
 
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
+
+Every render is written to a ledger — one JSON object per line, beside the config
+file — so a render that has been paid for can be found again afterwards. That is
+what `lucida ops` reads: an agent starts a Veo render, hands back an operation id
+and its session ends, and without somewhere to read the id back from, minutes of
+billed output are unreachable. The `list_operations` MCP tool is the same list.
+The ledger records your prompts; `LUCIDA_NO_LEDGER=1` switches it off, and
+`lucida config` says where it is either way.
 
 Tool calls run off the read loop, up to four at a time. The thread reading stdin
 answers `initialize`, `ping` and `tools/list` itself and never waits on a render,

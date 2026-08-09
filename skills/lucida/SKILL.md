@@ -6,8 +6,9 @@ description: Generating and editing images and video with Lucida — choosing a 
 # Lucida
 
 Lucida generates and edits images, and generates video, as an MCP server
-(`generate_image`, `image_providers`, `start_video`, `check_video`) or a CLI
-(`lucida generate|edit|video|check|models|config`).
+(`generate_image`, `image_providers`, `start_video`, `check_video`,
+`list_operations`) or a CLI
+(`lucida generate|edit|video|check|ops|history|models|config`).
 
 **This file deliberately contains no capability facts.** Which provider takes a
 seed, a mask, a negative prompt or a given aspect ratio changes as providers ship
@@ -111,6 +112,11 @@ The operation id is just a string, so a render started by an agent can be
 collected later from the shell with `lucida check <operation>` — including after
 the agent session ends. Hand the id back to the user when you start a render you
 may not be around to finish.
+
+**If you have lost an operation id, call `list_operations`.** Every started render
+is recorded, so an id from an earlier session — yours or someone else's — is still
+there. Do not start a second render because the first one's id is no longer in
+your context; that pays twice for the same shot.
 
 Video bills per second of output and is far more expensive than images. Confirm
 before starting one unless you have been asked for it directly.

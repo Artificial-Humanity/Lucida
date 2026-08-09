@@ -210,6 +210,34 @@ case "$out" in
   *)                                              fail "unexpected unreachable output: $out" ;;
 esac
 
+# --- the render ledger ------------------------------------------------------
+# A render that has been paid for must be findable afterwards, and the ledger is
+# the only thing that makes that true across sessions. Checked out of the shipped
+# binary because the file's location is resolved at runtime from the config
+# search path, which no unit test exercises.
+ledger_home=$(mktemp -d)
+
+out=$(env -i HOME="$ledger_home" PATH=/usr/bin:/bin "$BIN" ops 2>&1 || true)
+case "$out" in
+  *"No video renders are waiting"*) pass "ops reports an empty ledger" ;;
+  *)                                fail "unexpected empty-ledger output: $out" ;;
+esac
+
+out=$(env -i HOME="$ledger_home" PATH=/usr/bin:/bin "$BIN" config 2>&1 || true)
+case "$out" in
+  # Named out loud because this file records prompts, and someone who does not
+  # want them on disk should not have to find it first to learn it exists.
+  *"Render ledger:"*) pass "config names the ledger" ;;
+  *)                  fail "config does not mention the ledger: $out" ;;
+esac
+
+out=$(env -i HOME="$ledger_home" PATH=/usr/bin:/bin LUCIDA_NO_LEDGER=1 "$BIN" ops 2>&1 || true)
+case "$out" in
+  *"LUCIDA_NO_LEDGER"*) pass "the ledger can be switched off" ;;
+  *)                    fail "LUCIDA_NO_LEDGER was ignored: $out" ;;
+esac
+rm -rf "$ledger_home"
+
 # --- the MCP stdio transport ----------------------------------------------
 # Worth testing separately from the CLI: framing can break in ways no ordinary
 # command would reveal, and on Windows line endings are the plausible culprit.

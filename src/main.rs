@@ -13,9 +13,11 @@
 
 mod bfl;
 mod cancel;
+mod clock;
 mod comfy;
 mod config;
 mod genai;
+mod ledger;
 mod masked;
 mod mcp;
 mod openai;
@@ -215,6 +217,16 @@ enum Command {
         out: PathBuf,
     },
 
+    /// Video renders that were started and never collected
+    Ops,
+
+    /// Recent renders, newest last
+    History {
+        /// How many to show
+        #[arg(short = 'n', long, default_value_t = 20)]
+        count: usize,
+    },
+
     /// List the image models a provider can reach, and what it can be asked for
     Models {
         /// Which provider to interrogate: google, comfyui, bfl, stability or openai
@@ -377,6 +389,10 @@ fn run(cli: Cli) -> Result<()> {
                         written.display(),
                         bytes.len() as f64 / 1_048_576.0
                     );
+                    // Retires the operation from `lucida ops`, wherever it was
+                    // started from — the outstanding list is derived from the
+                    // log rather than stored, so nothing has to be told.
+                    ledger::video_done(&operation, &written.to_string_lossy());
                     println!("{}", written.display());
                     Ok(())
                 }
@@ -406,30 +422,119 @@ fn run(cli: Cli) -> Result<()> {
 
             let client = genai::Client::from_env()?;
 
+            // Started and waited on in two visible steps, so the operation id
+            // exists out here where it can be printed and written down. It used
+            // to live inside one blocking call, which is why nothing but the
+            // deadline message ever mentioned it.
+            let operation = client.start_video(&request)?;
+            ledger::video_started(&resolved, &request.prompt, &operation);
+            eprintln!("{}", video::resume_notice(&operation));
+
             // The shape the MCP surface has had since it existed — start, hand
             // back the id, let the caller collect it — finally available to the
             // shell too. Unattended callers want it: a render that outlives the
             // process is fine, a process that must survive the render is not.
             if no_wait {
-                let operation = client.start_video(&request)?;
-                eprintln!("{}", video::resume_notice(&operation));
                 // The id on stdout, where the path goes when we do wait: one
                 // line, the useful part, capturable by a script.
                 println!("{operation}");
                 return Ok(());
             }
 
-            let bytes = client.generate_video(&request)?;
+            let bytes = client.await_video(&operation)?;
             let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
             eprintln!(
                 "Wrote {} ({:.1} MB)",
                 written.display(),
                 bytes.len() as f64 / 1_048_576.0
             );
+            ledger::video_done(&operation, &written.to_string_lossy());
             println!("{}", written.display());
             Ok(())
         }
+
+        Command::Ops => show_operations(),
+
+        Command::History { count } => show_history(count),
     }
+}
+
+/// Video renders that were started and never collected.
+///
+/// The command the ledger exists for. An agent starts a render, hands back an
+/// operation id, and its session ends; the id then lives only in a transcript
+/// nobody will read again, and a render that is already being billed is
+/// unreachable. This is where it is now written down.
+fn show_operations() -> Result<()> {
+    if ledger::disabled() {
+        eprintln!(
+            "The render ledger is off (LUCIDA_NO_LEDGER is set), so nothing was \
+             recorded to list."
+        );
+        return Ok(());
+    }
+
+    let open = ledger::outstanding();
+    if open.is_empty() {
+        println!("No video renders are waiting to be collected.");
+        return Ok(());
+    }
+
+    println!("Video renders started and not yet collected:\n");
+    for entry in &open {
+        let operation = entry["operation"].as_str().unwrap_or("?");
+        println!(
+            "  {}  {}\n    {}\n    lucida check {operation}\n",
+            clock::stamp(entry["at"].as_i64().unwrap_or(0)),
+            entry["model"].as_str().unwrap_or("?"),
+            truncate(entry["prompt"].as_str().unwrap_or(""), 68),
+        );
+    }
+    Ok(())
+}
+
+fn show_history(count: usize) -> Result<()> {
+    if ledger::disabled() {
+        eprintln!("The render ledger is off (LUCIDA_NO_LEDGER is set).");
+        return Ok(());
+    }
+
+    let all = ledger::entries();
+    if all.is_empty() {
+        println!("Nothing recorded yet.");
+        return Ok(());
+    }
+
+    for entry in all.iter().rev().take(count).rev() {
+        let seed = match entry["seed"].as_u64() {
+            Some(seed) => format!("  seed {seed}"),
+            None => String::new(),
+        };
+        println!(
+            "{}  {:9} {:10} {}{seed}",
+            clock::stamp(entry["at"].as_i64().unwrap_or(0)),
+            entry["provider"].as_str().unwrap_or("?"),
+            entry["status"].as_str().unwrap_or("?"),
+            entry["path"]
+                .as_str()
+                .or_else(|| entry["operation"].as_str())
+                .unwrap_or("?"),
+        );
+        let prompt = entry["prompt"].as_str().unwrap_or("");
+        if !prompt.is_empty() {
+            println!("    {}", truncate(prompt, 72));
+        }
+    }
+    Ok(())
+}
+
+/// Shortens on a character boundary. A prompt is arbitrary user text, so slicing
+/// it by byte index is a panic waiting for the first accented character.
+fn truncate(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    text.chars().take(limit.saturating_sub(1)).collect::<String>() + "…"
 }
 
 impl ImageOptions {
@@ -498,6 +603,18 @@ fn show_config() {
     match config::source() {
         Some(path) => println!("Config file: {}", path.display()),
         None => println!("Config file: none found"),
+    }
+
+    // Said out loud rather than left to be discovered, because this file records
+    // **prompts** — the most personal thing Lucida handles — and someone who does
+    // not want them on disk should not have to find the file first to learn it
+    // exists.
+    match ledger::path() {
+        Some(path) => println!("Render ledger: {}", path.display()),
+        None if ledger::disabled() => {
+            println!("Render ledger: off (LUCIDA_NO_LEDGER is set)")
+        }
+        None => println!("Render ledger: nowhere to write one"),
     }
 
     println!("\nLooked for it at:");
@@ -1005,6 +1122,14 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
     // difference between the local lane and every hosted one that survives being
     // copied out of this tool.
     eprintln!("Provenance: {}.", caps.provenance.describe());
+
+    ledger::image(
+        caps.provider,
+        &request.model,
+        &request.prompt,
+        &written.to_string_lossy(),
+        image.seed,
+    );
 
     // The path alone on stdout, so this composes in a pipeline.
     println!("{}", written.display());
