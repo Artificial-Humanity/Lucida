@@ -21,8 +21,14 @@ current state of the project.
   generate provider lists wherever the shape allows. The 2026-08-02 review's headline
   finding: every generated list stayed true while every hand-written one rotted. When
   provider six lands, start from the known hand-written drift surfaces recorded in that
-  review (§5.1) — clap help strings, MCP parameter prose, `README.md`, remedy texts,
-  `scripts/smoke.sh`. Add to that list the **GitHub repository description and topics**,
+  review (§5.1) — clap help strings, MCP parameter prose, `README.md`, remedy texts.
+  The MCP `provider` enums came off that list on 2026-08-09: all three were literals, and an
+  `enum` is the worst place for one, because a well-behaved client *validates against it* — a
+  provider missing there is unreachable rather than undocumented, the call never arrives, and
+  no refusal message gets the chance to name it. They generate from `Backend::ALL` /
+  `VideoBackend::ALL` now, and `tests/cli.rs` holds the surviving hand-written list (the
+  `--provider` clap doc comment) against the generated set over the wire.
+  Add to that list the **GitHub repository description and topics**,
   which live outside the repo entirely and so cannot be tested from it: they read
   "Generate and edit images with Google's Gemini models" for four providers and all of
   video. The description is kept in step with `Cargo.toml`'s, and a test
@@ -50,6 +56,17 @@ current state of the project.
   the next warning is visible), and `scripts/smoke.sh` — all three green before tagging a
   release. A release ships three platform assets with checksums (macOS universal, Linux
   musl-static, Windows); a release missing an asset is the v0.5.0 failure mode.
+* **Two test layers, one place each.** Unit tests live in `#[cfg(test)] mod tests` inside the
+  file they test and can reach private functions. Anything that only exists once there is a
+  *process* — exit codes, `--json` alone on stdout, the config search path, JSON-RPC framing —
+  goes in `tests/cli.rs`, which drives the binary as a black box with `env_clear` and a private
+  `HOME`. Those assertions used to be bash inside `scripts/smoke.sh`, where they could not run
+  before a commit and where one of them had silently stopped asserting: an ordered `case` whose
+  failing arm sat *after* the arm that matched. `smoke.sh` now runs `tests/cli.rs` against the
+  packaged artifact via `LUCIDA_TEST_BIN`, so the musl-static and universal binaries are
+  covered to the same depth as the debug build and there is only one copy of each assertion —
+  which a test in that file enforces. **Do not add bash assertions back to `smoke.sh`;** it is
+  for what packaging can break (does the artifact load, does it know its version).
 
 ---
 

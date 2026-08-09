@@ -360,6 +360,34 @@ fn providers_where(predicate: fn(&crate::provider::Capabilities) -> bool) -> Str
     crate::provider::join_and(&names)
 }
 
+/// The `provider` enum an agent selects from.
+///
+/// Generated, as of 2026-08-09. It was a literal `["google", "comfyui", "bfl",
+/// "stability", "openai"]` sitting directly above a `model` description that
+/// *was* generated — and whose comment records that the hand-written version of
+/// itself had omitted openai. The same list, the same drift, one line apart.
+///
+/// This one is worse than prose going stale. Every other hand-written list
+/// merely describes; a JSON Schema `enum` is what a well-behaved client
+/// *validates against*, so a provider missing here is not badly documented, it
+/// is unreachable — the tool call never leaves the client, and no message names
+/// the provider that could have done the job. Nothing in Lucida would have
+/// reported it, because the code behind it works perfectly.
+fn provider_enum() -> Value {
+    Backend::ALL.iter().map(|b| b.name()).collect()
+}
+
+/// The same, for the video lanes.
+///
+/// Video went from one provider to three in a single day, which is exactly the
+/// interval over which a hand-written list is right.
+fn video_provider_enum() -> Value {
+    crate::provider::VideoBackend::ALL
+        .iter()
+        .map(|b| b.name())
+        .collect()
+}
+
 fn image_schema() -> Value {
     json!({
         "name": "generate_image",
@@ -394,7 +422,7 @@ fn image_schema() -> Value {
                 },
                 "provider": {
                     "type": "string",
-                    "enum": ["google", "comfyui", "bfl", "stability", "openai"],
+                    "enum": provider_enum(),
                     "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
                 },
                 "model": {
@@ -558,7 +586,7 @@ fn start_video_schema() -> Value {
                 "image": { "type": "string", "description": "Optional path to a still image to animate instead of generating from text alone. Required by runway's gen4-turbo, which cannot start from text." },
                 "provider": {
                     "type": "string",
-                    "enum": ["google", "runway", "kling"],
+                    "enum": video_provider_enum(),
                     "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
                 },
                 "mode": {
@@ -627,7 +655,7 @@ fn check_video_schema() -> Value {
             "type": "object",
             "properties": {
                 "operation": { "type": "string", "description": "The operation id returned by start_video." },
-                "provider": { "type": "string", "enum": ["google", "runway", "kling"], "description": "Which provider started it. Inferred from the id's shape when omitted." },
+                "provider": { "type": "string", "enum": video_provider_enum(), "description": "Which provider started it. Inferred from the id's shape when omitted." },
                 "output_path": { "type": "string", "description": "Where to write the finished video. An .mp4 extension is applied if missing." }
             },
             "required": ["operation", "output_path"]
@@ -1284,6 +1312,53 @@ mod tests {
         assert!(props["size"]["enum"].is_null());
         // `provider` is a genuine closed set, so it keeps its enum.
         assert!(props["provider"]["enum"].is_array());
+    }
+
+    /// Every provider Lucida has must appear in the enum an agent selects from.
+    ///
+    /// This is the one hand-written list whose failure is silent in both
+    /// directions. A JSON Schema `enum` is what a well-behaved client validates
+    /// against before sending, so a provider missing here cannot be chosen at
+    /// all — and the request never reaches Lucida, so none of the careful
+    /// refusal messages ever get the chance to name it. The code behind the
+    /// missing provider works perfectly, which is why nothing would report it.
+    ///
+    /// It was a literal until 2026-08-09, one line above a `model` description
+    /// generated precisely because the hand-written version had omitted openai.
+    #[test]
+    fn every_provider_is_selectable_through_the_schema() {
+        let listed = |schema: &Value, path: &str| -> Vec<String> {
+            schema[path]["properties"]["provider"]["enum"]
+                .as_array()
+                .expect("provider must offer a closed set")
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let images = listed(&image_schema(), "inputSchema");
+        for backend in Backend::ALL {
+            assert!(
+                images.contains(&backend.name().to_string()),
+                "{} is implemented but cannot be selected: {images:?}",
+                backend.name()
+            );
+        }
+        assert_eq!(images.len(), Backend::ALL.len(), "stale name in the enum");
+
+        // Both video surfaces: starting a render and asking after one. The
+        // second is easy to forget, and forgetting it strands an operation.
+        for schema in [start_video_schema(), check_video_schema()] {
+            let video = listed(&schema, "inputSchema");
+            for backend in crate::provider::VideoBackend::ALL {
+                assert!(
+                    video.contains(&backend.name().to_string()),
+                    "video provider {} cannot be selected in {}: {video:?}",
+                    backend.name(),
+                    schema["name"]
+                );
+            }
+        }
     }
 
     /// Every parameter only some providers honour has to say so, since the
