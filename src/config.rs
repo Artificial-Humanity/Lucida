@@ -30,7 +30,7 @@
 //! sync. It also keeps the parser to a few lines and adds no dependency, which
 //! is the same reasoning that kept a JSON-RPC crate out of `mcp.rs`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -392,6 +392,10 @@ pub fn write_replacing(path: &Path, body: &str, private: bool) -> Result<()> {
 /// whole group.
 #[cfg(unix)]
 pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    // Imported here rather than at the top of the file: this is the only caller
+    // in the module and it does not exist on Windows, so a file-level import
+    // becomes an unused-import error there — which is exactly how CI caught it.
+    use anyhow::Context;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("restricting permissions on {}", path.display()))
