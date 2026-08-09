@@ -2,3 +2,19 @@
 
 # musl release builds
 /target-musl
+
+# Renders made while working in the checkout.
+#
+# `--out` defaults to `image.png` for generate/edit and `video.mp4` for video, so
+# running either from the repository root drops the result straight into the
+# working tree — where `git add -A` picks it up like anything else. That is not
+# hypothetical: a 4.9 MB test render rode into `d37737c` exactly this way and
+# would have shipped as a tenth of the published crate.
+#
+# Anchored to the root, so a deliberate fixture in a subdirectory is unaffected.
+/image.png
+/video.mp4
+
+# ...and the batch forms, `--count N` writing image-1.png, image-2.png, ...
+/image-*.png
+/video-*.mp4
