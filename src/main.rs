@@ -19,6 +19,7 @@ mod masked;
 mod mcp;
 mod openai;
 mod provider;
+mod retry;
 mod setup;
 mod skill;
 mod stability;

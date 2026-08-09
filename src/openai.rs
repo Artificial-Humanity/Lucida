@@ -338,11 +338,13 @@ impl Client {
             return STANDARD.decode(encoded).context("decoding the image");
         }
         if let Some(url) = first["url"].as_str() {
-            let bytes = self
-                .http
-                .get(url)
-                .send()
-                .context("downloading the generated image")?
+            let bytes = crate::retry::send_idempotent("downloading the image", || self.http.get(url))
+                .with_context(|| {
+                    format!(
+                        "downloading the generated image. The render was billed; \
+                         its URL expires shortly:\n\n  {url}"
+                    )
+                })?
                 .bytes()
                 .context("reading image bytes")?;
             return Ok(bytes.to_vec());
@@ -361,12 +363,12 @@ impl ImageProvider for Client {
         // `/v1/models` does not list image models for a project key even when
         // they work — measured, and confusing enough to be worth saying rather
         // than reporting an empty list.
-        let response = self
-            .http
-            .get(format!("{}/models", self.base))
-            .header("Authorization", format!("Bearer {}", self.key))
-            .send()
-            .context("checking the OpenAI key")?;
+        let response = crate::retry::send_idempotent("checking the key", || {
+            self.http
+                .get(format!("{}/models", self.base))
+                .header("Authorization", format!("Bearer {}", self.key))
+        })
+        .context("checking the OpenAI key")?;
 
         let status = response.status();
         if !status.is_success() {

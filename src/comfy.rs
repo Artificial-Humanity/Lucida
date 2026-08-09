@@ -137,10 +137,14 @@ impl Client {
         }
     }
 
+    /// Every GET this client makes: the queue and history polls, the `/view`
+    /// download, and the `/object_info` probe. All idempotent, so all retried —
+    /// a local server restarting mid-render no longer costs the render.
     fn get(&self, path: &str) -> Result<reqwest::blocking::Response> {
-        self.authed(self.http.get(format!("{}{path}", self.base)))
-            .send()
-            .map_err(|e| anyhow!("{}", self.explain_transport(path, &e)))
+        crate::retry::send_idempotent(path, || {
+            self.authed(self.http.get(format!("{}{path}", self.base)))
+        })
+        .map_err(|e| anyhow!("{}", self.explain_transport(path, &e)))
     }
 
     /// Turns a failed round trip into the right diagnosis.
@@ -592,6 +596,9 @@ impl Client {
     }
 
     fn submit(&self, graph: &Value) -> Result<String> {
+        // Deliberately not retried (see `retry`): a retried submit queues a
+        // second render. Free here, unlike the hosted providers, but a duplicate
+        // job on a busy local GPU is its own cost.
         let response = self
             .authed(self.http.post(format!("{}/prompt", self.base)))
             .json(&json!({ "prompt": graph, "client_id": "lucida" }))

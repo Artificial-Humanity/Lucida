@@ -205,6 +205,7 @@ impl Client {
     }
 
     fn submit(&self, req: &ImageRequest, model: &str) -> Result<(String, Option<f64>)> {
+        // Deliberately not retried (see `retry`): this is the billed call.
         let response = self
             .http
             .post(format!("{}/{model}", self.base))
@@ -258,12 +259,10 @@ impl Client {
             // brisk early because most renders finish in seconds.
             interval = (interval * 2).min(Duration::from_secs(3));
 
-            let response = self
-                .http
-                .get(polling_url)
-                .header("x-key", &self.key)
-                .send()
-                .context("polling the render")?;
+            let response = crate::retry::send_idempotent("polling the render", || {
+                self.http.get(polling_url).header("x-key", &self.key)
+            })
+            .context("polling the render")?;
 
             let status = response.status();
             if !status.is_success() {
@@ -331,6 +330,22 @@ impl Client {
         }
     }
 
+    /// What to say when the finished image cannot be fetched.
+    ///
+    /// The URL itself is the whole message. The render is paid for and complete
+    /// at this point, the URL is signed and expires in about ten minutes, and
+    /// without printing it the only record of a bought image is a stack trace
+    /// that does not contain it. Ten minutes is not long, but it is long enough
+    /// to paste into a browser — which is more recovery than the previous
+    /// message offered, which was none.
+    fn rescue(url: &str) -> String {
+        format!(
+            "The render finished and was billed. Its URL is signed and expires \
+             about 10 minutes after the render completed — fetch it by hand \
+             while it lasts:\n\n  {url}"
+        )
+    }
+
     fn download(&self, payload: &Value) -> Result<Vec<u8>> {
         let url = payload["result"]["sample"]
             .as_str()
@@ -339,17 +354,14 @@ impl Client {
         // No API key on this request: it is a signed URL pointing at object
         // storage, and sending a credential to a third-party host that does not
         // need it is how credentials end up somewhere unexpected.
-        let response = self
-            .http
-            .get(url)
-            .send()
-            .context("downloading the finished image")?;
+        let response = crate::retry::send_idempotent("downloading the image", || self.http.get(url))
+            .with_context(|| format!("downloading the finished image.\n\n{}", Self::rescue(url)))?;
 
         if !response.status().is_success() {
             bail!(
-                "the image URL returned HTTP {}. These URLs are signed and expire \
-                 after about 10 minutes.",
-                response.status().as_u16()
+                "the image URL returned HTTP {}.\n\n{}",
+                response.status().as_u16(),
+                Self::rescue(url)
             );
         }
 
@@ -405,12 +417,12 @@ impl ImageProvider for Client {
         // There is no endpoint that lists models — they are paths, fixed at
         // release. Confirm the key works instead, since that is what a user
         // running `lucida models` is really asking.
-        let response = self
-            .http
-            .get(format!("{}/credits", self.base))
-            .header("x-key", &self.key)
-            .send()
-            .context("checking the API key against /v1/credits")?;
+        let response = crate::retry::send_idempotent("checking the key", || {
+            self.http
+                .get(format!("{}/credits", self.base))
+                .header("x-key", &self.key)
+        })
+        .context("checking the API key against /v1/credits")?;
 
         let status = response.status();
         if !status.is_success() {

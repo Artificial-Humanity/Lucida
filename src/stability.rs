@@ -162,12 +162,12 @@ impl Client {
     /// The account's credit balance. Free, and the only way to check a key
     /// without spending anything.
     pub fn credits(&self) -> Result<f64> {
-        let response = self
-            .http
-            .get(format!("{}/v1/user/balance", self.base))
-            .header("Authorization", format!("Bearer {}", self.key))
-            .send()
-            .context("checking the Stability credit balance")?;
+        let response = crate::retry::send_idempotent("checking the balance", || {
+            self.http
+                .get(format!("{}/v1/user/balance", self.base))
+                .header("Authorization", format!("Bearer {}", self.key))
+        })
+        .context("checking the Stability credit balance")?;
 
         let status = response.status();
         if !status.is_success() {
@@ -242,6 +242,7 @@ impl ImageProvider for Client {
             None => eprintln!("Rendering with stability {model}…"),
         }
 
+        // Deliberately not retried (see `retry`): this is the billed call.
         let response = self
             .http
             .post(format!("{}/v2beta/stable-image/generate/{model}", self.base))

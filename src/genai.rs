@@ -134,12 +134,12 @@ impl Client {
     /// Image-capable models this key can actually see. Free, and the quickest way
     /// to confirm a key works without spending anything.
     fn image_models(&self) -> Result<Vec<String>> {
-        let response = self
-            .http
-            .get(format!("{}/models?pageSize=200", self.base))
-            .header("x-goog-api-key", &self.api_key)
-            .send()
-            .context("listing models")?;
+        let response = crate::retry::send_idempotent("listing models", || {
+            self.http
+                .get(format!("{}/models?pageSize=200", self.base))
+                .header("x-goog-api-key", &self.api_key)
+        })
+        .context("listing models")?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -242,6 +242,7 @@ impl ImageProvider for Client {
         // The key travels as a header, never as a `?key=` query parameter, which
         // would leak it into shell history, proxy logs and crash reports.
         let url = format!("{}/models/{model}:generateContent", self.base);
+        // Deliberately not retried (see `retry`): this is the billed call.
         let response = self
             .http
             .post(&url)

@@ -133,6 +133,9 @@ impl Client {
 
     fn start_operation(&self, model: &str, body: &Value) -> Result<String> {
         let url = format!("{}/models/{model}:predictLongRunning", self.base());
+        // Deliberately not retried (see `retry`): this is the call that starts
+        // billing, and a retry of a request that in fact succeeded buys a second
+        // render nobody asked for.
         let response = self
             .http()
             .post(&url)
@@ -157,12 +160,12 @@ impl Client {
     /// A single non-blocking check of an operation.
     fn poll_once(&self, operation: &str) -> Result<Value> {
         let url = format!("{}/{operation}", self.base());
-        let response = self
-            .http()
-            .get(&url)
-            .header("x-goog-api-key", self.key())
-            .send()
-            .context("polling the video operation")?;
+        // Retried: a poll spends nothing, and this is the request a render can
+        // be lost on — minutes into a wait, one 502 used to abandon it.
+        let response = crate::retry::send_idempotent("polling the render", || {
+            self.http().get(&url).header("x-goog-api-key", self.key())
+        })
+        .context("polling the video operation")?;
 
         let status = response.status();
         if !status.is_success() {
@@ -227,12 +230,10 @@ impl Client {
             })?;
 
         // The download URL is itself authenticated.
-        let response = self
-            .http()
-            .get(uri)
-            .header("x-goog-api-key", self.key())
-            .send()
-            .context("downloading the rendered video")?;
+        let response = crate::retry::send_idempotent("downloading the video", || {
+            self.http().get(uri).header("x-goog-api-key", self.key())
+        })
+        .context("downloading the rendered video")?;
 
         let status = response.status();
         if !status.is_success() {
