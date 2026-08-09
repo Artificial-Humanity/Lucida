@@ -384,6 +384,88 @@ pub fn mask_semantics() -> String {
     format!("{}.", parts.join(". "))
 }
 
+/// A model whose provider has announced the date it stops working.
+pub struct Retirement {
+    /// Matched against the start of a model id, so one entry covers a family.
+    pub prefix: &'static str,
+    /// The date the provider published, as the provider wrote it.
+    pub date: &'static str,
+}
+
+/// Every announced shutdown, in one place.
+///
+/// Declared rather than described, for the reason this codebase keeps
+/// rediscovering: a date written into prose is a claim that goes false on a
+/// schedule, silently, and in the six places nobody re-reads. Imagen's shutdown
+/// was future-tense in five files at once; three OpenAI ids sat in `KNOWN_MODELS`
+/// with their December date recorded nowhere at all, so `lucida models` listed
+/// them exactly like the ones that will still exist next year.
+///
+/// Adding a row here annotates every surface that prints a model id, and
+/// [`retirement_note`] gets the tense right on both sides of the date.
+pub const RETIREMENTS: &[Retirement] = &[
+    // Replaced by gemini-3.1-flash-image, which is already the default.
+    Retirement { prefix: "imagen", date: "2026-08-17" },
+    // Announced alongside gpt-image-2, which is already the default.
+    Retirement { prefix: "gpt-image-1.5", date: "2026-12-01" },
+    Retirement { prefix: "gpt-image-1-mini", date: "2026-12-01" },
+    Retirement { prefix: "chatgpt-image-latest", date: "2026-12-01" },
+];
+
+/// "retires 2026-08-17" while it still works; "retired 2026-08-17" afterwards.
+///
+/// The tense is computed, not written, which is the whole point: the same string
+/// stays true the day after the date it names.
+pub fn retirement_note(model: &str) -> Option<String> {
+    let retirement = RETIREMENTS.iter().find(|r| model.starts_with(r.prefix))?;
+    let verb = if past(retirement.date) { "retired" } else { "retires" };
+    Some(format!("{verb} {}", retirement.date))
+}
+
+/// Whether a `YYYY-MM-DD` date is behind us.
+///
+/// UTC, and by whole days: a model does not stop working at a moment this
+/// process could know precisely, and being a few hours early or late with the
+/// word "retired" costs nothing. An unparseable date reads as future, so a typo
+/// here can only ever understate.
+fn past(date: &str) -> bool {
+    let Some(midnight) = unix_time(date) else {
+        return false;
+    };
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64 >= midnight)
+        .unwrap_or(false)
+}
+
+/// `YYYY-MM-DD` to seconds since the epoch, at midnight UTC.
+///
+/// Hand-rolled rather than reached for: this is the only date arithmetic in the
+/// program, and a date crate would be a runtime dependency bought for eleven
+/// lines. The conversion is Howard Hinnant's `days_from_civil`, which is exact
+/// for every proleptic Gregorian date and is the algorithm every date library
+/// uses underneath.
+fn unix_time(date: &str) -> Option<i64> {
+    let mut parts = date.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Shift the year so it starts in March, which puts the leap day last and
+    // makes the month-length pattern regular.
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+
+    Some(days * 86_400)
+}
+
 /// `a`, `a and b`, `a, b and c` — the form a sentence needs rather than a table.
 pub fn join_and(names: &[&str]) -> String {
     match names.split_last() {
@@ -730,6 +812,79 @@ pub fn infer_backend(model: &str) -> Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pinned against dates computed independently, because everything about
+    /// retirement notes rests on this one function and it is the only date
+    /// arithmetic in the program. The epoch itself, a leap day, a century that is
+    /// not a leap year, and the two dates actually in the table.
+    #[test]
+    fn a_civil_date_converts_to_the_right_instant() {
+        assert_eq!(unix_time("1970-01-01"), Some(0));
+        assert_eq!(unix_time("2000-02-29"), Some(951_782_400));
+        assert_eq!(unix_time("1900-03-01"), Some(-2_203_891_200));
+        assert_eq!(unix_time("2026-08-17"), Some(1_786_924_800));
+        assert_eq!(unix_time("2026-12-01"), Some(1_796_083_200));
+    }
+
+    /// A malformed date must read as "not yet", so a typo in the table can only
+    /// ever understate — announcing a retirement that has not happened is a
+    /// worse failure than being late to announce one that has.
+    #[test]
+    fn an_unparseable_date_is_never_in_the_past() {
+        for bad in ["", "soon", "2026-13-01", "2026-08-32", "2026-08", "2026-08-17-1"] {
+            assert_eq!(unix_time(bad), None, "{bad} parsed");
+            assert!(!past(bad), "{bad} read as past");
+        }
+    }
+
+    /// The tense is the whole feature: the same string has to stay true the day
+    /// after the date it names. Imagen's date is within days of this being
+    /// written, so both branches are about to be exercised for real.
+    #[test]
+    fn a_retirement_note_reads_correctly_on_both_sides_of_its_date() {
+        let note = retirement_note("imagen-4.0-generate-001").expect("imagen retires");
+        assert!(note.contains("2026-08-17"), "{note}");
+        assert_eq!(note.starts_with("retired"), past("2026-08-17"), "{note}");
+
+        assert!(retirement_note("gpt-image-1.5").is_some());
+        assert!(retirement_note("chatgpt-image-latest").is_some());
+    }
+
+    /// The models that are still current must not be annotated — a false
+    /// retirement notice sends someone to migrate off the thing they should be
+    /// using. `gpt-image-1` is the sharp case: it is not retiring, and it is a
+    /// prefix of two ids that are.
+    #[test]
+    fn the_current_defaults_carry_no_retirement_note() {
+        for backend in Backend::ALL {
+            let model = backend.default_model();
+            assert_eq!(
+                retirement_note(model),
+                None,
+                "`{model}` is a default and is marked as retiring"
+            );
+        }
+        assert_eq!(retirement_note("gpt-image-1"), None);
+    }
+
+    /// Every announced date has to be reachable from a model id someone can
+    /// actually name, or the row is decoration.
+    #[test]
+    fn every_retirement_matches_a_model_the_provider_lists() {
+        for retirement in RETIREMENTS {
+            assert!(
+                unix_time(retirement.date).is_some(),
+                "`{}` has an unparseable date: {}",
+                retirement.prefix,
+                retirement.date
+            );
+            assert!(
+                retirement_note(retirement.prefix).is_some(),
+                "`{}` matches no model id, not even its own prefix",
+                retirement.prefix
+            );
+        }
+    }
 
     #[test]
     fn aspect_round_trips_through_its_written_form() {

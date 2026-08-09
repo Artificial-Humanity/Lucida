@@ -62,7 +62,7 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
 ///
 /// `GOOGLE_API_KEY` was dropped in favour of `GEMINI_API_KEY` because everything
 /// Lucida reaches on Google is the Gemini API — images and Veo alike — and after
-/// Imagen's shutdown on 2026-08-17 there is nothing left that "Google" named
+/// Imagen's 2026-08-17 shutdown there is nothing left that "Google" named
 /// more accurately. One name, and it matches the one Google's own documentation
 /// uses.
 pub const RETIRED_KEYS: &[(&str, &str)] = &[("GOOGLE_API_KEY", "GEMINI_API_KEY")];

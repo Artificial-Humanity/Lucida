@@ -17,8 +17,9 @@ use std::time::Duration;
 
 const API_ROOT: &str = "https://generativelanguage.googleapis.com/v1beta";
 
-/// Nano Banana 2. The Imagen family is scheduled for shutdown on 2026-08-17, so
-/// it is deliberately not the default here.
+/// Nano Banana 2. The Imagen family has a published shutdown date of
+/// 2026-08-17, so it is deliberately not the default here — see
+/// `provider::RETIREMENTS`, which is where every such date lives.
 pub const DEFAULT_MODEL: &str = "gemini-3.1-flash-image";
 
 /// The only ratios Google accepts. Published as capabilities so a request for
@@ -78,7 +79,7 @@ impl Client {
     /// template had to offer one and mention the other, and a key in the wrong
     /// one still worked, so nothing ever taught anyone which was canonical.
     /// Everything Lucida reaches on Google is the Gemini API — images and Veo
-    /// alike — and after Imagen's shutdown on 2026-08-17 nothing is left that
+    /// alike — and past Imagen's 2026-08-17 shutdown nothing is left that
     /// "Google" named more accurately. The retired name is still recognised in
     /// [`no_key`], purely to say what happened.
     pub fn from_env() -> Result<Self> {
@@ -202,14 +203,17 @@ impl ImageProvider for Client {
 
         // Imagen speaks a different endpoint entirely (`:predict`, with an
         // instances/parameters body). Rather than build a second call shape for a
-        // family Google shuts down on 2026-08-17, say so plainly.
+        // family with a published shutdown date, say so plainly — and let the
+        // date phrase itself, since this message outlives it.
         if model.starts_with("imagen") {
+            let fate = crate::provider::retirement_note(&model)
+                .map(|note| format!("Imagen {note}. "))
+                .unwrap_or_default();
             bail!(
                 "`{model}` belongs to the Imagen family, which uses a different API \
                  endpoint that lucida does not implement.\n\n\
-                 Imagen is scheduled for shutdown on 2026-08-17. Use a Gemini image \
-                 model instead — `banana` (fast), `banana-pro` (highest quality), or \
-                 `banana-lite` (cheapest)."
+                 {fate}Use a Gemini image model instead — `banana` (fast), \
+                 `banana-pro` (highest quality), or `banana-lite` (cheapest)."
             );
         }
 

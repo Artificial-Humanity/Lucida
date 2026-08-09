@@ -825,7 +825,13 @@ fn list_models(backend: Backend) -> Result<()> {
                 notes.push("default".into());
             }
             if model.starts_with("imagen") {
-                notes.push("Imagen family — different endpoint, retires 2026-08-17".into());
+                notes.push("Imagen family — a different endpoint, not implemented".into());
+            }
+            // Generated for every provider, not written for one. The three
+            // openai ids that stop working on 2026-12-01 used to be listed here
+            // exactly like the ones that will still exist next year.
+            if let Some(note) = provider::retirement_note(model) {
+                notes.push(note);
             }
             // BFL's endpoints disagree with each other, so the differences are
             // listed per model rather than once for the provider. Anything else
