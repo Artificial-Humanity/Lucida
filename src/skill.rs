@@ -165,5 +165,32 @@ mod tests {
         // it instead.
         assert!(SKILL.contains("image_providers"));
         assert!(SKILL.contains("lucida models --provider"));
+        // Video needs its own pointer, and went without one for as long as it
+        // had two providers and no probe to ask: the file told agents to believe
+        // the probe, and for video there was nothing to believe.
+        assert!(SKILL.contains("video_providers"));
+    }
+
+    /// The skill must tell an agent to *ask* when the probe offers a real choice.
+    ///
+    /// Owner, 2026-08-09: several providers exist so that someone holding a
+    /// subset of subscriptions can use its full width — which means the choice
+    /// between them, and between a provider's own models and tiers, is routinely
+    /// the user's to make rather than the agent's to assume. A skill that
+    /// described the options without saying to offer them would leave an agent
+    /// silently picking how much of someone's money to spend.
+    #[test]
+    fn the_skill_says_to_offer_the_choice_rather_than_assume_it() {
+        let lower = SKILL.to_lowercase();
+        assert!(
+            lower.contains("ask the user") || lower.contains("ask before"),
+            "the skill never tells an agent to ask which option to use"
+        );
+        // And the guidance has to be two-sided, or it becomes a rule to ask
+        // before every render — which is how advice gets ignored wholesale.
+        assert!(
+            lower.contains("do **not** ask when") || lower.contains("do not ask when"),
+            "the skill says when to ask but never when not to, which makes it noise"
+        );
     }
 }

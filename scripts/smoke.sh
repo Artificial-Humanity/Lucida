@@ -241,6 +241,26 @@ case "$out" in
   *)       fail "stdout was not a bare JSON object: $out" ;;
 esac
 
+# --- a dry run sends nothing ------------------------------------------------
+# The flag exists because confirming "does --provider X use X's own model?" used
+# to require a render, and the answer cost money three separate times. A dry run
+# must still apply every refusal a real one would, or it confirms nothing.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" generate x \
+        --provider comfyui --dry-run --json 2>/dev/null)
+case "$out" in
+  *'"status":"dry-run"'*) pass "a dry run reports its plan" ;;
+  *)                      fail "no dry-run plan: $out" ;;
+esac
+
+# Refusals still fire, so a dry run is a faithful rehearsal rather than a
+# different code path that happens to be free.
+env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" generate x \
+  --provider google --seed 5 --dry-run >/dev/null 2>&1
+case "$?" in
+  2) pass "a dry run still refuses what a real run would" ;;
+  *) fail "a dry run skipped the capability check (exit $?)" ;;
+esac
+
 # --- a batch is capped as a batch -------------------------------------------
 # `--seed` pins one image and `--count` asks for several: together they render
 # the same picture N times and bill for each, so they are refused rather than

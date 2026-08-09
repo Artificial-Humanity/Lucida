@@ -110,6 +110,7 @@ $ lucida generate "a brass astrolabe on dark slate" \
     --provider comfyui --seed 12345 --negative "text, watermark"
 
 $ lucida generate "a wordmark for a note-taking app" --count 3   # icon-1.png…
+$ lucida video "a slow push through fog" --provider kling --dry-run   # costs nothing
 
 $ lucida video "a red maple leaf drifting down against white" --out clip.mp4
 $ lucida video "waves against a harbour wall at dusk" --no-wait

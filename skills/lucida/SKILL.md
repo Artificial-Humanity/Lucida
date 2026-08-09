@@ -7,18 +7,18 @@ description: Generating and editing images and video with Lucida — choosing a 
 
 Lucida generates and edits images, and generates video, as an MCP server
 (`generate_image`, `image_providers`, `start_video`, `check_video`,
-`list_operations`) or a CLI
-(`lucida generate|edit|video|check|ops|history|models|config`). Video has a
-choice of provider too, so `--provider`/`provider` applies there as well as to
-images — which are available, and what each can do, comes from the probe rather
-than from here.
+`video_providers`, `list_operations`) or a CLI
+(`lucida generate|edit|video|check|ops|history|models|config`). Both images and
+video have a choice of provider, and `--provider`/`provider` selects one in
+either case.
 
 **This file deliberately contains no capability facts.** Which provider takes a
-seed, a mask, a negative prompt or a given aspect ratio changes as providers ship
-and Lucida adds them — so those live in one place that is always current:
+seed, a mask, a negative prompt, a quality tier or a given aspect ratio changes
+as providers ship and Lucida adds them — so those live in one place that is
+always current:
 
-- MCP: call `image_providers`.
-- CLI: run `lucida models --provider <name>`.
+- MCP: call `image_providers`, or `video_providers` for the video lanes.
+- CLI: run `lucida models --provider <name>` — it answers for both kinds.
 
 Anything here that contradicts those is out of date; believe the probe.
 
@@ -57,7 +57,52 @@ decides the answer:
 4. **Does the output need to be free of provenance marking, or carry it?**
    Providers differ, and Lucida reports what each render carried.
 
-`--provider` picks one explicitly; otherwise it is inferred from the model id.
+`--provider` picks one explicitly; otherwise it is inferred from the model id,
+and naming a provider without a model gets that provider's own default.
+
+## Ask the user which one, when the choice is theirs to make
+
+The probe usually offers **more than a single option** — for the provider, and
+again for the model, quality tier or clip length within it. Those are not
+interchangeable: they differ in what they cost, whether the result can be
+reproduced, what gets embedded in the file, and how long someone waits.
+
+**Ask before the first render of a piece of work, whenever the probe shows a
+real choice and the user has not already made it.** Present the options that
+actually differ, with the differences that matter — read from the probe, not from
+memory — and let them pick. One question at the start is cheaper than a render
+they did not want, and far cheaper than a series of them.
+
+Ask when:
+
+- more than one configured provider can do the job, and they differ in cost,
+  reproducibility, provenance marking or speed;
+- a provider offers several models or quality tiers, and the choice multiplies
+  the bill or changes the character of the output;
+- the job is a batch, or a video whose length you are choosing, since both scale
+  the cost with a number you are picking on their behalf.
+
+Do **not** ask when:
+
+- they already named a provider, model or tier — including earlier in the
+  conversation. Carry that forward rather than re-asking each render;
+- only one option is actually configured and reachable, which the probe tells
+  you before you have to guess;
+- the render costs nothing and is trivially repeatable — offer to try another
+  option afterwards instead of stopping to ask first;
+- they asked for something specific and urgent, where a question is friction
+  rather than diligence. Say which option you took and why, and move.
+
+If you must proceed without asking, **choose the cheaper and more reversible
+option**, and say which you chose and what the alternatives were. An
+unrequested choice that spends money is the one to avoid; an unrequested choice
+that costs nothing is usually fine to make and mention.
+
+**`--dry-run` answers "what would you send?" without sending it** — the resolved
+provider, model, every parameter and the estimated cost, having applied every
+refusal a real run would. Use it to check a call you are unsure of, and to show
+someone the plan and its price before asking them to approve it. It spends
+nothing, so there is no reason to guess.
 
 ## Iterating on an image
 
@@ -77,6 +122,11 @@ When a render is close but wrong:
 
 Editing a picture repeatedly compounds artefacts. Past two or three rounds,
 fold the accumulated intent into one prompt and generate fresh.
+
+When you want candidates rather than one answer, ask for a count in a single
+call rather than looping — the cost is checked for the whole batch up front, so
+a batch you cannot afford is refused before the first render instead of after
+some of them have been paid for.
 
 ## Outcomes that differ from the request
 

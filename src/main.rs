@@ -149,6 +149,11 @@ struct ImageOptions {
     /// re-using it would break every existing caller to save two keystrokes.
     #[arg(long, default_value_t = 1, value_name = "N")]
     count: usize,
+
+    /// Print what would be sent — provider, model, every resolved parameter and
+    /// the estimated cost — and stop without rendering.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -250,6 +255,15 @@ enum Command {
         /// Collect it later with `lucida check`.
         #[arg(long)]
         no_wait: bool,
+
+        /// Print what would be sent — provider, model, every resolved parameter
+        /// and the estimated cost — and stop without rendering.
+        ///
+        /// Video bills per second, and there was previously no way to ask "what
+        /// would you send?" without sending it. Confirming that `--provider X`
+        /// picks X's own model, or that a duration is in range, cost a render.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Resume a video render by operation id, e.g. after a timeout
@@ -435,9 +449,9 @@ fn run(cli: Cli) -> Result<i32> {
             reference,
             opts,
         } => {
-            let count = opts.count;
+            let (count, dry_run) = (opts.count, opts.dry_run);
             let (request, backend) = opts.into_request(prompt, reference)?;
-            execute(request, backend, out, count).map(|()| out::OK)
+            execute(request, backend, out, count, dry_run).map(|()| out::OK)
         }
 
         Command::Edit {
@@ -453,9 +467,9 @@ fn run(cli: Cli) -> Result<i32> {
             references.extend(reference);
 
             let destination = out.unwrap_or_else(|| PathBuf::from(&image));
-            let count = opts.count;
+            let (count, dry_run) = (opts.count, opts.dry_run);
             let (request, backend) = opts.into_request(prompt, references)?;
-            execute(request, backend, destination, count).map(|()| out::OK)
+            execute(request, backend, destination, count, dry_run).map(|()| out::OK)
         }
 
         Command::Check {
@@ -524,6 +538,7 @@ fn run(cli: Cli) -> Result<i32> {
             seed,
             mode,
             no_wait,
+            dry_run,
         } => {
             // Named explicitly, or inferred from the model id — the same rule
             // images have used since `--provider` became optional there.
@@ -563,6 +578,28 @@ fn run(cli: Cli) -> Result<i32> {
             // parameter is expensive rather than merely annoying.
             let price = spend::video_price(backend, &resolved, request.duration);
             spend::check(price, "video render")?;
+
+            // After the capability and budget checks, so a dry run reports the
+            // same refusals a real one would, and before any client exists, so
+            // it needs no credential and sends nothing.
+            if dry_run {
+                report_plan(serde_json::json!({
+                    "ok": true,
+                    "status": "dry-run",
+                    "provider": backend.name(),
+                    "model": resolved,
+                    "prompt": request.prompt,
+                    "aspect": request.aspect.map(|a| a.to_string()),
+                    "duration": request.duration,
+                    "mode": request.mode,
+                    "seed": request.seed,
+                    "image": request.image,
+                    "estimated_usd": price.against_budget(),
+                    "exit_code": out::OK,
+                }))?;
+                return Ok(out::OK);
+            }
+
             eprintln!("Rendering with {resolved} — {}.", price.describe());
 
             let client = open_video(backend)?;
@@ -1400,7 +1437,24 @@ fn describe_aspect(support: provider::AspectSupport) -> String {
 /// The batch is checked and budgeted as a *whole* before the first render, so
 /// asking for ten of something you cannot afford is refused once rather than
 /// nine times after the first one succeeded.
-fn execute(request: ImageRequest, backend: Backend, out: PathBuf, count: usize) -> Result<()> {
+/// Prints a plan without sending it — pretty for a human, one object for `--json`.
+fn report_plan(plan: serde_json::Value) -> Result<()> {
+    if out::json() {
+        out::emit(plan);
+    } else {
+        eprintln!("Dry run — nothing was sent.");
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    }
+    Ok(())
+}
+
+fn execute(
+    request: ImageRequest,
+    backend: Backend,
+    out: PathBuf,
+    count: usize,
+    dry_run: bool,
+) -> Result<()> {
     let caps = provider::capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
@@ -1425,6 +1479,24 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf, count: usize) 
              Drop `--seed` to get {count} different images, or drop `--count` to \
              reproduce the one the seed names."
         ))));
+    }
+
+    if dry_run {
+        report_plan(serde_json::json!({
+            "ok": true,
+            "status": "dry-run",
+            "provider": caps.provider,
+            "model": request.model,
+            "prompt": request.prompt,
+            "count": count,
+            "aspect": request.aspect.map(|a| a.to_string()),
+            "size": request.size.map(|s| s.0),
+            "seed": request.seed,
+            "references": request.references,
+            "estimated_usd": price.against_budget() * count as f64,
+            "exit_code": out::OK,
+        }))?;
+        return Ok(());
     }
 
     let mut written = Vec::new();

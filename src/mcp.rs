@@ -286,6 +286,7 @@ fn dispatch(method: &str, params: &Value) -> Result<Value> {
                 providers_schema(),
                 start_video_schema(),
                 check_video_schema(),
+                video_providers_schema(),
                 list_operations_schema(),
             ]
         })),
@@ -634,6 +635,96 @@ fn check_video_schema() -> Value {
     })
 }
 
+/// The video twin of `image_providers`.
+///
+/// Owed from the moment video gained a second provider, and missing until
+/// 2026-08-09: the shipped skill tells agents that capability facts live in the
+/// probe rather than in prose, and for video there was no probe to consult. The
+/// CLI could answer (`lucida models --provider <name>`); the surface the skill is
+/// actually written for could not.
+///
+/// Reports the static capability table always, and the credential check only
+/// where a provider has a free endpoint for one — same rule as the image probe,
+/// for the same reason: what a provider supports is not a fact about your keys.
+fn video_providers_schema() -> Value {
+    json!({
+        "name": "video_providers",
+        "description": concat!(
+            "Report which video providers are reachable and what each supports — ",
+            "aspect ratios, clip durations, quality tiers, whether it can start ",
+            "from text or needs a still, and what provenance marking its output ",
+            "carries. Spends nothing. Call this before start_video when the choice ",
+            "of provider or model matters, or after a parameter is rejected."
+        ),
+        "inputSchema": { "type": "object", "properties": {} }
+    })
+}
+
+fn describe_video_providers() -> String {
+    let mut out = String::new();
+
+    for backend in VideoBackend::ALL.iter().copied() {
+        out.push_str(&format!("## {}\n", backend.name()));
+
+        let caps = video_capabilities_for(backend, backend.default_model());
+
+        // The reachability check, where the provider offers one for free. Veo
+        // has no such endpoint — its models are fixed at release and any probe
+        // would be a paid render — so it reports as configured or not, from the
+        // credential alone.
+        match backend {
+            VideoBackend::Google => match crate::genai::Client::from_env() {
+                Ok(_) => out.push_str("configured\n"),
+                Err(e) => out.push_str(&format!("NOT usable: {e:#}\n")),
+            },
+            VideoBackend::Runway => match crate::runway::Client::from_env().and_then(|c| c.credits()) {
+                Ok(credits) => out.push_str(&format!("reachable — {credits} credit(s) remaining\n")),
+                Err(e) => out.push_str(&format!("NOT usable: {e:#}\n")),
+            },
+            VideoBackend::Kling => match crate::kling::Client::from_env().and_then(|c| c.credits()) {
+                Ok(units) => out.push_str(&format!("reachable — {units} unit(s) remaining\n")),
+                Err(e) => out.push_str(&format!("NOT usable: {e:#}\n")),
+            },
+        }
+
+        let models: Vec<&str> = match backend {
+            VideoBackend::Google => crate::video::VIDEO_ALIASES.iter().map(|(_, id)| *id).collect(),
+            VideoBackend::Runway => crate::runway::MODELS.to_vec(),
+            VideoBackend::Kling => crate::kling::MODELS.to_vec(),
+        };
+        let mut unique: Vec<&str> = Vec::new();
+        for model in models {
+            if !unique.contains(&model) {
+                unique.push(model);
+            }
+        }
+        out.push_str(&format!(
+            "models: {} (default {})\n",
+            unique.join(", "),
+            backend.default_model()
+        ));
+
+        out.push_str(&format!(
+            "aspect ratio: {}\n\
+             duration: {}  |  quality tiers: {}\n\
+             from a still: {}  |  from text alone: {}\n\
+             negative prompt: {}  |  resolution: {}  |  seed: {}\n\
+             output carries: {}\n\n",
+            describe_aspect(caps.aspect),
+            caps.duration.describe(),
+            if caps.modes.is_empty() { "none".to_string() } else { caps.modes.join(", ") },
+            caps.image_to_video,
+            caps.text_to_video,
+            caps.negative_prompt,
+            caps.resolution,
+            caps.seed,
+            caps.provenance.describe()
+        ));
+    }
+
+    out
+}
+
 /// The recovery surface for a render whose session ended.
 ///
 /// New in this version, and a deliberate change to the public MCP surface — this
@@ -694,6 +785,7 @@ const TOOL_NAMES: &[&str] = &[
     "image_providers",
     "start_video",
     "check_video",
+    "video_providers",
     "list_operations",
 ];
 
@@ -713,6 +805,7 @@ fn call_tool(params: &Value) -> Result<Value> {
         "image_providers" => wrap(Ok(describe_providers())),
         "start_video" => wrap(start_video(args)),
         "check_video" => wrap(check_video(args)),
+        "video_providers" => wrap(Ok(describe_video_providers())),
         "list_operations" => wrap(list_operations()),
         // Unreachable while the guard above and this match agree, which is what
         // the constant is for.
