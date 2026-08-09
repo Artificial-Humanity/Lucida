@@ -39,9 +39,10 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 #[command(
     name = "lucida",
     version,
-    about = "Generate and edit images with Google Gemini, a local ComfyUI, hosted FLUX, Stability AI or OpenAI",
+    about = "Generate images and video with Google Gemini, Veo, a local ComfyUI, FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
-                  hosted FLUX from Black Forest Labs, Stability AI, or OpenAI.\n\n\
+                  hosted FLUX from Black Forest Labs, Stability AI, or OpenAI, \
+                  and video with Veo.\n\n\
                   Google reads GEMINI_API_KEY — one key for both images and Veo \
                   video. Image generation requires billing to be enabled on the \
                   project behind the key; free-tier keys report a quota of \
@@ -1190,6 +1191,36 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shopfront surfaces — the package description and the `--help` banner
+    /// — are the first and often only thing anyone reads, and they are pure
+    /// prose, so nothing generates them and nothing caught them rotting. The
+    /// repository description said "Generate and edit images with Google's
+    /// Gemini models" through four providers and all of video.
+    ///
+    /// Checked against `Backend::ALL`, so provider six fails here rather than
+    /// going unmentioned for a release. Video is checked by name for the same
+    /// reason: it was the whole capability the description omitted.
+    #[test]
+    fn the_shopfront_names_every_provider_and_video() {
+        use clap::CommandFactory;
+
+        let banner = Cli::command().get_about().map(|a| a.to_string()).unwrap();
+
+        for surface in [env!("CARGO_PKG_DESCRIPTION"), banner.as_str()] {
+            for backend in Backend::ALL {
+                assert!(
+                    surface.contains(backend.product_name()),
+                    "`{}` is missing from a surface someone reads before installing: {surface}",
+                    backend.product_name()
+                );
+            }
+            assert!(
+                surface.contains("Veo") || surface.contains("video"),
+                "video is not mentioned at all: {surface}"
+            );
+        }
+    }
 
     /// The property that matters — an interrupted write leaving the previous
     /// file intact — is the one a test cannot easily provoke, so what is checked

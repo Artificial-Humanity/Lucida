@@ -744,6 +744,34 @@ impl Backend {
         }
     }
 
+    /// How this provider is named to someone who has not used Lucida yet.
+    ///
+    /// [`name`](Self::name) is the token `--provider` takes, and it is not the
+    /// same thing: `bfl` is a flag value, while the product is called FLUX and
+    /// nobody searching for it types the company's initials. This is the
+    /// spelling the shopfront surfaces use — the package description, the
+    /// `--help` banner — and it exists so those can be *checked* against
+    /// `Backend::ALL` rather than hand-maintained.
+    ///
+    /// That check is owed: the repository description read "Generate and edit
+    /// images with Google's Gemini models" for four providers and all of video,
+    /// while being the only pitch a visitor ever saw.
+    ///
+    /// Test-only on purpose. Nothing Lucida *prints* should use these — output
+    /// names the token you can type — so a production caller would be a sign the
+    /// two vocabularies had started to blur. Its job is to be the list a prose
+    /// surface can be measured against.
+    #[cfg(test)]
+    pub fn product_name(self) -> &'static str {
+        match self {
+            Self::Google => "Gemini",
+            Self::ComfyUi => "ComfyUI",
+            Self::Bfl => "FLUX",
+            Self::Stability => "Stability",
+            Self::OpenAi => "OpenAI",
+        }
+    }
+
     /// The model used when none is named. Lives here rather than in `main` so
     /// anything asking "what can this provider do" gets the same answer the CLI
     /// would give — asking BFL with an empty model reports no editing, because

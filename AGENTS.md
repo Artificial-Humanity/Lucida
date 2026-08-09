@@ -22,7 +22,13 @@ current state of the project.
   finding: every generated list stayed true while every hand-written one rotted. When
   provider six lands, start from the known hand-written drift surfaces recorded in that
   review (§5.1) — clap help strings, MCP parameter prose, `README.md`, remedy texts,
-  `scripts/smoke.sh`.
+  `scripts/smoke.sh`. Add to that list the **GitHub repository description and topics**,
+  which live outside the repo entirely and so cannot be tested from it: they read
+  "Generate and edit images with Google's Gemini models" for four providers and all of
+  video. The description is kept in step with `Cargo.toml`'s, and a test
+  (`the_shopfront_names_every_provider_and_video`) holds that one and the `--help`
+  banner against `Backend::ALL` — but the GitHub copy is updated by hand, with
+  `gh repo edit`, and nothing will remind you.
 * **Provenance:** hosted-provider output carries SynthID and/or C2PA marks; local ComfyUI is
   the only unmarked lane.
 * **Verification trio:** `cargo test`, `cargo clippy --all-targets` (kept warning-free so
