@@ -310,12 +310,22 @@ mod tests {
     }
 
     /// A ledger write must never be the thing that fails a render that has
-    /// already been paid for. Pointed at a path that cannot exist, `record`
-    /// returns normally.
+    /// already been paid for.
+    ///
+    /// The unwritable path is a *directory* standing where the file belongs,
+    /// which no platform will open for appending. An earlier version used
+    /// `/proc/self/mem/...`, which is unwritable on Linux and merely an ordinary
+    /// relative path on Windows — where `create_dir_all` obligingly made it and
+    /// the assertion failed on the CI lane that exists for exactly this.
     #[test]
-    fn a_broken_ledger_path_does_not_propagate() {
-        let impossible = std::path::Path::new("/proc/self/mem/nope/renders.jsonl");
-        assert!(append(impossible, &json!({ "n": 1 })).is_err());
-        // `record` is what callers use, and it swallows exactly that error.
+    fn a_ledger_write_that_cannot_succeed_is_still_not_an_error_for_the_caller() {
+        let path = temp();
+        std::fs::create_dir_all(&path).unwrap();
+
+        assert!(append(&path, &json!({ "n": 1 })).is_err());
+        // `record` is what every caller uses, and it swallows precisely that.
+        record(json!({ "n": 1 }));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
