@@ -43,11 +43,14 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("BFL_API_KEY", "Black Forest Labs API key (hosted FLUX)"),
     ("STABILITY_API_KEY", "Stability AI developer platform key"),
     ("OPENAI_API_KEY", "OpenAI API key"),
-    // Runway's own spelling, not `RUNWAY_API_KEY`. Matching the provider's name
-    // is the same rule that renamed GOOGLE_API_KEY to GEMINI_API_KEY: a
-    // credential should be called what its issuer calls it, or everyone has to
-    // learn a second name for one thing.
-    ("RUNWAYML_API_SECRET", "Runway API key (Gen-4 video)"),
+    // `RUNWAY_API_KEY`, not Runway's own `RUNWAYML_API_SECRET`. Owner's call,
+    // 2026-08-09, and the better one: every other credential here is
+    // `<PROVIDER>_API_KEY`, and house consistency across six keys beats matching
+    // one vendor's spelling. No retirement entry is owed — Runway support has
+    // never appeared in a release, so no configuration anywhere holds the old
+    // name except the machine this was written on.
+    ("RUNWAY_API_KEY", "Runway API key (Gen-4 video)"),
+    ("KLINGAI_API_KEY", "Kling API key (video) — the single-key scheme, not AK/SK"),
     ("LUCIDA_COMFYUI_URL", "Where ComfyUI is listening"),
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),
     ("LUCIDA_COMFYUI_CA", "PEM certificate for a private CA"),

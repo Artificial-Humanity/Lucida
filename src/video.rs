@@ -48,6 +48,15 @@ pub struct VideoRequest {
     /// rather than annoying, since every video provider bills per second.
     pub duration: Option<u32>,
     pub seed: Option<u64>,
+    /// A provider's quality tier, where it has one.
+    ///
+    /// Kling forced this: `std`, `pro` and `master` are the same model rendered
+    /// at different cost and fidelity, which is not a model id, not a
+    /// resolution, and not something any other provider here has. Held as an
+    /// optional string with the accepted values published as a capability,
+    /// rather than folded into the model id — inventing `kling-v2-6-pro` would
+    /// mean shipping ids the provider does not recognise.
+    pub mode: Option<String>,
 }
 
 /// Veo, as of the 3.1 family.
@@ -68,6 +77,7 @@ pub const CAPABILITIES: crate::provider::VideoCapabilities = crate::provider::Vi
     resolution: true,
     // Google exposes no seed on video any more than on images.
     seed: false,
+    modes: &[],
     provenance: crate::provider::Provenance::SynthIdAndC2pa,
 };
 

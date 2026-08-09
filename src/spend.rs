@@ -148,7 +148,13 @@ pub fn video_price(backend: crate::provider::VideoBackend, model: &str, duration
         // verified the conversion, so its rate is not stated. `Unverified`
         // counts at the ceiling, which is the honest answer until a render and
         // a balance reading settle it.
-        crate::provider::VideoBackend::Runway => return Price::Unverified,
+        // Runway and Kling both bill in their own credits and this table has
+        // not verified either conversion, so neither rate is stated.
+        // `Unverified` counts at the ceiling, which is the honest answer until a
+        // render and a balance reading settle it.
+        crate::provider::VideoBackend::Runway | crate::provider::VideoBackend::Kling => {
+            return Price::Unverified;
+        }
     };
 
     Price::PerSecond {

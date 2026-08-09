@@ -557,8 +557,12 @@ fn start_video_schema() -> Value {
                 "image": { "type": "string", "description": "Optional path to a still image to animate instead of generating from text alone. Required by runway's gen4-turbo, which cannot start from text." },
                 "provider": {
                     "type": "string",
-                    "enum": ["google", "runway"],
+                    "enum": ["google", "runway", "kling"],
                     "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Quality tier, where the provider has one. kling takes std, pro or master; the others have none and passing one there is an error."
                 },
                 "aspect_ratio": {
                     "type": "string",
@@ -622,7 +626,7 @@ fn check_video_schema() -> Value {
             "type": "object",
             "properties": {
                 "operation": { "type": "string", "description": "The operation id returned by start_video." },
-                "provider": { "type": "string", "enum": ["google", "runway"], "description": "Which provider started it. Inferred from the id's shape when omitted." },
+                "provider": { "type": "string", "enum": ["google", "runway", "kling"], "description": "Which provider started it. Inferred from the id's shape when omitted." },
                 "output_path": { "type": "string", "description": "Where to write the finished video. An .mp4 extension is applied if missing." }
             },
             "required": ["operation", "output_path"]
@@ -1041,6 +1045,7 @@ fn start_video(args: &Value) -> Result<String> {
             .map(|n| u32::try_from(n).map_err(|_| anyhow::anyhow!("`duration` is {n} seconds, which is not a clip length")))
             .transpose()?,
         seed: opt_u64(args, "seed")?,
+        mode: opt_string(args, "mode")?,
     };
 
     let backend = match opt_str(args, "provider")? {
@@ -1056,6 +1061,7 @@ fn start_video(args: &Value) -> Result<String> {
     let resolved = match backend {
         crate::provider::VideoBackend::Google => crate::video::resolve_video_model(&request.model),
         crate::provider::VideoBackend::Runway => crate::runway::resolve_model(&request.model),
+        crate::provider::VideoBackend::Kling => crate::kling::resolve_model(&request.model),
     };
 
     // Video bills per second, so the check happens before the round trip that
@@ -1066,6 +1072,7 @@ fn start_video(args: &Value) -> Result<String> {
     let client: Box<dyn crate::provider::VideoProvider> = match backend {
         crate::provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
         crate::provider::VideoBackend::Runway => Box::new(crate::runway::Client::from_env()?),
+        crate::provider::VideoBackend::Kling => Box::new(crate::kling::Client::from_env()?),
     };
 
     let operation = client.start(&request)?;
@@ -1098,6 +1105,7 @@ fn check_video(args: &Value) -> Result<String> {
     let client: Box<dyn crate::provider::VideoProvider> = match backend {
         crate::provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
         crate::provider::VideoBackend::Runway => Box::new(crate::runway::Client::from_env()?),
+        crate::provider::VideoBackend::Kling => Box::new(crate::kling::Client::from_env()?),
     };
 
     match client.poll(operation)? {

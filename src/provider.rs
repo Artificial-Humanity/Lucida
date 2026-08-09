@@ -441,6 +441,9 @@ pub struct VideoCapabilities {
     pub negative_prompt: bool,
     pub resolution: bool,
     pub seed: bool,
+    /// Quality tiers this provider offers, cheapest first. Empty where the
+    /// concept does not exist, which is everywhere but Kling.
+    pub modes: &'static [&'static str],
     pub provenance: Provenance,
 }
 
@@ -493,6 +496,18 @@ impl VideoCapabilities {
             bail!("`{me}` has no concept of a seed, so a render there cannot be repeated.");
         }
 
+        if let Some(mode) = &req.mode {
+            if self.modes.is_empty() {
+                bail!(
+                    "`{me}` has no quality tiers, so `--mode` cannot be honoured. \
+                     Its models differ by id rather than by tier."
+                );
+            }
+            if !self.modes.contains(&mode.as_str()) {
+                bail!("`{me}` has no `{mode}` tier. It offers: {}.", self.modes.join(", "));
+            }
+        }
+
         if let Some(aspect) = req.aspect
             && let AspectSupport::Named(accepted) = self.aspect
             && !accepted.iter().any(|a| *a == aspect.to_string())
@@ -512,15 +527,18 @@ impl VideoCapabilities {
 pub enum VideoBackend {
     Google,
     Runway,
+    Kling,
 }
 
 impl VideoBackend {
-    pub const ALL: &'static [VideoBackend] = &[VideoBackend::Google, VideoBackend::Runway];
+    pub const ALL: &'static [VideoBackend] =
+        &[VideoBackend::Google, VideoBackend::Runway, VideoBackend::Kling];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Google => "google",
             Self::Runway => "runway",
+            Self::Kling => "kling",
         }
     }
 
@@ -528,6 +546,7 @@ impl VideoBackend {
         match self {
             Self::Google => crate::video::DEFAULT_VIDEO_MODEL,
             Self::Runway => crate::runway::DEFAULT_MODEL,
+            Self::Kling => crate::kling::DEFAULT_MODEL,
         }
     }
 
@@ -535,6 +554,7 @@ impl VideoBackend {
         match name.trim().to_ascii_lowercase().as_str() {
             "google" | "veo" | "gemini" => Ok(Self::Google),
             "runway" | "runwayml" => Ok(Self::Runway),
+            "kling" | "klingai" => Ok(Self::Kling),
             other => bail!(
                 "`{other}` is not a video provider. Available: {}.",
                 Self::ALL.iter().map(|b| b.name()).collect::<Vec<_>>().join(", ")
@@ -548,6 +568,7 @@ pub fn video_capabilities_for(backend: VideoBackend, model: &str) -> VideoCapabi
     match backend {
         VideoBackend::Google => crate::video::CAPABILITIES,
         VideoBackend::Runway => crate::runway::capabilities(model),
+        VideoBackend::Kling => crate::kling::capabilities(model),
     }
 }
 
@@ -555,6 +576,8 @@ pub fn video_capabilities_for(backend: VideoBackend, model: &str) -> VideoCapabi
 pub fn infer_video_backend(model: &str) -> VideoBackend {
     if crate::runway::is_runway_model(model) {
         VideoBackend::Runway
+    } else if crate::kling::is_kling_model(model) {
+        VideoBackend::Kling
     } else {
         VideoBackend::Google
     }
@@ -576,6 +599,11 @@ pub fn infer_video_backend_from_operation(operation: &str) -> VideoBackend {
         VideoBackend::Google
     } else if looks_like_uuid(operation) {
         VideoBackend::Runway
+    } else if operation.len() >= 12 && operation.chars().all(|c| c.is_ascii_digit()) {
+        // Kling's are long decimal ids — 915468728228253726. Distinct from both
+        // of the above, which is luck rather than design and is why
+        // `--provider` overrides this and the ledger records the truth.
+        VideoBackend::Kling
     } else {
         VideoBackend::Google
     }
@@ -978,6 +1006,7 @@ impl Backend {
         match backend {
             VideoBackend::Google => "Veo",
             VideoBackend::Runway => "Runway",
+            VideoBackend::Kling => "Kling",
         }
     }
 
@@ -1049,6 +1078,52 @@ pub fn infer_backend(model: &str) -> Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Naming a video provider must supply that provider's model, not another's.
+    ///
+    /// `--model` carried a clap `default_value` of Veo's model id, so
+    /// `--provider kling` with no model sent `veo-3.1-fast-generate-preview` to
+    /// Kling — nothing could distinguish "unspecified" from "explicitly the Veo
+    /// default". The image side had already solved this and its comment says so;
+    /// video repeated the mistake anyway, which is what this pins.
+    #[test]
+    fn each_video_provider_supplies_its_own_default_model() {
+        let mut seen = std::collections::BTreeSet::new();
+        for backend in VideoBackend::ALL {
+            let model = backend.default_model();
+            assert!(!model.trim().is_empty(), "{} has no default", backend.name());
+            assert!(
+                seen.insert(model),
+                "`{model}` is the default for two video providers"
+            );
+            // And the default must route back to the provider that owns it, or
+            // `lucida video --model <that>` lands somewhere else entirely.
+            assert_eq!(
+                infer_video_backend(model),
+                *backend,
+                "`{model}` is {}'s default but infers as another provider",
+                backend.name()
+            );
+        }
+    }
+
+    /// `lucida check <id>` is handed an id and nothing else, so the id's shape
+    /// has to route it. Real ids from each provider.
+    #[test]
+    fn an_operation_id_routes_to_the_provider_that_issued_it() {
+        assert_eq!(
+            infer_video_backend_from_operation("operations/abc123"),
+            VideoBackend::Google
+        );
+        assert_eq!(
+            infer_video_backend_from_operation("4f1a2b3c-0000-4000-8000-000000000000"),
+            VideoBackend::Runway
+        );
+        assert_eq!(
+            infer_video_backend_from_operation("915468728228253726"),
+            VideoBackend::Kling
+        );
+    }
 
     /// Every provider has a default and every provider must be able to say
     /// which model it is, from one place.

@@ -71,7 +71,8 @@ have_key() {
     bfl)       name=BFL_API_KEY ;;
     stability) name=STABILITY_API_KEY ;;
     openai)    name=OPENAI_API_KEY ;;
-    runway)    name=RUNWAYML_API_SECRET ;;
+    runway)    name=RUNWAY_API_KEY ;;
+    kling)     name=KLINGAI_API_KEY ;;
     *)         return 1 ;;
   esac
   printf '%s' "$settings" | grep -qE "^ +$name +set"
@@ -83,7 +84,7 @@ have_key() {
 # has moved, or a response shape has changed.
 
 printf 'Free endpoints (model lists and balances):\n'
-for provider in google comfyui bfl stability openai runway; do
+for provider in google comfyui bfl stability openai runway kling; do
   if ! have_key "$provider"; then
     skip "$provider — no credential in this environment"
     continue
@@ -167,6 +168,16 @@ if have_key runway; then
   esac
 else
   skip "runway — no credential in this environment"
+fi
+
+if have_key kling; then
+  out=$("$BIN" models --provider kling 2>&1)
+  case "$out" in
+    *"Remaining units"*) pass "kling — reachable, balance readable" ;;
+    *) fail "kling — $(printf '%s' "$out" | head -2 | tr '\n' ' ')" ;;
+  esac
+else
+  skip "kling — no credential in this environment"
 fi
 
 # --- 3. the models we default to are still offered --------------------------

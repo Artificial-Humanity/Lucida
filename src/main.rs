@@ -17,6 +17,7 @@ mod clock;
 mod comfy;
 mod config;
 mod genai;
+mod kling;
 mod ledger;
 mod masked;
 mod mcp;
@@ -38,16 +39,16 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use provider::{Aspect, Backend, ImageProvider, ImageRequest, Size, infer_backend};
 use std::path::{Path, PathBuf};
-use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
+use video::VideoRequest;
 
 #[derive(Parser)]
 #[command(
     name = "lucida",
     version,
-    about = "Generate images and video with Google Gemini, Veo, Runway, a local ComfyUI, FLUX, Stability AI or OpenAI",
+    about = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
                   hosted FLUX from Black Forest Labs, Stability AI, or OpenAI, \
-                  and video with Veo or Runway.\n\n\
+                  and video with Veo, Runway or Kling.\n\n\
                   Google reads GEMINI_API_KEY — one key for both images and Veo \
                   video. Image generation requires billing to be enabled on the \
                   project behind the key; free-tier keys report a quota of \
@@ -215,9 +216,15 @@ enum Command {
         #[arg(short, long)]
         negative: Option<String>,
 
-        /// Model id or alias: veo, veo-standard, veo-lite, runway, gen4-turbo
-        #[arg(short, long, default_value = DEFAULT_VIDEO_MODEL)]
-        model: String,
+        /// Model id or alias: veo, veo-standard, runway, gen4-turbo, kling…
+        ///
+        /// Optional, and that matters: a clap `default_value` here would mean
+        /// `--provider kling` with no model sends *Veo's* default model id to
+        /// Kling, because nothing could tell "unspecified" from "explicitly the
+        /// Veo default". `ImageOptions::into_request` solved this for images and
+        /// says so; video repeated the mistake until 2026-08-09.
+        #[arg(short, long)]
+        model: Option<String>,
 
         /// Which provider to use: google or runway. Inferred from the model when
         /// omitted.
@@ -230,9 +237,14 @@ enum Command {
         #[arg(short = 'd', long)]
         duration: Option<u32>,
 
-        /// Seed, for a reproducible render. Runway has one; Veo does not.
+        /// Seed, for a reproducible render. Runway has one; Veo and Kling do not.
         #[arg(long)]
         seed: Option<u64>,
+
+        /// Quality tier, where the provider has them — kling takes std, pro or
+        /// master. `lucida models --provider <name>` says which.
+        #[arg(long)]
+        mode: Option<String>,
 
         /// Start the render and print its operation id instead of waiting.
         /// Collect it later with `lucida check`.
@@ -510,14 +522,22 @@ fn run(cli: Cli) -> Result<i32> {
             provider,
             duration,
             seed,
+            mode,
             no_wait,
         } => {
             // Named explicitly, or inferred from the model id — the same rule
             // images have used since `--provider` became optional there.
+            // Explicit provider wins and supplies the model default; otherwise
+            // the model names the provider. Either way the pair is consistent,
+            // which is the whole point.
             let backend = match &provider {
                 Some(name) => provider::VideoBackend::parse(name)?,
-                None => provider::infer_video_backend(&model),
+                None => match &model {
+                    Some(model) => provider::infer_video_backend(model),
+                    None => provider::VideoBackend::Google,
+                },
             };
+            let model = model.unwrap_or_else(|| backend.default_model().to_string());
 
             let request = VideoRequest {
                 prompt,
@@ -528,6 +548,7 @@ fn run(cli: Cli) -> Result<i32> {
                 image,
                 duration,
                 seed,
+                mode,
             };
 
             // Before a client exists, so asking Veo for a seed says so with no
@@ -1140,6 +1161,21 @@ fn list_video_models(backend: provider::VideoBackend) -> Result<()> {
                 println!("  {model}{default}{text}");
             }
         }
+        provider::VideoBackend::Kling => {
+            match kling::Client::from_env().and_then(|c| c.credits()) {
+                Ok(units) => println!("Key is valid. Remaining units: {units}"),
+                Err(e) => println!("The kling provider cannot be used right now:\n\n  {e:#}\n"),
+            }
+            println!("Video models available to the kling provider:");
+            for model in kling::MODELS {
+                let default = if *model == kling::DEFAULT_MODEL { "  (default)" } else { "" };
+                println!("  {model}{default}");
+            }
+            println!("\nAliases:");
+            for (alias, target) in kling::MODEL_ALIASES {
+                println!("  {alias:<16} -> {target}");
+            }
+        }
     }
 
     println!("\nThis provider supports:");
@@ -1150,6 +1186,9 @@ fn list_video_models(backend: provider::VideoBackend) -> Result<()> {
     println!("  negative prompt {}", yes_no(caps.negative_prompt));
     println!("  resolution      {}", yes_no(caps.resolution));
     println!("  seed            {}", yes_no(caps.seed));
+    if !caps.modes.is_empty() {
+        println!("  quality tiers   {}", caps.modes.join(", "));
+    }
     println!("  output carries  {}", caps.provenance.describe());
 
     Ok(())
@@ -1159,6 +1198,7 @@ fn open_video(backend: provider::VideoBackend) -> Result<Box<dyn provider::Video
     Ok(match backend {
         provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
         provider::VideoBackend::Runway => Box::new(runway::Client::from_env()?),
+        provider::VideoBackend::Kling => Box::new(kling::Client::from_env()?),
     })
 }
 
@@ -1167,6 +1207,7 @@ fn resolve_video_model(backend: provider::VideoBackend, model: &str) -> String {
     match backend {
         provider::VideoBackend::Google => video::resolve_video_model(model),
         provider::VideoBackend::Runway => runway::resolve_model(model),
+        provider::VideoBackend::Kling => kling::resolve_model(model),
     }
 }
 

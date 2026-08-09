@@ -129,6 +129,8 @@ pub fn capabilities(model: &str) -> VideoCapabilities {
         // The ratio decides the pixel count; there is no separate resolution.
         resolution: false,
         seed: true,
+        // No quality tiers: on Runway the model id *is* the tier.
+        modes: &[],
         // `Unverified`, which this enum kept a variant for and whose doc
         // comment predicted this exact moment: it is where a new provider starts
         // before anyone has rendered anything with it. Runway publishes C2PA
@@ -149,21 +151,20 @@ pub struct Client {
 
 impl Client {
     pub fn from_env() -> Result<Self> {
-        let key = crate::config::var("RUNWAYML_API_SECRET").ok_or_else(|| {
+        let key = crate::config::var("RUNWAY_API_KEY").ok_or_else(|| {
             let where_to_put_it = match crate::config::preferred_path() {
                 Some(path) => format!(
-                    "Set RUNWAYML_API_SECRET, or add it to {} — `lucida config \
-                     --set RUNWAYML_API_SECRET` reads it from stdin so it stays \
+                    "Set RUNWAY_API_KEY, or add it to {} — `lucida config \
+                     --set RUNWAY_API_KEY` reads it from stdin so it stays \
                      out of your shell history.",
                     path.display()
                 ),
-                None => "Set RUNWAYML_API_SECRET.".to_string(),
+                None => "Set RUNWAY_API_KEY.".to_string(),
             };
             anyhow!(
                 "no Runway API key found.\n\n{where_to_put_it}\n\n\
                  Keys come from https://dev.runwayml.com — this is a paid API and \
-                 every render costs credits. The name is Runway's own spelling, \
-                 not `RUNWAY_API_KEY`."
+                 every render costs credits."
             )
         })?;
 
@@ -399,7 +400,7 @@ fn explain_error(status: u16, body: &str) -> String {
     let mut out = match status {
         401 | 403 => format!(
             "HTTP {status} — Runway rejected the key. {message}\n\n\
-             Check RUNWAYML_API_SECRET, and that the key has not been rotated in \
+             Check RUNWAY_API_KEY, and that the key has not been rotated in \
              the Developer Portal."
         ),
         429 => format!(
@@ -639,6 +640,6 @@ mod tests {
     #[test]
     fn a_rejected_key_says_so() {
         let explained = explain_error(401, r#"{"error":"Unauthorized"}"#);
-        assert!(explained.contains("RUNWAYML_API_SECRET"), "{explained}");
+        assert!(explained.contains("RUNWAY_API_KEY"), "{explained}");
     }
 }

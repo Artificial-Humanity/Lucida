@@ -125,6 +125,11 @@ is recorded, so an id from an earlier session — yours or someone else's — is
 there. Do not start a second render because the first one's id is no longer in
 your context; that pays twice for the same shot.
 
+Some video providers have a **quality tier** (`mode`) as well as a model — the
+same model rendered at different cost and fidelity. Where one exists the probe
+lists the tiers; where it does not, passing one is an error rather than a
+silent upgrade.
+
 Video bills per second of output and is far more expensive than images. Confirm
 before starting one unless you have been asked for it directly. **`duration` is
 the parameter that decides the bill**, and what each provider accepts differs —
