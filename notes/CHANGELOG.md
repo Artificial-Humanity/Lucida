@@ -20,7 +20,74 @@ for Lucida.
 
 ## Working section — unreleased
 
-_No entries yet. The next cycle opens with the first code commit after v0.9.1._
+### 2026-08-09 — the 2026-08-09 product review, first tranche
+
+Everything below closes a finding in [product-review-20260809.md](product-review-20260809.md),
+and every one of them is the implementation failing to keep a promise the product already
+makes. No new capability; the review's own framing is "keep the existing promises". 163 tests,
+up from 138.
+
+#### Added
+
+- **`src/retry.rs`** (`e39a6fd`) — `send_idempotent()`, up to three attempts with exponential
+  backoff, honouring `Retry-After` (delta-seconds form) and capping what that header can ask
+  for. Transient means a connection that never opened, a timeout, a 429, or a 5xx; a 4xx
+  returns at once. Takes a closure rather than a `RequestBuilder`, since a builder is consumed
+  by `send` and `try_clone` gives up on exactly the bodies worth retrying, and returns
+  `reqwest`'s own `Result` so every caller keeps the error mapping it had. Six tests, driven by
+  `testserver` with the backoff parameterised so the suite does not spend it.
+- **`retry::CONNECT_TIMEOUT`** (`7fcc22f`) — five seconds, applied by all eleven HTTP clients.
+- **`video::resume_notice()` and `lucida video --no-wait`** (`63fdd92`) — the operation id and
+  the `lucida check` line that collects it, printed the moment a render starts; and the CLI
+  equivalent of what `start_video` has always done on the MCP surface.
+- **`provider::RETIREMENTS`, `retirement_note()`, `unix_time()`** (`92da839`) — one declared
+  table of announced shutdown dates, with the tense computed against today. `unix_time` is
+  eleven lines of `days_from_civil` rather than a date dependency; an unparseable date reads as
+  future, so a typo can only ever understate.
+- **`write_atomically()` at the crate root** (`a5e6b84`) — the staging mechanism lifted out of
+  `config::write_replacing`, which is now three lines that call it.
+- **`Backend::product_name()`** (`f09cdd5`) — the prose spelling of a provider (`FLUX`, not
+  `bfl`), deliberately `#[cfg(test)]`: its only job is to be the list a shopfront surface can
+  be measured against.
+- **Typed MCP argument accessors** (`ec43ba9`) — `optional()`, `opt_str`, `opt_string`,
+  `opt_u64`, `opt_f64`, `opt_str_array`, `req_str` in `src/mcp.rs`.
+
+#### Fixed
+
+- **A wrongly-typed MCP argument is refused rather than dropped** (`ec43ba9`) — the review's
+  second structural finding. `as_str`/`as_array`/`as_u64` answer `None` for a type mismatch
+  exactly as for a missing value, and `None` meant "not requested", so
+  `"reference_images": "photo.png"` turned an **edit into a fresh generation, reported as
+  success**; a stringified `seed` was dropped, losing reproducibility. Array *elements* are
+  checked too, naming the index. Seven tests, none needing credentials.
+- **A paid Veo render can no longer be lost from the CLI** (`63fdd92`, `e39a6fd`) — the third
+  structural finding. The operation id was printed only in the deadline branch, so a 502, a
+  Ctrl-C, a closed laptop lost it; and nothing retried, so one transient poll failure ended the
+  wait. Both halves closed.
+- **`connect_timeout` on every client** (`7fcc22f`) — without it reqwest falls back to the full
+  request timeout for the handshake, so a blackholed host hung for 300 s and the
+  `image_providers` probe, which walks five providers in sequence, had a worst case of roughly
+  twenty minutes inside a tool advertised as spending nothing.
+- **Image writes are atomic** (`a5e6b84`) — `lucida edit` defaults its output to its own input,
+  so a failed truncating write destroyed the user's original *and* the edit. The staging name
+  gains a counter beside the pid, because two writes can now be in flight within one process.
+- **Shutdown dates no longer go stale in prose** (`92da839`) — Imagen's 2026-08-17 date was
+  future-tense in five places eight days before it; the three OpenAI ids retiring 2026-12-01
+  were recorded nowhere and listed like current models.
+- **The shopfront names what the tool does** (`f09cdd5`) — the repository description said
+  "Generate and edit images with Google's Gemini models" through four providers and all of
+  video; the `--help` banner omitted video. Both fixed, description aligned with
+  `Cargo.toml`'s, seven topics added.
+- **BFL and OpenAI print the signed download URL on a failed download** (`e39a6fd`) — the
+  render is finished and billed at that point and the URL expires in about ten minutes, so the
+  message was the only possible recovery and did not contain it.
+
+#### Changed
+
+- **Three tests now read the source or the schema rather than trusting prose**
+  (`7fcc22f`, `f09cdd5`) — every `Client::builder()` chain must reach `.build()` with a connect
+  timeout; the package description and `--help` banner must name every `Backend::ALL` entry and
+  video. Both surfaces are ones nothing can generate, which is why they rotted.
 
 ---
 
