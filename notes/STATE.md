@@ -19,7 +19,11 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   audio declined on the day it was cheapest to add; and the layer a user touches moved into
   `cargo test`, which immediately found an unreachable bash assertion and three hand-written
   MCP `provider` enums. 255 tests, CI green on all three platforms at `11409e1`.
-  **crates.io remains available and unrequested.**
+  **crates.io waits on the Apple signing certificate** (owner, 2026-08-09) — a positioning
+  call, not a technical dependency: `cargo install` compiles from source, so a published crate
+  ships no binary for Gatekeeper to evaluate. Signing affects only a browser download from the
+  releases page, plus SmartScreen. Noted in [ROADMAP.md](../ROADMAP.md) § 4 so that if org
+  enrollment stalls, the coupling is re-taken on purpose rather than by default.
 - **v0.10.0 (2026-08-09)** — *dependable unattended use*, the second
   tranche of the [2026-08-09 product review](product-review-20260809.md). **All three of the
   review's structural findings are now closed.** The MCP server dispatches tool calls on a
@@ -92,8 +96,8 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   costs an over-budget render). The v0.5.0 deletion decision is closed — see the prune above.
 - **Decided 2026-08-09, and it shapes the roadmap:** public adoption *is* a goal, and the
   review is being addressed in full — all three tranches, expansion axes included. So the
-  positioning work is live (description and topics done; crates.io once the ledger and video
-  APIs settle).
+  positioning work is live (description and topics done; the ledger and video APIs settled at
+  v1.0.0, so crates.io is now gated only on the signing certificate above).
 - **Phase 3's video work shipped in v1.0.0.** The `VideoProvider` trait landed
   and video now has **three providers**: Veo, Runway (its own gen4 models only) and Kling
   (direct — all eight versions, three quality tiers). `--duration` answers the ROADMAP's open
