@@ -401,6 +401,13 @@ the agent session dies.
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
 
+The recorded-response tests prove Lucida still speaks *yesterday's* protocol, not
+that the providers still do — so `scripts/canary.sh` asks them, on a weekly cron.
+Every probe is free by construction: a model list, a balance, or a render request
+naming a model that cannot exist. A render that *succeeds* there is reported as a
+failure, since it would mean money was spent by a script whose whole contract is
+that it spends none.
+
 `--json` works on any subcommand and puts one object on stdout — including on
 failure, so a caller never has to switch parsers depending on the outcome. Human
 prose stays on stderr. Exit codes tell four outcomes apart rather than two:

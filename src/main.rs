@@ -35,7 +35,6 @@ mod video;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use genai::DEFAULT_MODEL;
 use provider::{Aspect, Backend, ImageProvider, ImageRequest, Size, infer_backend};
 use std::path::{Path, PathBuf};
 use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
@@ -1101,7 +1100,13 @@ fn list_models(backend: Backend) -> Result<()> {
         println!("Image models available to the {} provider:", caps.provider);
         for model in &models {
             let mut notes: Vec<String> = Vec::new();
-            if backend == Backend::Google && model == DEFAULT_MODEL {
+            // Generated from `Backend::default_model()`, so every provider gets
+            // the annotation. It was written per-provider and only two of the
+            // five ever got it: google here and bfl in its own block below,
+            // while openai and stability listed their default indistinguishably
+            // from everything else. Found by the canary, which was checking
+            // something else entirely and could not find the marker it expected.
+            if model == backend.default_model() {
                 notes.push("default".into());
             }
             if model.starts_with("imagen") {
@@ -1117,9 +1122,6 @@ fn list_models(backend: Backend) -> Result<()> {
             // listed per model rather than once for the provider. Anything else
             // would send someone to the wrong endpoint for `--steps`.
             if backend == Backend::Bfl {
-                if model == bfl::DEFAULT_MODEL {
-                    notes.push("default".into());
-                }
                 let per_model = provider::capabilities_for(backend, model);
                 if per_model.steps {
                     notes.push("steps + guidance".into());

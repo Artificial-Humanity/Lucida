@@ -1,0 +1,42 @@
+name: canary
+
+# Deliberately NOT scheduled here.
+#
+# The canary runs from a weekly cron on ai-lab-0 — owner's call, 2026-08-09, and
+# the reason is credential geography rather than convenience. The five provider
+# keys already live on that machine; putting a second copy into GitHub Actions
+# secrets would double the number of places they exist, on infrastructure we do
+# not control, to buy a schedule we already have.
+#
+#   # crontab on ai-lab-0
+#   17 6 * * 1 /path/to/Lucida/scripts/canary.sh /usr/local/bin/lucida
+#
+# This workflow exists for the other case: running the probes by hand against a
+# specific commit, from a machine that is not ai-lab-0. It reads whatever
+# provider secrets happen to be configured and skips the rest, so it is useful
+# with none of them set — the free-endpoint checks still confirm the binary
+# builds and the capability tables print.
+on:
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # Every probe is free by construction: a model list, a balance, or a
+      # render request naming a model that cannot exist. See the header of
+      # canary.sh — a successful render there is reported as a failure, because
+      # it would mean money was spent by a script whose contract is that it
+      # spends none.
+      - name: Probe the providers
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
+          STABILITY_API_KEY: ${{ secrets.STABILITY_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: ./scripts/canary.sh target/release/lucida

@@ -46,7 +46,13 @@ current state of the project.
   and tool-description edits as public API.
 * A recording proves Lucida still speaks **yesterday's** protocol, not that the provider
   still does: live verification is owed once per new provider or changed endpoint
-  (ROADMAP §3).
+  (ROADMAP §3). Since 2026-08-09 that limit also has a standing answer —
+  `scripts/canary.sh` probes every provider live and costs nothing by construction (free
+  endpoints, plus render requests naming a model that cannot exist). **It runs from a
+  weekly cron on ai-lab-0**, where the five keys already live; the GitHub workflow is
+  `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
+  successful render inside the canary is reported as a *failure* — it would mean money was
+  spent by a script whose contract is that it spends none.
 
 ---
 

@@ -823,6 +823,31 @@ pub fn infer_backend(model: &str) -> Backend {
 mod tests {
     use super::*;
 
+    /// Every provider has a default and every provider must be able to say
+    /// which model it is, from one place.
+    ///
+    /// `lucida models` marked it per-provider and only two of the five branches
+    /// were ever written — google and bfl — so openai and stability listed their
+    /// default indistinguishably from everything else. The annotation is
+    /// generated from here now, which is what makes provider six free.
+    #[test]
+    fn every_backend_names_a_default_model() {
+        let mut seen = std::collections::BTreeSet::new();
+        for backend in Backend::ALL {
+            let model = backend.default_model();
+            assert!(
+                !model.trim().is_empty(),
+                "{} has no default model",
+                backend.name()
+            );
+            assert!(
+                seen.insert(model),
+                "`{model}` is the default for two providers, so `--model` alone \
+                 cannot say which was meant"
+            );
+        }
+    }
+
     /// The claim `capabilities_for`'s own doc comment makes — that finding out
     /// whether Google has a seed should not require having a key — held for the
     /// function and not for the two commands that printed it. Both held a client
