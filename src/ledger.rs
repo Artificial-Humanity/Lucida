@@ -90,7 +90,14 @@ pub fn record(entry: Value) {
 }
 
 /// A finished image.
-pub fn image(provider: &str, model: &str, prompt: &str, path: &str, seed: Option<u64>) {
+pub fn image(
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    path: &str,
+    seed: Option<u64>,
+    estimated_usd: f64,
+) {
     record(json!({
         "at": clock::now(),
         "kind": IMAGE,
@@ -100,6 +107,10 @@ pub fn image(provider: &str, model: &str, prompt: &str, path: &str, seed: Option
         "prompt": prompt,
         "path": path,
         "seed": seed,
+        // An estimate, never a charge — the provider's invoice is the authority.
+        // Recorded per entry rather than summed anywhere, so the rolling budget
+        // window is derived from the log like everything else here.
+        "estimated_usd": estimated_usd,
     }));
 }
 
@@ -107,7 +118,7 @@ pub fn image(provider: &str, model: &str, prompt: &str, path: &str, seed: Option
 ///
 /// The entry `lucida ops` is built on, and the reason this module exists: the
 /// operation id is the only way back to a render that is already being billed.
-pub fn video_started(model: &str, prompt: &str, operation: &str) {
+pub fn video_started(model: &str, prompt: &str, operation: &str, estimated_usd: f64) {
     record(json!({
         "at": clock::now(),
         "kind": VIDEO,
@@ -116,6 +127,10 @@ pub fn video_started(model: &str, prompt: &str, operation: &str) {
         "model": model,
         "prompt": prompt,
         "operation": operation,
+        // Charged at the moment the render starts, not when it is collected —
+        // which is why the estimate rides on this entry rather than on the
+        // `done` one. A render started and never collected still cost money.
+        "estimated_usd": estimated_usd,
     }));
 }
 

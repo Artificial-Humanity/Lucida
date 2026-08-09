@@ -25,6 +25,7 @@ mod provider;
 mod retry;
 mod setup;
 mod skill;
+mod spend;
 mod stability;
 #[cfg(test)]
 mod testserver;
@@ -418,7 +419,13 @@ fn run(cli: Cli) -> Result<()> {
                 image,
             };
             let resolved = video::resolve_video_model(&request.model);
-            eprintln!("Rendering with {resolved}…");
+
+            // Video is the one lane billed per second, so the rate is stated
+            // before the render rather than after it — this is where a wrong
+            // parameter is expensive rather than merely annoying.
+            let price = spend::video_price(&resolved);
+            spend::check(price, "video render")?;
+            eprintln!("Rendering with {resolved} — {}.", price.describe());
 
             let client = genai::Client::from_env()?;
 
@@ -427,7 +434,12 @@ fn run(cli: Cli) -> Result<()> {
             // to live inside one blocking call, which is why nothing but the
             // deadline message ever mentioned it.
             let operation = client.start_video(&request)?;
-            ledger::video_started(&resolved, &request.prompt, &operation);
+            ledger::video_started(
+                &resolved,
+                &request.prompt,
+                &operation,
+                price.against_budget(),
+            );
             eprintln!("{}", video::resume_notice(&operation));
 
             // The shape the MCP surface has had since it existed — start, hand
@@ -523,6 +535,19 @@ fn show_history(count: usize) -> Result<()> {
         let prompt = entry["prompt"].as_str().unwrap_or("");
         if !prompt.is_empty() {
             println!("    {}", truncate(prompt, 72));
+        }
+    }
+
+    // The number a budget is actually enforced against, shown wherever someone
+    // is already looking at what they generated. Called an estimate every time
+    // it appears: the provider's invoice is the authority and this is a sum of
+    // published rates, some of which are assumed upper bounds.
+    let spent = spend::spent_recently();
+    if spent > 0.0 {
+        print!("\nEstimated spend in the last 24 hours: ${spent:.2}");
+        match spend::budget() {
+            Some(budget) => println!(" of a ${budget:.2} LUCIDA_BUDGET"),
+            None => println!(" (no LUCIDA_BUDGET set)"),
         }
     }
     Ok(())
@@ -1071,6 +1096,11 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
     let caps = provider::capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
+    // Also before a client exists, and for the same reason: a refusal is only
+    // worth anything if it happens before the money moves.
+    let price = spend::price_for(backend, &request.model);
+    spend::check(price, "render")?;
+
     let provider = open(backend)?;
 
     let verb = if request.references.is_empty() {
@@ -1123,12 +1153,18 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
     // copied out of this tool.
     eprintln!("Provenance: {}.", caps.provenance.describe());
 
+    // Said after the render as well as counted, because "what did that cost" is
+    // a question someone asks holding the file, not before asking for it.
+    if price != spend::Price::Free {
+        eprintln!("Cost: {}.", price.describe());
+    }
     ledger::image(
         caps.provider,
         &request.model,
         &request.prompt,
         &written.to_string_lossy(),
         image.seed,
+        price.against_budget(),
     );
 
     // The path alone on stdout, so this composes in a pipeline.

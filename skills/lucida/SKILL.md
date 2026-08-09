@@ -47,6 +47,10 @@ decides the answer:
 3. **Does it cost money?** Most providers bill per render; one is free at the
    margin because it runs locally. A retry loop against a paid provider spends
    real money each turn — decide the parameters before iterating, not during.
+   Every render now reports its expected cost, so this is a number you can act
+   on rather than a rule of thumb. If a budget is set, a render that would
+   exceed it is refused before anything is sent; switch to the local lane rather
+   than retrying, since retrying cannot succeed.
 4. **Does the output need to be free of provenance marking, or carry it?**
    Providers differ, and Lucida reports what each render carried.
 

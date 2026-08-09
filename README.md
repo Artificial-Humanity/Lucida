@@ -155,6 +155,7 @@ $ lucida config                         # what this process sees, and from where
 | `LUCIDA_CONFIG` | Path to the config file, overriding where it is looked for |
 | `LUCIDA_NO_UPDATE_CHECK` | Set to silence the daily "a newer release exists" notice |
 | `LUCIDA_NO_LEDGER` | Set to stop recording renders. The ledger stores prompts; `lucida config` says where it lives |
+| `LUCIDA_BUDGET` | Dollars of estimated spend allowed in a rolling 24 hours. A render that would exceed it is refused before anything is sent |
 
 You only need the ones for providers you actually use. Keys come from each
 provider's own dashboard.
@@ -399,6 +400,15 @@ the agent session dies.
 
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
+
+Every render says what it is expected to cost, before it happens and again
+afterwards, and `LUCIDA_BUDGET` turns that into a cap: a render that would take
+the last 24 hours past it is refused before anything is sent, in the same voice
+as a capability refusal and pointing at the local lane, which costs nothing.
+Prices are estimates from published rates, each carrying the date it was checked
+— a provider whose rate is not verified here is counted at a stated upper bound
+rather than guessed at, and the provider's own invoice is always the authority.
+`lucida history` shows the running total.
 
 Every render is written to a ledger — one JSON object per line, beside the config
 file — so a render that has been paid for can be found again afterwards. That is

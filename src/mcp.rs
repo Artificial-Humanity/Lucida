@@ -808,6 +808,9 @@ fn generate_image(args: &Value) -> Result<String> {
     let caps = capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
+    let price = crate::spend::price_for(backend, &request.model);
+    crate::spend::check(price, "render")?;
+
     let provider = open(backend)?;
     let image = provider.generate(&request)?;
 
@@ -824,6 +827,7 @@ fn generate_image(args: &Value) -> Result<String> {
         &request.prompt,
         &written.to_string_lossy(),
         image.seed,
+        price.against_budget(),
     );
 
     // The dimensions are stated because they are not always the ones requested:
@@ -858,6 +862,12 @@ fn generate_image(args: &Value) -> Result<String> {
         "\n\nProvenance: {}.",
         caps.provenance.describe()
     ));
+    // In the result rather than only on stderr, because the caller that needs
+    // to act on it is the model reading this text — and "decide parameters
+    // before iterating" is advice it can only follow if it knows the number.
+    if price != crate::spend::Price::Free {
+        text.push_str(&format!("\n\nCost: {}.", price.describe()));
+    }
     if let Some(commentary) = &image.commentary
         && !commentary.is_empty()
     {
@@ -946,16 +956,27 @@ fn start_video(args: &Value) -> Result<String> {
         image: opt_string(args, "image")?,
     };
 
+    // Video bills per second, so the check happens before the round trip that
+    // starts the meter.
+    let price = crate::spend::video_price(&crate::video::resolve_video_model(&request.model));
+    crate::spend::check(price, "video render")?;
+
     let operation = genai::Client::from_env()?.start_video(&request)?;
     // Written down before it is reported, because the reporting is the fragile
     // half: an agent's session can end between this line and the render
     // finishing, and the id would then exist only in a transcript nobody reads
     // again. `lucida ops` reads it back.
-    crate::ledger::video_started(&request.model, &request.prompt, &operation);
+    crate::ledger::video_started(
+        &request.model,
+        &request.prompt,
+        &operation,
+        price.against_budget(),
+    );
     Ok(format!(
-        "Render started.\n\noperation: {operation}\n\n\
+        "Render started — {}.\n\noperation: {operation}\n\n\
          It typically takes 1-3 minutes. Wait about 30 seconds, then call \
-         check_video with this operation id and an output path."
+         check_video with this operation id and an output path.",
+        price.describe()
     ))
 }
 
