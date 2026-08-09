@@ -371,12 +371,6 @@ impl Client {
 }
 
 impl ImageProvider for Client {
-    fn capabilities(&self) -> Capabilities {
-        // The model-specific answer is resolved by `capabilities_for`; this is
-        // the conservative floor for callers holding only a provider.
-        capabilities(DEFAULT_MODEL)
-    }
-
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
         let model = resolve_model(&req.model);
 

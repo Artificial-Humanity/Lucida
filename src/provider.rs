@@ -675,8 +675,13 @@ impl Capabilities {
 
 /// A source of images.
 pub trait ImageProvider {
-    fn capabilities(&self) -> Capabilities;
-
+    // No `capabilities()` here, deliberately, and it was removed rather than
+    // never written: asking a *client* what its provider supports requires
+    // having built one, which requires a credential, which is precisely the
+    // coupling `capabilities_for` exists to break. The method survived because
+    // its two callers already held a client — and both of them therefore gave
+    // up before printing the table when no key was set. Use
+    // `capabilities_for(backend, model)`; it needs neither.
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage>;
 
     /// Models this provider can actually reach right now, for `lucida models`.
@@ -840,6 +845,28 @@ pub fn infer_backend(model: &str) -> Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The claim `capabilities_for`'s own doc comment makes — that finding out
+    /// whether Google has a seed should not require having a key — held for the
+    /// function and not for the two commands that printed it. Both held a client
+    /// first and gave up before the table when one could not be built.
+    ///
+    /// The trait no longer offers a `capabilities()` at all, so the coupling
+    /// cannot come back by the same route. This checks what is left: every
+    /// backend answers, for every model, with nothing constructed.
+    #[test]
+    fn every_capability_is_answerable_without_a_client() {
+        for backend in Backend::ALL {
+            for model in ["", "nonsense", backend.default_model()] {
+                let caps = capabilities_for(*backend, model);
+                assert!(
+                    !caps.provider.is_empty() && !caps.tagline.is_empty(),
+                    "{} answered emptily for `{model}`",
+                    backend.name()
+                );
+            }
+        }
+    }
 
     /// Pinned against dates computed independently, because everything about
     /// retirement notes rests on this one function and it is the only date

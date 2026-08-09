@@ -190,10 +190,6 @@ pub const CAPABILITIES: Capabilities = Capabilities {
 };
 
 impl ImageProvider for Client {
-    fn capabilities(&self) -> Capabilities {
-        CAPABILITIES
-    }
-
     fn list_models(&self) -> Result<Vec<String>> {
         self.image_models()
     }

@@ -59,6 +59,19 @@ case "$out" in
   *)                 fail "no-key message gives no way forward: $out" ;;
 esac
 
+# ...and it must still say what the provider can do. Whether Google has a seed is
+# not a fact about your credentials, and this command used to return before
+# printing the table the moment a client could not be built — so the answer that
+# needed no key was the one you could not get without one.
+case "$out" in
+  *"This provider supports:"*) pass "capabilities print without a key" ;;
+  *)                           fail "no capability table without a key: $out" ;;
+esac
+case "$out" in
+  *"output carries"*) pass "provenance prints without a key" ;;
+  *)                  fail "no provenance line without a key: $out" ;;
+esac
+
 # --- config file resolution -----------------------------------------------
 # The regression that matters here is subtle: an MCP server launched by a GUI
 # application has no shell environment, and until 0.3.0 that made an exported key

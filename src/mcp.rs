@@ -646,27 +646,34 @@ fn describe_providers() -> String {
     for backend in Backend::ALL.iter().copied() {
         out.push_str(&format!("## {}\n", backend.name()));
 
-        let provider = match open(backend) {
-            Ok(provider) => provider,
-            Err(e) => {
-                out.push_str(&format!("unavailable: {e:#}\n\n"));
-                continue;
-            }
-        };
+        // Read before anything is opened, and printed whatever happens. This
+        // used to `continue` on a missing key, so an agent asking what a
+        // provider supports got nothing back but "unavailable" — and the fix it
+        // needed (pick a provider that has a seed) was in the table it had just
+        // been denied. `capabilities_for` is pure, which `provider.rs` says in
+        // its own doc comment while this code did the opposite.
+        let caps = capabilities_for(backend, backend.default_model());
 
-        let caps = provider.capabilities();
-        match provider.list_models() {
-            Ok(models) if models.is_empty() => out.push_str("reachable, but reports no models\n"),
-            Ok(models) => {
-                out.push_str(&format!("reachable — {} model(s)\n", models.len()));
-                for model in models.iter().take(12) {
-                    out.push_str(&format!("  {model}\n"));
+        match open(backend) {
+            Err(e) => out.push_str(&format!(
+                "NOT usable: {e:#}\n(what it supports is listed anyway — that does \
+                 not depend on a credential)\n"
+            )),
+            Ok(provider) => match provider.list_models() {
+                Ok(models) if models.is_empty() => {
+                    out.push_str("reachable, but reports no models\n")
                 }
-                if models.len() > 12 {
-                    out.push_str(&format!("  … and {} more\n", models.len() - 12));
+                Ok(models) => {
+                    out.push_str(&format!("reachable — {} model(s)\n", models.len()));
+                    for model in models.iter().take(12) {
+                        out.push_str(&format!("  {model}\n"));
+                    }
+                    if models.len() > 12 {
+                        out.push_str(&format!("  … and {} more\n", models.len() - 12));
+                    }
                 }
-            }
-            Err(e) => out.push_str(&format!("NOT reachable: {e:#}\n")),
+                Err(e) => out.push_str(&format!("NOT reachable: {e:#}\n")),
+            },
         }
 
         let aspect = match caps.aspect {

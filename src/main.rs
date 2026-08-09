@@ -811,14 +811,54 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
     })
 }
 
-fn list_models(backend: Backend) -> Result<()> {
-    let provider = open(backend)?;
-    let caps = provider.capabilities();
-    let models = provider.list_models()?;
+/// What `lucida models` could learn by asking the provider.
+///
+/// Separated from the capability table below it because the two answer different
+/// questions and only one of them needs a credential.
+enum Reachability {
+    /// The provider answered. Carries what it listed, which may be nothing.
+    Listed(Vec<String>),
+    /// No client could be built — almost always a missing key.
+    Unavailable(String),
+    /// A client exists but the provider did not answer.
+    Unreachable(String),
+}
 
-    if models.is_empty() {
+fn list_models(backend: Backend) -> Result<()> {
+    // Asked for first, and printed no matter what happens below. Whether Google
+    // has a seed is not a fact about your credentials, and `capabilities_for` is
+    // a pure function saying so — but both this command and the MCP probe used
+    // to return early the moment a client could not be built, so the one
+    // question that needed no key was the one you could not get an answer to
+    // without one. `provider.rs` says as much in its own doc comment; the code
+    // disagreed with it.
+    let caps = provider::capabilities_for(backend, backend.default_model());
+
+    let reachability = match open(backend) {
+        Err(e) => Reachability::Unavailable(format!("{e:#}")),
+        Ok(provider) => match provider.list_models() {
+            Ok(models) => Reachability::Listed(models),
+            Err(e) => Reachability::Unreachable(format!("{e:#}")),
+        },
+    };
+
+    let models = match &reachability {
+        Reachability::Listed(models) => models.clone(),
+        Reachability::Unavailable(why) => {
+            println!("The {} provider cannot be used right now:\n\n  {why}\n", caps.provider);
+            println!("What it supports is a fact about the provider, not about your \
+                      credentials, so it is printed anyway:\n");
+            Vec::new()
+        }
+        Reachability::Unreachable(why) => {
+            println!("The {} provider did not answer:\n\n  {why}\n", caps.provider);
+            Vec::new()
+        }
+    };
+
+    if models.is_empty() && matches!(reachability, Reachability::Listed(_)) {
         println!("No image models visible to the {} provider.", caps.provider);
-    } else {
+    } else if !models.is_empty() {
         println!("Image models available to the {} provider:", caps.provider);
         for model in &models {
             let mut notes: Vec<String> = Vec::new();

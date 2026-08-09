@@ -184,10 +184,6 @@ impl Client {
 }
 
 impl ImageProvider for Client {
-    fn capabilities(&self) -> Capabilities {
-        capabilities(DEFAULT_MODEL)
-    }
-
     fn list_models(&self) -> Result<Vec<String>> {
         // No discovery endpoint — the models are paths. Confirm the key works
         // instead, which is what someone running this actually wants to know.

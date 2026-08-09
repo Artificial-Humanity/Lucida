@@ -356,10 +356,6 @@ impl Client {
 }
 
 impl ImageProvider for Client {
-    fn capabilities(&self) -> Capabilities {
-        capabilities(DEFAULT_MODEL)
-    }
-
     fn list_models(&self) -> Result<Vec<String>> {
         // `/v1/models` does not list image models for a project key even when
         // they work — measured, and confusing enough to be worth saying rather

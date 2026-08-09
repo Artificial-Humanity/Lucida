@@ -744,10 +744,6 @@ pub const CAPABILITIES: Capabilities = Capabilities {
 };
 
 impl ImageProvider for Client {
-    fn capabilities(&self) -> Capabilities {
-        CAPABILITIES
-    }
-
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
         // A supplied workflow names its own models, so nothing needs resolving
         // against the server — and resolving anyway would fail on an install
