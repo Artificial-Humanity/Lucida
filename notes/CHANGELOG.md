@@ -23,14 +23,35 @@ for Lucida.
 ### 2026-08-09 — the product review's second tranche, in progress
 
 Towards v0.10, "dependable unattended use". The review's **third and last structural finding
-closes here**, so all three are now closed. 186 tests, up from 163 at v0.9.2.
+closes here**, so all three are now closed.
 
-Still open for v0.10: cost visibility and a budget guard, `--json` + meaningful exit codes,
-`--count` batching, and the live canary (which the owner has ruled runs from an ai-lab-0 cron
-rather than GitHub Actions secrets, with the workflow kept `workflow_dispatch`-only).
+**Everything planned for v0.10 is now on `main`.** 201 tests, up from 163 at v0.9.2.
 
 #### Added
 
+- **`src/spend.rs` — cost visibility and `LUCIDA_BUDGET`** (`489dfcf`, `a6779a8`) — a price
+  per provider and model, reported on every render (CLI *and* the MCP tool result, where the
+  model that has to act on it can read it), recorded in the ledger, and enforced before a
+  client exists. **The table is small on purpose**: only rates verified against a provider's
+  published pricing appear as prices, each carrying the date checked; everything else is
+  `Unverified`, a refusal to guess rather than an oversight, counted against a budget at a
+  stated ceiling described as an assumed upper bound. The window is a **rolling 24 hours over
+  the ledger**, not a session — a CLI invocation is one render, so a per-session cap guards
+  nothing there, while an MCP server can run for a week and never reset.
+- **`src/out.rs` — four exit codes and a global `--json`** (`804df50`) — 0 done, 1 failed,
+  **2 refused**, 3 pending. 2 earns its own code because a refusal is an answer rather than a
+  failure and retrying it cannot succeed; it is carried as an error type so it travels the
+  existing `?` paths, tagged at `Capabilities::check` and `spend::check` as a whole rather
+  than per `bail!`. `--json` emits one object on stdout **including on failure**, so a caller
+  never switches parsers by outcome. `run` returns the exit code rather than `()`.
+- **`scripts/canary.sh` and a `workflow_dispatch`-only workflow** (`ef9fb14`) — live drift
+  detection, closing the limit the recorded-response tests state about themselves. Free by
+  construction: model lists and balances, plus render requests naming a model that cannot
+  exist. **A successful render inside the canary is reported as a failure.** Runs from a
+  weekly ai-lab-0 cron (owner, 2026-08-09) so the five keys gain no second home.
+- **`--count N` on `generate` and `edit`** (`a6779a8`) — N candidates as `name-1`, `name-2`;
+  a single render keeps its given name. `--seed` with `--count` is refused, since together
+  they render one picture N times and bill for each.
 - **`src/ledger.rs`, `lucida ops`, `lucida history`, and the `list_operations` MCP tool**
   (`b2daf7f`) — an append-only JSONL record of every render, beside `config.env`. Lucida
   remembered nothing before this: no prompt→file trail, no way to list video operations in
@@ -90,6 +111,20 @@ rather than GitHub Actions secrets, with the workflow kept `workflow_dispatch`-o
 - **`Client::generate_video` becomes `await_video`** (`b2daf7f`) — the CLI starts and waits in
   two visible steps, because the operation id has to exist where it can be written down and a
   single blocking call hid it inside itself.
+- **Three cost bugs, all found by running it rather than reading it** (`489dfcf`, `a6779a8`)
+  — a **free** render was refused once the day's spend passed the cap, because `spent + 0.0
+  <= budget` is false, which declined the very lane the refusal message points at; a batch
+  called `check` once per image, so all N asked "can I afford one more?" and all N said yes
+  (three images at $0.134 went through a $0.20 budget and rendered all three, about forty
+  cents); and `price_for` matched the raw model string, so the documented alias `banana-pro`
+  priced as `Unverified` and counted at the ceiling.
+- **`lucida models` marked the default model per-provider** (`ef9fb14`) — only google and bfl
+  ever got the branch, so openai and stability listed their default indistinguishably from
+  everything else. Generated from `Backend::default_model()` now, with a test. Found by the
+  canary, which was checking something else.
+- **A ledger test wrote to the developer's real ledger** (`a6779a8`) — `record()` resolves the
+  live config path, so calling it from a test appends junk to whichever machine runs the
+  suite. It did.
 - **Release tags could ship without the suite having run** (`e85f662`) — the three build jobs
   smoke-tested their own binary; `cargo test` ran only on `main`. Also `--locked` everywhere,
   `rust-version = "1.85"`, and the genai MIME guess replaced by `sniff_mime`.
