@@ -241,6 +241,18 @@ case "$out" in
   *)       fail "stdout was not a bare JSON object: $out" ;;
 esac
 
+# --- a batch is capped as a batch -------------------------------------------
+# `--seed` pins one image and `--count` asks for several: together they render
+# the same picture N times and bill for each, so they are refused rather than
+# guessed at.
+out=$(env -i HOME="$sandbox" PATH=/usr/bin:/bin "$BIN" generate x \
+        --provider comfyui --seed 5 --count 3 2>&1)
+code=$?
+case "$code:$out" in
+  2:*"same picture"*) pass "a seeded batch is refused" ;;
+  *)                  fail "a seeded batch exited $code: $out" ;;
+esac
+
 # --- the render ledger ------------------------------------------------------
 # A render that has been paid for must be findable afterwards, and the ledger is
 # the only thing that makes that true across sessions. Checked out of the shipped

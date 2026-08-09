@@ -338,8 +338,14 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
 
         assert!(append(&path, &json!({ "n": 1 })).is_err());
-        // `record` is what every caller uses, and it swallows precisely that.
-        record(json!({ "n": 1 }));
+
+        // `record` is deliberately NOT called here. It resolves the *real*
+        // ledger path from the config search path, so a test that calls it
+        // appends junk to whichever ledger belongs to the machine running the
+        // suite — which this test did, and which showed up as three `{"n":1}`
+        // lines in the developer's own history. A test must not write outside
+        // its temporary directory. What `record` adds over `append` is one
+        // `if let Err` that discards, and that is visible by reading it.
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

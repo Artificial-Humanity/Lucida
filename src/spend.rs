@@ -98,17 +98,24 @@ pub fn price_for(backend: Backend, model: &str) -> Price {
 
     match backend {
         Backend::ComfyUi => Price::Free,
-        Backend::Google => match model {
-            m if m.starts_with("gemini-3-pro-image") => Price::PerImage {
-                usd: 0.134,
-                verified: CHECKED,
-            },
-            m if m.starts_with("gemini-3.1-flash-image") => Price::PerImage {
-                usd: 0.067,
-                verified: CHECKED,
-            },
-            _ => Price::Unverified,
-        },
+        Backend::Google => {
+            // Resolved first, because the model reaching here is whatever the
+            // caller typed and that is usually an alias. Matching the raw string
+            // meant `--model banana-pro` — the documented spelling — priced as
+            // Unverified and counted at the ceiling, so a budget refused a
+            // 13-cent render as if it might cost a quarter.
+            match crate::genai::resolve_model(model).as_str() {
+                m if m.starts_with("gemini-3-pro-image") => Price::PerImage {
+                    usd: 0.134,
+                    verified: CHECKED,
+                },
+                m if m.starts_with("gemini-3.1-flash-image") => Price::PerImage {
+                    usd: 0.067,
+                    verified: CHECKED,
+                },
+                _ => Price::Unverified,
+            }
+        }
         Backend::Bfl | Backend::Stability | Backend::OpenAi => Price::Unverified,
     }
 }
@@ -147,11 +154,18 @@ pub fn budget() -> Option<f64> {
 /// Estimated dollars spent in the last [`WINDOW_SECONDS`], from the ledger.
 pub fn spent_recently() -> f64 {
     let since = clock::now() - WINDOW_SECONDS;
-    crate::ledger::entries()
+    let total: f64 = crate::ledger::entries()
         .iter()
         .filter(|e| e["at"].as_i64().unwrap_or(0) >= since)
         .filter_map(|e| e["estimated_usd"].as_f64())
-        .sum()
+        .sum();
+
+    // `max(0.0)` rather than the bare sum, and not for tidiness: Rust's `Sum`
+    // for floats folds from **negative** zero, so an empty ledger sums to `-0.0`
+    // and `{:.2}` renders that as `$-0.00`. Reported as spend, in a refusal
+    // about money, in JSON a caller parses. It also flattens any negative that
+    // a corrupted entry could contribute.
+    total.max(0.0)
 }
 
 /// Refuses a render that would take the day past its budget.
@@ -160,13 +174,26 @@ pub fn spent_recently() -> f64 {
 /// voice, for the same reason: the point of a refusal is that it happens before
 /// the money moves, and it names what to do instead.
 pub fn check(price: Price, what: &str) -> Result<()> {
+    check_batch(price, 1, what)
+}
+
+/// Refuses a batch that would take the day past its budget.
+///
+/// `count` is load-bearing and was learned the expensive way. The first version
+/// of the batch path called [`check`] in a loop — once per image — which reads
+/// as a check per render and is not one: every call re-reads the *same* ledger,
+/// so all `count` calls ask "can I afford one more?" and all of them answer yes.
+/// A three-image batch at $0.134 sailed through a $0.20 budget and rendered all
+/// three. The cap has to see the whole batch before the first render, because
+/// after the first render it is too late for the first render.
+pub fn check_batch(price: Price, count: usize, what: &str) -> Result<()> {
     // A render that spends nothing is never refused, whatever has been spent
     // already. Checked before the budget is even read, because the arithmetic
     // gets this wrong in the most embarrassing possible way: with the day's
     // spend already past the cap, `spent + 0.0 <= budget` is false, so the
     // local lane was declined — the very lane the refusal below tells you to
     // use instead. Caught by running it, not by reading it.
-    let estimate = price.against_budget();
+    let estimate = price.against_budget() * count as f64;
     if estimate <= 0.0 {
         return Ok(());
     }
@@ -222,6 +249,69 @@ mod tests {
                 Price::Free | Price::Unverified => {}
             }
         }
+    }
+
+    /// A batch is capped as a batch.
+    ///
+    /// Learned the expensive way. The first version called `check` once per
+    /// image, which reads as a check per render and is not one: every call
+    /// re-reads the same ledger, so all of them ask "can I afford one more?" and
+    /// all of them say yes. Three images at $0.134 went straight through a $0.20
+    /// budget and rendered all three — about forty cents, spent by the guard
+    /// that exists to stop exactly that.
+    #[test]
+    fn a_batch_costs_its_count_rather_than_one_render() {
+        let price = Price::PerImage { usd: 0.134, verified: "2026-08-09" };
+
+        // The property that was missing: the estimate scales with the batch.
+        let one = price.against_budget();
+        let three = price.against_budget() * 3.0;
+        assert!(
+            three > one * 2.5,
+            "a batch of three must be estimated at three renders, not one"
+        );
+
+        // And a free batch of any size is still free, so the local lane never
+        // becomes refusable by asking for more of it.
+        assert!(check_batch(Price::Free, 100, "render").is_ok());
+    }
+
+    /// Spend is never reported as a negative number.
+    ///
+    /// Rust's `Sum` for floats folds from negative zero, so an empty ledger sums
+    /// to `-0.0` and prints as `$-0.00` — in a refusal about money, and in JSON
+    /// a caller parses.
+    #[test]
+    fn nothing_spent_reads_as_zero_rather_than_minus_zero() {
+        let empty: f64 = Vec::<f64>::new().into_iter().sum();
+        assert!(
+            empty.is_sign_negative(),
+            "std stopped folding from -0.0; the guard in spent_recently may be \
+             removable, but check before removing it"
+        );
+
+        assert_eq!(format!("{:.2}", empty.max(0.0)), "0.00");
+        assert!(spent_recently() >= 0.0);
+    }
+
+    /// A model id reaching the price table is whatever the caller typed, and
+    /// that is usually an alias — `banana-pro` is the spelling the README and
+    /// the help text both use. Matching the raw string priced it as unverified
+    /// and counted it at the ceiling, so a budget refused a 13-cent render as if
+    /// it might cost a quarter.
+    #[test]
+    fn an_alias_is_priced_like_the_model_it_names() {
+        for (alias, id) in crate::genai::MODEL_ALIASES {
+            assert_eq!(
+                price_for(Backend::Google, alias),
+                price_for(Backend::Google, id),
+                "`{alias}` and `{id}` are the same model and must cost the same"
+            );
+        }
+        assert!(matches!(
+            price_for(Backend::Google, "banana-pro"),
+            Price::PerImage { .. }
+        ));
     }
 
     /// The local lane is the answer a budget refusal points at, so it has to

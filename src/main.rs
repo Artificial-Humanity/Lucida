@@ -140,6 +140,13 @@ struct ImageOptions {
     /// Guidance scale (comfyui, and bfl on flux-2-flex / flux-dev only)
     #[arg(short, long)]
     guidance: Option<f32>,
+
+    /// Render this many candidates, written as name-1, name-2 and so on.
+    ///
+    /// Spelled in full because `-n` already means `--negative` here, and
+    /// re-using it would break every existing caller to save two keystrokes.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    count: usize,
 }
 
 #[derive(Subcommand)]
@@ -382,8 +389,9 @@ fn run(cli: Cli) -> Result<i32> {
             reference,
             opts,
         } => {
+            let count = opts.count;
             let (request, backend) = opts.into_request(prompt, reference)?;
-            execute(request, backend, out).map(|()| out::OK)
+            execute(request, backend, out, count).map(|()| out::OK)
         }
 
         Command::Edit {
@@ -399,8 +407,9 @@ fn run(cli: Cli) -> Result<i32> {
             references.extend(reference);
 
             let destination = out.unwrap_or_else(|| PathBuf::from(&image));
+            let count = opts.count;
             let (request, backend) = opts.into_request(prompt, references)?;
-            execute(request, backend, destination).map(|()| out::OK)
+            execute(request, backend, destination, count).map(|()| out::OK)
         }
 
         Command::Check { operation, out } => {
@@ -1186,18 +1195,84 @@ fn describe_aspect(support: provider::AspectSupport) -> String {
     }
 }
 
-fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> {
-    // Before a client is even constructed: reject what this provider cannot
-    // express, rather than dropping it and returning an image that quietly
-    // ignored half the request. Checked first so that asking Google for a seed
-    // says so even with no API key set — the key was never the problem.
+/// Renders `count` images, and prints whatever the caller asked to see.
+///
+/// The batch is checked and budgeted as a *whole* before the first render, so
+/// asking for ten of something you cannot afford is refused once rather than
+/// nine times after the first one succeeded.
+fn execute(request: ImageRequest, backend: Backend, out: PathBuf, count: usize) -> Result<()> {
     let caps = provider::capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
-    // Also before a client exists, and for the same reason: a refusal is only
-    // worth anything if it happens before the money moves.
+    // The whole batch, in one check. Calling `check` per image reads as a check
+    // per render and is not one — every call re-reads the same ledger, so all of
+    // them ask "can I afford one more?" and all of them say yes. Measured: three
+    // images at $0.134 went through a $0.20 budget and rendered all three.
     let price = spend::price_for(backend, &request.model);
-    spend::check(price, "render")?;
+    spend::check_batch(price, count, "render")?;
+
+    // A pinned seed asks for one specific image; a batch asks for several
+    // different ones. Together they are a contradiction that renders the same
+    // picture `count` times and bills for each — silently, since every render
+    // would look like a success. Refused with the two ways out rather than
+    // guessed at, because incrementing someone's seed for them is its own
+    // silent substitution.
+    if count > 1 && request.seed.is_some() {
+        return Err(anyhow::Error::new(out::Refused(format!(
+            "`--seed` pins one image and `--count {count}` asks for several, so \
+             together they would render the same picture {count} times and bill \
+             for each.\n\n\
+             Drop `--seed` to get {count} different images, or drop `--count` to \
+             reproduce the one the seed names."
+        ))));
+    }
+
+    let mut written = Vec::new();
+    for n in 1..=count {
+        let destination = numbered(&out, n, count);
+        written.push(render_one(&request, backend, caps, price, destination)?);
+    }
+
+    if out::json() {
+        out::emit(serde_json::json!({
+            "ok": true,
+            "status": "done",
+            "images": written,
+            "exit_code": out::OK,
+        }));
+    } else {
+        for image in &written {
+            // One path per line, so a batch pipes as readily as a single render.
+            println!("{}", image["path"].as_str().unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+/// `image.png` → `image-2.png`, but only when there is more than one.
+///
+/// A single render keeps the name it was given, because that is what `--out`
+/// means and suffixing it would break every existing caller.
+fn numbered(out: &Path, n: usize, count: usize) -> PathBuf {
+    if count <= 1 {
+        return out.to_path_buf();
+    }
+    let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let numbered = match out.extension().and_then(|e| e.to_str()) {
+        Some(extension) => format!("{stem}-{n}.{extension}"),
+        None => format!("{stem}-{n}"),
+    };
+    out.with_file_name(numbered)
+}
+
+fn render_one(
+    request: &ImageRequest,
+    backend: Backend,
+    caps: provider::Capabilities,
+    price: spend::Price,
+    out: PathBuf,
+) -> Result<serde_json::Value> {
+    let request = request.clone();
 
     let provider = open(backend)?;
 
@@ -1265,31 +1340,25 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
         price.against_budget(),
     );
 
-    if out::json() {
-        let (width, height) = match image_dimensions(&image.bytes, &image.mime_type) {
-            Some((w, h)) => (Some(w), Some(h)),
-            None => (None, None),
-        };
-        out::emit(serde_json::json!({
-            "ok": true,
-            "status": "done",
-            "path": written.to_string_lossy(),
-            "provider": caps.provider,
-            "model": request.model,
-            "mime": image.mime_type,
-            "bytes": image.bytes.len(),
-            "width": width,
-            "height": height,
-            "seed": image.seed,
-            "provenance": caps.provenance.describe(),
-            "estimated_usd": price.against_budget(),
-            "exit_code": out::OK,
-        }));
-    } else {
-        // The path alone on stdout, so this composes in a pipeline.
-        println!("{}", written.display());
-    }
-    Ok(())
+    // Returned rather than printed, so a batch can be reported as one document
+    // and a single render still gets its path on stdout alone — which is what
+    // makes `$(lucida generate …)` compose.
+    let (width, height) = match image_dimensions(&image.bytes, &image.mime_type) {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+    Ok(serde_json::json!({
+        "path": written.to_string_lossy(),
+        "provider": caps.provider,
+        "model": request.model,
+        "mime": image.mime_type,
+        "bytes": image.bytes.len(),
+        "width": width,
+        "height": height,
+        "seed": image.seed,
+        "provenance": caps.provenance.describe(),
+        "estimated_usd": price.against_budget(),
+    }))
 }
 
 /// Reads the pixel dimensions out of an encoded image.
@@ -1602,6 +1671,24 @@ mod tests {
         assert_eq!(left, vec!["cat.png"], "a staging file survived: {left:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A single render keeps the name it was given — that is what `--out` means,
+    /// and suffixing it would break every existing caller. Only a batch numbers.
+    #[test]
+    fn only_a_batch_numbers_its_output() {
+        let out = Path::new("public/icon.png");
+
+        assert_eq!(numbered(out, 1, 1), PathBuf::from("public/icon.png"));
+        assert_eq!(numbered(out, 1, 3), PathBuf::from("public/icon-1.png"));
+        assert_eq!(numbered(out, 3, 3), PathBuf::from("public/icon-3.png"));
+
+        // The directory has to survive, or a batch scatters into the working
+        // directory instead of where it was asked to go.
+        assert_eq!(numbered(out, 2, 3).parent(), out.parent());
+
+        // No extension is a legitimate output path; the number still goes on.
+        assert_eq!(numbered(Path::new("out/frame"), 2, 2), PathBuf::from("out/frame-2"));
     }
 
     /// A started render must always be collectable from the terminal, and the
