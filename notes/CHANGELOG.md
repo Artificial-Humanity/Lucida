@@ -20,6 +20,49 @@ for Lucida.
 
 ## Working section — unreleased
 
+### 2026-08-09 — The README, and the setting it was right to omit
+
+Owner: the README had gone stale. It had — and auditing it found a live defect underneath.
+**255 tests**, up from 252.
+
+#### Fixed
+
+- **`LUCIDA_BUDGET` was missing from `config::KNOWN_KEYS`** (`1bcac73`) while `spend::budget`
+  read it through `var` like every other setting. A budget set in the config file was
+  therefore **fully enforced**, and `lucida config` filed it under *"in the config file but
+  not recognised (ignored — check the spelling)"* — the one command whose job is to report
+  what is in effect, saying the spending cap was not. The direction of that lie is what makes
+  it serious: someone who believes the message concludes they have no cap, or deletes the line
+  that was protecting them.
+- **`LUCIDA_CONFIG` was documented as a config-file setting** (`1bcac73`), which it cannot be
+  — it names the file the settings live in. It and the retired `GOOGLE_API_KEY` moved to a
+  separate table that says why.
+- **Two clap help strings** (`1bcac73`) — `video` still said "with Veo" across three
+  providers, `models` said "image models" after it learned to answer for video.
+
+#### Added
+
+- **`every_setting_read_is_a_known_key`** (`1bcac73`) — walks `src/` and asserts every name
+  passed to `config::var` appears in `KNOWN_KEYS`. Directory-walked rather than listed, so a
+  new module is covered without anyone remembering; a second hand-written list would only
+  move the problem.
+- **`the_readme_lists_every_setting`** (`1bcac73`) — the settings table checked against
+  `KNOWN_KEYS` in **both** directions. A missing row is a setting nobody knows about; a
+  surplus row is a setting that does not exist, which costs somebody an afternoon. Its first
+  version passed by slicing an empty string, which is the failure this whole cycle keeps
+  turning up: an assertion that cannot fail reads as coverage.
+- **`every_readme_link_points_at_a_heading_that_exists`** (`1bcac73`) — resolves all 26
+  anchors against the headings, implementing GitHub's slug rule. A broken anchor is silent on
+  GitHub, so nothing else would ever report it.
+
+#### Changed
+
+- **README rewritten** (`1bcac73`) — a table of contents; the command table split so
+  **configuration comes first and separately**, carrying the exhaustive `config --set` list;
+  video described as three providers rather than Veo; `--dry-run`, `--count`, `--duration`,
+  `--mode` and `--image` documented; the MCP tool table corrected from four tools to six; and
+  the per-credential coverage principle stated where a reader meets the provider list.
+
 ### 2026-08-09 — The binary gets tested like everything else
 
 Owner's observation, and it was a fair one: `cargo test` covered every layer except the one a

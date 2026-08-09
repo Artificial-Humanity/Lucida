@@ -45,7 +45,7 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   [release-downloads-at-prune-20260807.md](release-downloads-at-prune-20260807.md).
 - **Five image providers + Veo video, all verified live** (google, comfyui, bfl, stability,
   openai). Wire behaviour is pinned by the recorded-response tests; as of 2026-08-09:
-  **252 tests** passing (163 at v0.9.2), clippy clean at `-D warnings`, all smoke checks green
+  **255 tests** passing (163 at v0.9.2), clippy clean at `-D warnings`, all smoke checks green
   — and **CI green on all three platforms**. Windows keeps earning that lane: the atomic-write
   refactor left `config.rs` with an unused import that only exists off Unix, and a ledger test
   used a path that is unwritable on Linux and an ordinary directory on Windows. Local clippy
@@ -60,6 +60,15 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   ordered `case` with the failing arm second), and all three MCP `provider` enums turned out
   to be hand-written literals — the one place a stale list makes a working provider
   *unreachable*, since a client validates against a JSON Schema `enum` before sending.
+- **The README is a checked surface now** (`1bcac73`), not just prose. Rewritten for currency
+  (six MCP tools not four, three video providers not one, a TOC, and the command table split
+  so configuration comes first with the exhaustive `config --set` list) — and the audit found
+  a defect under it. **`LUCIDA_BUDGET` was enforced but not in `KNOWN_KEYS`**, so `lucida
+  config` reported the spending cap as *"ignored — check the spelling"* while it was in force.
+  Three tests now hold the ground: every name read through `config::var` must be a known key
+  (scanned from `src/`, so a new module is covered automatically), the README's settings table
+  must match `KNOWN_KEYS` in both directions, and every anchor link must resolve — a broken
+  one is silent on GitHub.
 - **The v0.6→v0.9 range was reviewed 2026-08-06 and every finding is now closed**
   (`83680b5`, `1c49c47`, `05e9aac` — see the pointer below for what each one was).
   The headline fix is structural: **whether a mask binds is a value, not prose.**
