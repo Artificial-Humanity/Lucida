@@ -94,7 +94,8 @@ pub fn run(scope: Scope, dry_run: bool, assume_yes: bool) -> Result<()> {
     let exe = std::env::current_exe().context("finding this binary")?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
 
-    let steps = plan(&scope, &exe)?;
+    let clients = Clients::detect(&scope);
+    let steps = plan(&scope, &exe, &clients)?;
 
     println!("Lucida  {}", exe.display());
     println!(
@@ -134,9 +135,11 @@ pub fn run(scope: Scope, dry_run: bool, assume_yes: bool) -> Result<()> {
          their server lists at startup."
     );
 
-    // Only worth saying where the app is actually installed, and only for a
-    // user-scope run, since the desktop app has no notion of a project.
-    if matches!(scope, Scope::User) && desktop_config().is_some() {
+    // Only worth saying where the app is actually installed. `Clients::detect`
+    // already handles the project-scope case by reporting no desktop app at all,
+    // so this reads one fact rather than re-deriving it — and it now names a file
+    // the plan above genuinely wrote, which for a while it did not.
+    if clients.desktop.is_some() {
         println!("{DESKTOP_SKILL_NOTE}\n  {}", tilde(&skill_path(&scope)));
     }
 
@@ -148,10 +151,37 @@ pub fn run(scope: Scope, dry_run: bool, assume_yes: bool) -> Result<()> {
 /// Built entirely from what is present: a client that is not installed
 /// contributes no steps rather than an error, because "set this up wherever it
 /// applies" is the request, and a machine with only one of the two is normal.
-fn plan(scope: &Scope, exe: &Path) -> Result<Vec<Step>> {
-    let mut steps = Vec::new();
+/// Which of the two clients this machine has.
+///
+/// A parameter rather than something `plan` looks up, because the four
+/// combinations are exactly what needed testing and three of them cannot be
+/// produced on the machine running the tests. `plan` had no tests at all, which
+/// is how it shipped naming a file it never wrote.
+pub struct Clients {
+    pub claude_code: bool,
+    /// The desktop app's config file, if it is there.
+    pub desktop: Option<PathBuf>,
+}
 
-    if which("claude").is_some() {
+impl Clients {
+    fn detect(scope: &Scope) -> Self {
+        Self {
+            claude_code: which("claude").is_some(),
+            // The desktop app has no notion of a project, so a project-scope run
+            // does not touch it. Saying so beats silently ignoring the flag.
+            desktop: match scope {
+                Scope::User => desktop_config(),
+                Scope::Project(_) => None,
+            },
+        }
+    }
+}
+
+fn plan(scope: &Scope, exe: &Path, clients: &Clients) -> Result<Vec<Step>> {
+    let mut steps = Vec::new();
+    let has_claude_code = clients.claude_code;
+
+    if has_claude_code {
         let scope_flag = match scope {
             Scope::User => "user",
             Scope::Project(_) => "project",
@@ -163,24 +193,32 @@ fn plan(scope: &Scope, exe: &Path) -> Result<Vec<Step>> {
         } else {
             steps.push(Step::ClaudeCodeMcp { scope: scope_flag });
         }
-
-        steps.push(Step::Skill {
-            path: skill_path(scope),
-        });
     }
 
-    // The desktop app has no notion of a project, so it is only touched for a
-    // user-scope run. Saying so beats silently ignoring the flag.
-    if let Scope::User = scope
-        && let Some(path) = desktop_config()
-    {
-        if desktop_has_lucida(&path, exe)? {
+    let desktop = clients.desktop.clone();
+    if let Some(path) = &desktop {
+        if desktop_has_lucida(path, exe)? {
             steps.push(Step::AlreadyDone {
                 what: "the Claude app already registers this binary".into(),
             });
         } else {
-            steps.push(Step::DesktopMcp { path });
+            steps.push(Step::DesktopMcp { path: path.clone() });
         }
+    }
+
+    // Written for *either* client, which is the fix for a gap that only showed
+    // up on a machine with one of them.
+    //
+    // The skill used to be planned inside the Claude Code branch alone, while
+    // the closing note that tells you where to find it for the desktop app was
+    // printed on `desktop_config().is_some()`. With the Claude app installed and
+    // no Claude Code CLI — a perfectly ordinary machine — setup finished by
+    // naming a file it had never written, and the instruction it gave you was to
+    // go and upload that file.
+    if has_claude_code || desktop.is_some() {
+        steps.push(Step::Skill {
+            path: skill_path(scope),
+        });
     }
 
     if steps.is_empty() {
@@ -453,6 +491,57 @@ fn confirm() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `plan` had no tests, and this is what that cost.
+    ///
+    /// The skill was planned inside the Claude Code branch alone, while the
+    /// closing note telling you where to upload it for the desktop app was
+    /// printed whenever the app's config existed. On a machine with the Claude
+    /// app and no Claude Code CLI — perfectly ordinary — setup finished by naming
+    /// a file it had never written, and the instruction it gave you was to go and
+    /// upload that file.
+    ///
+    /// All four combinations, three of which cannot be produced on the machine
+    /// running this.
+    #[test]
+    fn a_skill_is_planned_whenever_either_client_is_present() {
+        let exe = Path::new("/opt/lucida");
+        // A path that does not exist, so `desktop_has_lucida` answers false
+        // without this test depending on anything installed here.
+        let config = PathBuf::from("/nonexistent/claude_desktop_config.json");
+
+        let cases = [
+            (true, true, true, "both clients"),
+            (true, false, true, "Claude Code only"),
+            (false, true, true, "the Claude app only"),
+            (false, false, false, "neither"),
+        ];
+
+        for (claude_code, desktop, expect_skill, what) in cases {
+            let clients = Clients {
+                claude_code,
+                desktop: desktop.then(|| config.clone()),
+            };
+            let planned = plan(&Scope::User, exe, &clients);
+
+            if !claude_code && !desktop {
+                assert!(planned.is_err(), "{what}: must refuse, not plan nothing");
+                continue;
+            }
+
+            let steps = planned.unwrap_or_else(|e| panic!("{what}: {e}"));
+            let has_skill = steps.iter().any(|s| matches!(s, Step::Skill { .. }));
+            assert_eq!(has_skill, expect_skill, "{what}: skill step wrong");
+        }
+    }
+
+    /// The desktop app has no notion of a project, so a project-scope run must
+    /// not plan against it — including the note that names the skill file.
+    #[test]
+    fn a_project_scope_run_does_not_reach_for_the_desktop_app() {
+        let clients = Clients::detect(&Scope::Project(PathBuf::from(".")));
+        assert!(clients.desktop.is_none());
+    }
 
     #[test]
     fn the_skill_lands_where_each_scope_expects_it() {

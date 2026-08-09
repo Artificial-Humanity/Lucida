@@ -997,6 +997,15 @@ fn execute(request: ImageRequest, backend: Backend, out: PathBuf) -> Result<()> 
         image.bytes.len() / 1024
     );
 
+    // What is embedded in the file that was just written. The MCP surface has
+    // reported this on every render since provenance became a value; the CLI
+    // reported it only in `lucida models`, where you have to go and ask. That is
+    // backwards: the moment it matters is when a file exists and you are about to
+    // publish it, not when you are choosing a provider. It is also the one
+    // difference between the local lane and every hosted one that survives being
+    // copied out of this tool.
+    eprintln!("Provenance: {}.", caps.provenance.describe());
+
     // The path alone on stdout, so this composes in a pipeline.
     println!("{}", written.display());
     Ok(())

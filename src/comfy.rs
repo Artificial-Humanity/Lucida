@@ -385,6 +385,45 @@ impl Client {
         })
     }
 
+    /// A name no other upload will take.
+    ///
+    /// Uploads used to be sent under the source file's bare basename with
+    /// `overwrite=true`, which is a collision waiting for a second caller. Two
+    /// people — or one agent and one shell, or two MCP tool calls, which can now
+    /// genuinely run at once — editing different files that happen both to be
+    /// called `image.png` would overwrite each other's upload in the server's
+    /// input directory between the upload and the render. Neither would see an
+    /// error. Both would get an edit of the other's picture.
+    ///
+    /// Process id, a counter and the clock: the first separates machines sharing
+    /// a server, the second separates renders within a process, and the third
+    /// separates runs of a process whose pid has been reused. The original
+    /// basename is kept in the middle so the input directory stays readable to
+    /// whoever has to clean it out.
+    fn unique_upload_name(path: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let stem = Path::new(path)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("upload");
+        let extension = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png");
+        let clock = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.subsec_nanos())
+            .unwrap_or(0);
+
+        format!(
+            "lucida-{}-{}-{clock}-{stem}.{extension}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     /// Sends an image to the server so a graph can name it.
     ///
     /// ComfyUI's `LoadImage` takes a filename in the server's own input
@@ -396,15 +435,13 @@ impl Client {
     fn upload(&self, path: &str) -> Result<String> {
         let bytes =
             std::fs::read(path).with_context(|| format!("reading the image to edit ({path})"))?;
-        let filename = Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("upload.png")
-            .to_string();
+        let filename = Self::unique_upload_name(path);
 
         let form = reqwest::blocking::multipart::Form::new()
             // `overwrite` keeps the server's input directory from filling up with
             // `image (1).png`, `image (2).png` on repeated edits of one file.
+            // Safe now that the name is unique per upload; on the shared basename
+            // it used to carry, it was the mechanism of the collision below.
             .text("overwrite", "true")
             .part(
                 "image",
@@ -1630,11 +1667,45 @@ mod tests {
         assert_eq!(requests[3].path, "/upload/image");
         let upload = requests[3].body_text();
         assert!(upload.contains("name=\"overwrite\""), "repeat edits must not pile up copies");
-        assert!(upload.contains("filename=\"cat.png\""));
+        // The basename survives inside the uploaded name so the server's input
+        // directory stays readable, but it is no longer the whole of it — see
+        // `unique_upload_name` for the collision that cost.
+        assert!(upload.contains("cat.png\""), "the source name is unrecognisable: {upload}");
+        assert!(
+            !upload.contains("filename=\"cat.png\""),
+            "the upload is named only by its basename, which two callers can share"
+        );
 
+        // The graph names the file where the *server* filed it, from the upload
+        // response — never the name we chose or the path we read.
         let graph = &requests[4].json()["prompt"];
         assert_eq!(graph["load0"]["inputs"]["image"], "inputs/cat.png");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two callers editing different files that happen both to be called
+    /// `image.png` used to overwrite each other's upload between the upload and
+    /// the render — silently, with each getting an edit of the other's picture.
+    /// Two MCP tool calls can now genuinely run at once, so this is reachable
+    /// inside one process as well as across two.
+    #[test]
+    fn two_uploads_of_the_same_basename_do_not_collide() {
+        let first = Client::unique_upload_name("/one/image.png");
+        let second = Client::unique_upload_name("/two/image.png");
+
+        assert_ne!(first, second);
+        for name in [&first, &second] {
+            assert!(name.ends_with("-image.png"), "{name}");
+            assert!(name.starts_with("lucida-"), "{name}");
+        }
+    }
+
+    /// A file with no extension still has to arrive under something ComfyUI's
+    /// `LoadImage` will accept.
+    #[test]
+    fn an_extensionless_upload_still_gets_a_usable_name() {
+        let name = Client::unique_upload_name("/tmp/screenshot");
+        assert!(name.ends_with("-screenshot.png"), "{name}");
     }
 
     /// A caller-supplied workflow goes to the server exactly as substituted, and
