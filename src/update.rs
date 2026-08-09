@@ -151,6 +151,7 @@ impl Updater {
         Ok(Self {
             http: reqwest::blocking::Client::builder()
                 .timeout(timeout)
+                .connect_timeout(crate::retry::CONNECT_TIMEOUT)
                 .build()
                 .context("building HTTP client")?,
             api: RELEASES_API.to_string(),

@@ -89,7 +89,8 @@ impl Client {
         let mut builder = reqwest::blocking::Client::builder()
             // Generous, because the request that matters is the poll loop and a
             // cold model load alone can take minutes on a consumer GPU.
-            .timeout(Duration::from_secs(300));
+            .timeout(Duration::from_secs(300))
+            .connect_timeout(crate::retry::CONNECT_TIMEOUT);
 
         // Lucida trusts the bundled Mozilla root set and never reads the system
         // CA store — that is what lets the musl binary do TLS on a host with no
@@ -1525,6 +1526,7 @@ mod tests {
             auth: Some("Basic dGVzdA==".into()),
             http: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(crate::retry::CONNECT_TIMEOUT)
                 .no_proxy()
                 .build()
                 .unwrap(),

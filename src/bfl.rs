@@ -137,6 +137,7 @@ impl Client {
 
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
+            .connect_timeout(crate::retry::CONNECT_TIMEOUT)
             .build()
             .context("building HTTP client")?;
 
@@ -660,6 +661,7 @@ mod tests {
             base: server.url().to_string(),
             http: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(crate::retry::CONNECT_TIMEOUT)
                 .no_proxy()
                 .build()
                 .unwrap(),

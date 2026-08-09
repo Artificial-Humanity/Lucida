@@ -149,6 +149,7 @@ impl Client {
             // Synchronous: this one request covers the whole render, so the
             // timeout has to cover it too rather than just a handshake.
             .timeout(Duration::from_secs(300))
+            .connect_timeout(crate::retry::CONNECT_TIMEOUT)
             .build()
             .context("building HTTP client")?;
 
@@ -404,6 +405,7 @@ mod tests {
             base: server.url().to_string(),
             http: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(crate::retry::CONNECT_TIMEOUT)
                 .no_proxy()
                 .build()
                 .unwrap(),

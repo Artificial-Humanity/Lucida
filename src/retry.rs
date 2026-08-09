@@ -27,6 +27,20 @@
 use reqwest::blocking::{RequestBuilder, Response};
 use std::time::Duration;
 
+/// How long to wait for a connection to be *established*.
+///
+/// Declared once here, and applied by every client, because the alternative was
+/// measured and is bad: without it, reqwest falls back to the whole request
+/// timeout, so a host that blackholes packets — a VPN half up, a ComfyUI box
+/// asleep, a DNS answer pointing at nothing — hangs for the full 300 seconds
+/// before admitting it never connected. The MCP `image_providers` probe walks
+/// all five providers in sequence, which made the worst case roughly twenty
+/// minutes inside a tool whose own description promises it is cheap to call.
+///
+/// Five seconds is far longer than any reachable host needs to answer a SYN and
+/// far shorter than a user will wait to be told a server is down.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Attempts in total, not retries after the first.
 ///
 /// Three, because the failures this exists for are momentary — a load-balancer
@@ -156,6 +170,7 @@ mod tests {
     fn client() -> reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(5))
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .unwrap()
     }
@@ -242,6 +257,42 @@ mod tests {
 
         assert!(response.status().is_success());
         assert_eq!(server.finish().len(), 2);
+    }
+
+    /// Every HTTP client in the tree has to carry a connect timeout, and no
+    /// generated surface can state that for them — a client is built in each
+    /// provider, with its own request timeout, for its own reasons.
+    ///
+    /// So the source is the assertion. Without this, provider six ships with the
+    /// 300-second hang that `CONNECT_TIMEOUT` exists to prevent, and nothing
+    /// notices until someone's VPN is half up.
+    #[test]
+    fn every_http_client_sets_a_connect_timeout() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+        // Assembled rather than written out, or this test finds its own search
+        // string in this file and fails on itself.
+        let needle = format!("Client::{}", "builder()");
+        let timeout = format!(".connect_{}(", "timeout");
+
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+
+            for (index, _) in text.match_indices(needle.as_str()) {
+                let chain = &text[index..];
+                let end = chain.find(".build()").unwrap_or(chain.len());
+                assert!(
+                    chain[..end].contains(timeout.as_str()),
+                    "{}: an HTTP client is built without a connect timeout, so a \
+                     blackholed host will hang it for the whole request timeout",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

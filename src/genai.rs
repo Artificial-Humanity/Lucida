@@ -93,6 +93,7 @@ impl Client {
         let http = reqwest::blocking::Client::builder()
             // 4K renders are genuinely slow; the default 30s times out under load.
             .timeout(Duration::from_secs(300))
+            .connect_timeout(crate::retry::CONNECT_TIMEOUT)
             .build()
             .context("building HTTP client")?;
 
@@ -112,6 +113,7 @@ impl Client {
             base: base.to_string(),
             http: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(crate::retry::CONNECT_TIMEOUT)
                 .no_proxy()
                 .build()
                 .unwrap(),
