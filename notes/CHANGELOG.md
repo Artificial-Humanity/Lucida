@@ -20,7 +20,26 @@ for Lucida.
 
 ## Working section — unreleased
 
-### 2026-08-09 — the product review's second tranche, in progress
+_No entries yet. The next cycle opens with the first code commit after v0.10.0._
+
+---
+
+## v0.10.0 — released 2026-08-09
+
+**Dependable unattended use** — the second tranche of the 2026-08-09 product review, and with
+it the review's **third and last structural finding**, so all three are closed. The theme is
+the one the review named: everything an agent needs in order to be left alone with this tool.
+The MCP server answers while it renders and honours a cancellation; renders are remembered, so
+one that has been paid for can be found again; cost is stated before it is spent and a budget
+can refuse it; four outcomes are four exit codes, with `--json` for callers that parse; and a
+weekly canary asks the providers whether they still speak the protocol, rather than waiting
+for a user's failed render to find out.
+
+Released from `main` with the verification trio green (201 tests, up from 163 at v0.9.2;
+`cargo clippy --all-targets -- -D warnings` clean; all `scripts/smoke.sh` checks against the
+release build) and CI green on all three platforms at `a8cb7b1`.
+
+### 2026-08-09 — the product review's second tranche
 
 Towards v0.10, "dependable unattended use". The review's **third and last structural finding
 closes here**, so all three are now closed.
