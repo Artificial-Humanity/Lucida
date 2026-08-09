@@ -432,19 +432,110 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
     })
 }
 
+/// Reads an optional argument, refusing one of the wrong type.
+///
+/// `Value::as_str` and its siblings answer `None` for a value of the wrong type
+/// exactly as they do for a missing one — and everywhere below, `None` means
+/// "not requested". That collapse was this server's one silent drop, and its
+/// worst case was not a small one: `"reference_images": "photo.png"`, a string
+/// where an array belongs, turned an *edit* into a fresh generation and reported
+/// it as a success.
+///
+/// So absence and wrongness are separated here. Missing or null is `Ok(None)`;
+/// anything present but unusable is an error naming the parameter, what arrived,
+/// and what belongs there — the same voice as a capability refusal, and for the
+/// same reason: the model reads it and fixes the call, rather than believing a
+/// lie about what it asked for.
+fn optional<'a, T>(
+    args: &'a Value,
+    key: &str,
+    expected: &str,
+    extract: impl Fn(&'a Value) -> Option<T>,
+) -> Result<Option<T>> {
+    match &args[key] {
+        Value::Null => Ok(None),
+        present => match extract(present) {
+            Some(value) => Ok(Some(value)),
+            None => anyhow::bail!(
+                "`{key}` must be {expected}, but {} was given. Pass it as \
+                 {expected}, or leave it out — it was refused rather than dropped, \
+                 so nothing has been rendered.",
+                describe(present)
+            ),
+        },
+    }
+}
+
+/// What arrived, for an error message. The value is quoted rather than merely
+/// typed, because "a string was given" is far less useful to whoever has to fix
+/// the call than seeing the string itself.
+fn describe(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("the string {text:?}"),
+        Value::Number(number) => format!("the number {number}"),
+        Value::Bool(flag) => format!("the boolean {flag}"),
+        Value::Array(items) => format!("an array of {} item(s)", items.len()),
+        Value::Object(_) => "an object".to_string(),
+        Value::Null => "null".to_string(),
+    }
+}
+
+fn opt_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    optional(args, key, "a string", Value::as_str)
+}
+
+fn opt_string(args: &Value, key: &str) -> Result<Option<String>> {
+    Ok(opt_str(args, key)?.map(str::to_string))
+}
+
+/// A seed or a step count. Rejects a negative or fractional number here rather
+/// than letting `as_u64` quietly answer `None` for it.
+fn opt_u64(args: &Value, key: &str) -> Result<Option<u64>> {
+    optional(args, key, "a whole number, zero or above", Value::as_u64)
+}
+
+fn opt_f64(args: &Value, key: &str) -> Result<Option<f64>> {
+    optional(args, key, "a number", Value::as_f64)
+}
+
+/// The elements are checked as well as the container: `["a.png", 3]` names the
+/// offending index rather than dropping it, since a dropped reference image is
+/// the same silent edit-becomes-generation failure one level down.
+fn opt_str_array(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
+    let Some(items) = optional(args, key, "an array of strings", Value::as_array)? else {
+        return Ok(None);
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.as_str().map(str::to_string).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`{key}[{index}]` must be a string, but {} was given. Every \
+                     entry is a path to an existing file.",
+                    describe(item)
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+    opt_str(args, key)?.ok_or_else(|| anyhow::anyhow!("`{key}` is required"))
+}
+
 fn generate_image(args: &Value) -> Result<String> {
-    let prompt = args["prompt"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("`prompt` is required"))?;
-    let output_path = args["output_path"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("`output_path` is required"))?;
+    let prompt = req_str(args, "prompt")?;
+    let output_path = req_str(args, "output_path")?;
+    let workflow = opt_str(args, "workflow")?;
+    let requested_model = opt_str(args, "model")?;
 
     // A supplied workflow names its own checkpoints, so an explicit model has
     // nowhere to go. Refused here rather than in the provider because by the
     // time the request reaches comfyui the default model has been filled in
     // and an explicit one is indistinguishable from it.
-    if args["workflow"].as_str().is_some() && args["model"].as_str().is_some() {
+    if workflow.is_some() && requested_model.is_some() {
         anyhow::bail!(
             "`workflow` and `model` cannot be combined: a supplied workflow \
              names its own checkpoints, so there is nowhere to put a model id. \
@@ -453,47 +544,37 @@ fn generate_image(args: &Value) -> Result<String> {
         );
     }
 
-    let backend = match args["provider"].as_str() {
+    let backend = match opt_str(args, "provider")? {
         Some(name) => Backend::parse(name)?,
-        None => match args["model"].as_str() {
+        None => match requested_model {
             Some(model) => infer_backend(model),
             None => Backend::Google,
         },
     };
 
-    let model = args["model"]
-        .as_str()
+    let model = requested_model
         .unwrap_or_else(|| backend.default_model())
         .to_string();
 
     let request = ImageRequest {
         prompt: prompt.to_string(),
         model,
-        aspect: args["aspect_ratio"].as_str().map(Aspect::parse).transpose()?,
-        size: args["size"].as_str().map(Size::parse).transpose()?,
-        references: args["reference_images"]
-            .as_array()
-            .map(|refs| {
-                refs.iter()
-                    .filter_map(|r| r.as_str())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        negative_prompt: args["negative_prompt"].as_str().map(str::to_string),
-        mask: args["mask"].as_str().map(str::to_string),
-        workflow: args["workflow"].as_str().map(str::to_string),
-        seed: args["seed"].as_u64(),
+        aspect: opt_str(args, "aspect_ratio")?.map(Aspect::parse).transpose()?,
+        size: opt_str(args, "size")?.map(Size::parse).transpose()?,
+        references: opt_str_array(args, "reference_images")?.unwrap_or_default(),
+        negative_prompt: opt_string(args, "negative_prompt")?,
+        mask: opt_string(args, "mask")?,
+        workflow: workflow.map(str::to_string),
+        seed: opt_u64(args, "seed")?,
         // try_from rather than `as`: a pathological value would wrap silently
         // into a small, plausible step count instead of erroring.
-        steps: args["steps"]
-            .as_u64()
+        steps: opt_u64(args, "steps")?
             .map(|n| {
                 u32::try_from(n)
                     .map_err(|_| anyhow::anyhow!("`steps` is {n}, which is not a step count"))
             })
             .transpose()?,
-        guidance: args["guidance"].as_f64().map(|n| n as f32),
+        guidance: opt_f64(args, "guidance")?.map(|n| n as f32),
     };
 
     // The whole point of the abstraction, from an agent's perspective: a
@@ -616,20 +697,15 @@ fn describe_providers() -> String {
 }
 
 fn start_video(args: &Value) -> Result<String> {
-    let prompt = args["prompt"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("`prompt` is required"))?;
+    let prompt = req_str(args, "prompt")?;
 
     let request = VideoRequest {
         prompt: prompt.to_string(),
-        model: args["model"]
-            .as_str()
-            .unwrap_or(DEFAULT_VIDEO_MODEL)
-            .to_string(),
-        aspect_ratio: args["aspect_ratio"].as_str().map(str::to_string),
-        resolution: args["resolution"].as_str().map(str::to_string),
-        negative_prompt: args["negative_prompt"].as_str().map(str::to_string),
-        image: args["image"].as_str().map(str::to_string),
+        model: opt_str(args, "model")?.unwrap_or(DEFAULT_VIDEO_MODEL).to_string(),
+        aspect_ratio: opt_string(args, "aspect_ratio")?,
+        resolution: opt_string(args, "resolution")?,
+        negative_prompt: opt_string(args, "negative_prompt")?,
+        image: opt_string(args, "image")?,
     };
 
     let operation = genai::Client::from_env()?.start_video(&request)?;
@@ -641,12 +717,8 @@ fn start_video(args: &Value) -> Result<String> {
 }
 
 fn check_video(args: &Value) -> Result<String> {
-    let operation = args["operation"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("`operation` is required"))?;
-    let output_path = args["output_path"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("`output_path` is required"))?;
+    let operation = req_str(args, "operation")?;
+    let output_path = req_str(args, "output_path")?;
 
     match genai::Client::from_env()?.poll_video(operation)? {
         VideoStatus::Pending => Ok(
@@ -798,6 +870,132 @@ mod tests {
         .to_string();
         assert!(error.contains("workflow"), "must name the conflict: {error}");
         assert!(error.contains("model"));
+    }
+
+    /// The worst silent drop this server had, and the reason the typed accessors
+    /// exist: `reference_images` given as a bare string rather than an array.
+    /// `as_array` answered `None`, `None` meant "not requested", and the *edit*
+    /// became a fresh generation — reported as a success, with the user's
+    /// reference image nowhere in it.
+    ///
+    /// Checked before any client is constructed, so it needs no credentials.
+    #[test]
+    fn a_reference_image_given_as_a_string_is_refused_not_dropped() {
+        let error = generate_image(&json!({
+            "prompt": "make it blue",
+            "output_path": "out.png",
+            "reference_images": "photo.png"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("reference_images"), "must name it: {error}");
+        assert!(error.contains("array"), "must say what belongs there: {error}");
+        assert!(
+            error.contains("photo.png"),
+            "must quote what arrived, so the fix is obvious: {error}"
+        );
+    }
+
+    /// One bad element is as silent as one bad container, one level down.
+    #[test]
+    fn a_non_string_reference_image_names_its_index() {
+        let error = generate_image(&json!({
+            "prompt": "x",
+            "output_path": "x.png",
+            "reference_images": ["a.png", 3]
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("reference_images[1]"), "{error}");
+    }
+
+    /// A stringified seed made the render unreproducible while reporting
+    /// success — the same class of drop, on the one parameter whose entire
+    /// purpose is reproducibility.
+    #[test]
+    fn a_stringified_number_is_refused_rather_than_dropped() {
+        for (field, value) in [("seed", json!("42")), ("steps", json!("30"))] {
+            let error = generate_image(&json!({
+                "prompt": "x",
+                "output_path": "x.png",
+                field: value
+            }))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(field), "`{field}` must be named: {error}");
+            assert!(
+                error.contains("whole number"),
+                "`{field}` must say what belongs there: {error}"
+            );
+        }
+    }
+
+    /// Every optional string parameter, so none is left reading `as_str`
+    /// directly. `provider` and `model` are excluded deliberately: they are read
+    /// through the same accessor but a wrong *value* there has always been a
+    /// loud error, and this test is about wrong *types*.
+    #[test]
+    fn every_optional_string_parameter_refuses_a_non_string() {
+        for field in [
+            "aspect_ratio",
+            "size",
+            "negative_prompt",
+            "mask",
+            "workflow",
+            "provider",
+            "model",
+        ] {
+            let error = generate_image(&json!({
+                "prompt": "x",
+                "output_path": "x.png",
+                field: 7
+            }))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains(field) && error.contains("must be a string"),
+                "`{field}` was not refused as a type mismatch: {error}"
+            );
+        }
+    }
+
+    /// The video surface reads its arguments the same way, so it drops them the
+    /// same way. `start_video` refuses before spending the round trip that would
+    /// bill; `check_video` before it can write to a nonsense path.
+    #[test]
+    fn the_video_tools_refuse_mistyped_arguments_too() {
+        let error = start_video(&json!({ "prompt": "a fox", "aspect_ratio": 16 }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("aspect_ratio"), "{error}");
+
+        let error = check_video(&json!({ "operation": ["operations/xyz"], "output_path": "v.mp4" }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("operation"), "{error}");
+    }
+
+    /// A missing argument and a mistyped one are different failures and must
+    /// read differently — the whole point of separating them.
+    #[test]
+    fn a_missing_argument_still_reads_as_missing() {
+        let error = generate_image(&json!({ "output_path": "x.png" }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`prompt` is required"), "{error}");
+    }
+
+    /// An explicit null is absence, not a type mismatch: a client that fills
+    /// every field of its schema and leaves the unused ones null is asking for
+    /// the default, not making a mistake.
+    #[test]
+    fn an_explicit_null_means_not_requested() {
+        assert_eq!(opt_str(&json!({ "size": null }), "size").unwrap(), None);
+        assert_eq!(opt_u64(&json!({ "seed": null }), "seed").unwrap(), None);
+        assert_eq!(
+            opt_str_array(&json!({ "reference_images": null }), "reference_images").unwrap(),
+            None
+        );
     }
 
     /// A step count past u32 used to wrap silently into a small, plausible one.
