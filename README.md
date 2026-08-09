@@ -2,7 +2,7 @@
 
 Generate and edit images and video — as a CLI, or as an MCP server so coding
 agents can make their own assets. Images come from Google Gemini, a local
-ComfyUI, hosted FLUX, Stability AI or OpenAI; video comes from Veo.
+ComfyUI, hosted FLUX, Stability AI or OpenAI; video comes from Veo or Runway.
 
 ## Install
 
@@ -113,6 +113,7 @@ $ lucida generate "a wordmark for a note-taking app" --count 3   # icon-1.png…
 
 $ lucida video "a red maple leaf drifting down against white" --out clip.mp4
 $ lucida video "waves against a harbour wall at dusk" --no-wait
+$ lucida video "a slow push through fog" --provider runway --duration 6
 $ lucida check operations/xyz --out clip.mp4
 
 $ lucida models --provider comfyui
@@ -151,6 +152,7 @@ $ lucida config                         # what this process sees, and from where
 | `BFL_API_KEY` | Black Forest Labs — hosted FLUX |
 | `STABILITY_API_KEY` | Stability AI |
 | `OPENAI_API_KEY` | OpenAI |
+| `RUNWAYML_API_SECRET` | Runway — Gen-4 video. Runway's own spelling, not `RUNWAY_API_KEY` |
 | `LUCIDA_COMFYUI_URL` | Where ComfyUI is listening. Defaults to `http://127.0.0.1:8188`; no credential needed |
 | `LUCIDA_COMFYUI_AUTH` | ComfyUI credentials, if it is fenced. `user:password`, a complete `Bearer …` / `Basic …` header, or a bare token. Sent on every request including the image download |
 | `LUCIDA_COMFYUI_CA` | Path to a PEM certificate, to trust a private CA |

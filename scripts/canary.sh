@@ -71,6 +71,7 @@ have_key() {
     bfl)       name=BFL_API_KEY ;;
     stability) name=STABILITY_API_KEY ;;
     openai)    name=OPENAI_API_KEY ;;
+    runway)    name=RUNWAYML_API_SECRET ;;
     *)         return 1 ;;
   esac
   printf '%s' "$settings" | grep -qE "^ +$name +set"
@@ -82,7 +83,7 @@ have_key() {
 # has moved, or a response shape has changed.
 
 printf 'Free endpoints (model lists and balances):\n'
-for provider in google comfyui bfl stability openai; do
+for provider in google comfyui bfl stability openai runway; do
   if ! have_key "$provider"; then
     skip "$provider — no credential in this environment"
     continue
@@ -153,6 +154,20 @@ probe google    "gemini-3.1-flash-image-canary-does-not-exist"
 probe bfl       "flux-2-pro-canary-does-not-exist"
 probe stability "core-canary-does-not-exist"
 probe openai    "gpt-image-canary-does-not-exist"
+
+# Runway is a *video* provider, so the image probe above does not reach it. Its
+# free endpoint is the balance, which `lucida models` already calls — and that
+# alone exercises the base URL, the Bearer header and the mandatory
+# X-Runway-Version header, which is the one most likely to be retired under us.
+if have_key runway; then
+  out=$("$BIN" models --provider runway 2>&1)
+  case "$out" in
+    *"Remaining credits"*) pass "runway — reachable, version header still accepted" ;;
+    *) fail "runway — $(printf '%s' "$out" | head -2 | tr '\n' ' ')" ;;
+  esac
+else
+  skip "runway — no credential in this environment"
+fi
 
 # --- 3. the models we default to are still offered --------------------------
 # A default that has been retired is the failure mode with the longest fuse: it

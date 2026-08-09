@@ -39,6 +39,7 @@ use crate::provider::{
     Aspect, AspectSupport, Backend, ImageProvider, ImageRequest, Size, capabilities_for,
     infer_backend,
 };
+use crate::provider::{VideoBackend, video_capabilities_for};
 use crate::video::{DEFAULT_VIDEO_MODEL, VideoRequest, VideoStatus};
 use crate::cancel;
 use anyhow::Result;
@@ -499,32 +500,113 @@ fn providers_schema() -> Value {
 /// Video is split into start and check because a Veo render takes minutes —
 /// long enough that a single blocking tool call would likely hit the client's
 /// timeout and lose a render that was already paid for.
+/// Describes every video provider from its own declared capabilities.
+///
+/// Generated for the same reason the image summary is, and now for the same
+/// reason *in fact*: this prose said "Google only" and "output carries a SynthID
+/// watermark and a C2PA manifest", both of which stopped being true the moment a
+/// second video provider landed. Runway's provenance is unverified and its
+/// durations are a range rather than three fixed lengths.
+fn video_provider_summary() -> String {
+    VideoBackend::ALL
+        .iter()
+        .map(|backend| {
+            let caps = video_capabilities_for(*backend, backend.default_model());
+            let mut notes: Vec<String> = vec![caps.duration.describe()];
+            if caps.seed {
+                notes.push("seed".into());
+            }
+            if caps.negative_prompt {
+                notes.push("negative prompt".into());
+            }
+            if !caps.text_to_video {
+                notes.push("needs a still to animate".into());
+            }
+            format!(
+                "- {}{}: {} [{}] Output carries: {}.",
+                backend.name(),
+                if *backend == VideoBackend::Google { " (default)" } else { "" },
+                caps.tagline,
+                notes.join(", "),
+                caps.provenance.describe()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn start_video_schema() -> Value {
     json!({
         "name": "start_video",
-        "description": concat!(
-            "Begin rendering a video with Veo. Returns immediately with an operation ",
-            "id; the render itself takes 1-3 minutes. Poll it with check_video. ",
-            "Video is billed per second of output and costs considerably more than ",
-            "an image, so confirm with the user before calling this. Google only; ",
-            "output carries a SynthID watermark and a C2PA manifest."
+        "description": format!(
+            "Begin rendering a video. Returns immediately with an operation id; \
+             the render itself takes 1-3 minutes. Poll it with check_video.\n\n\
+             Video is billed per SECOND of output and costs considerably more \
+             than an image, so confirm with the user before calling this.\n\n\
+             {} providers are available:\n{}\n\n\
+             The provider is inferred from the model id; pass `provider` to be \
+             explicit. A parameter the chosen provider cannot honour is a hard \
+             error naming what it does offer — never a silent drop.",
+            VideoBackend::ALL.len(),
+            video_provider_summary()
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "prompt": { "type": "string", "description": "What to film, including any camera movement." },
-                "image": { "type": "string", "description": "Optional path to a still image to animate instead of generating from text alone." },
-                "aspect_ratio": { "type": "string", "enum": ["16:9", "9:16"] },
-                "resolution": { "type": "string", "description": "e.g. 720p or 1080p" },
-                "negative_prompt": { "type": "string", "description": "What to keep out of the shot. Not supported on veo-lite." },
+                "image": { "type": "string", "description": "Optional path to a still image to animate instead of generating from text alone. Required by runway's gen4-turbo, which cannot start from text." },
+                "provider": {
+                    "type": "string",
+                    "enum": ["google", "runway"],
+                    "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    // Deliberately not an enum: google names `16:9`, runway
+                    // names the pixel pair `1280:720`, and both are accepted.
+                    "description": format!(
+                        "W:H. google accepts {}. runway names geometry in pixels — {} \
+                         — and a simplified ratio is mapped to the pair that is that \
+                         ratio, so 16:9 works on both.",
+                        describe_aspect(video_capabilities_for(VideoBackend::Google, "").aspect),
+                        describe_aspect(video_capabilities_for(VideoBackend::Runway, crate::runway::DEFAULT_MODEL).aspect)
+                    )
+                },
+                "duration": {
+                    "type": "integer",
+                    "description": format!(
+                        "Seconds of output, and the parameter that decides the bill. \
+                         google: {}. runway: {}.",
+                        video_capabilities_for(VideoBackend::Google, "").duration.describe(),
+                        video_capabilities_for(VideoBackend::Runway, crate::runway::DEFAULT_MODEL).duration.describe()
+                    )
+                },
+                "resolution": { "type": "string", "description": "e.g. 720p or 1080p. google only; on runway the aspect ratio decides the pixel count." },
+                "negative_prompt": { "type": "string", "description": "What to keep out of the shot. google only, and not on veo-lite." },
+                "seed": { "type": "integer", "description": "Renders the same video again. runway only; google exposes none." },
                 "model": {
                     "type": "string",
-                    "description": format!("Model id or alias: veo, veo-standard, veo-lite. Defaults to {DEFAULT_VIDEO_MODEL}.")
+                    "description": format!(
+                        "Model id or alias. Defaults per provider: {}.",
+                        VideoBackend::ALL
+                            .iter()
+                            .map(|b| format!("{} → {}", b.name(), b.default_model()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 }
             },
             "required": ["prompt"]
         }
     })
+}
+
+/// One line describing an aspect-ratio capability, shared by both schemas.
+fn describe_aspect(support: AspectSupport) -> String {
+    match support {
+        AspectSupport::Named(ratios) => ratios.join(", "),
+        AspectSupport::Free { multiple_of } => format!("any ratio, rounded to {multiple_of} pixels"),
+    }
 }
 
 fn check_video_schema() -> Value {
@@ -540,6 +622,7 @@ fn check_video_schema() -> Value {
             "type": "object",
             "properties": {
                 "operation": { "type": "string", "description": "The operation id returned by start_video." },
+                "provider": { "type": "string", "enum": ["google", "runway"], "description": "Which provider started it. Inferred from the id's shape when omitted." },
                 "output_path": { "type": "string", "description": "Where to write the finished video. An .mp4 extension is applied if missing." }
             },
             "required": ["operation", "output_path"]
@@ -950,24 +1033,48 @@ fn start_video(args: &Value) -> Result<String> {
     let request = VideoRequest {
         prompt: prompt.to_string(),
         model: opt_str(args, "model")?.unwrap_or(DEFAULT_VIDEO_MODEL).to_string(),
-        aspect_ratio: opt_string(args, "aspect_ratio")?,
+        aspect: opt_str(args, "aspect_ratio")?.map(Aspect::parse).transpose()?,
         resolution: opt_string(args, "resolution")?,
         negative_prompt: opt_string(args, "negative_prompt")?,
         image: opt_string(args, "image")?,
+        duration: opt_u64(args, "duration")?
+            .map(|n| u32::try_from(n).map_err(|_| anyhow::anyhow!("`duration` is {n} seconds, which is not a clip length")))
+            .transpose()?,
+        seed: opt_u64(args, "seed")?,
+    };
+
+    let backend = match opt_str(args, "provider")? {
+        Some(name) => crate::provider::VideoBackend::parse(name)?,
+        None => crate::provider::infer_video_backend(&request.model),
+    };
+
+    // Before a client exists: a parameter this provider cannot honour stops
+    // here, naming what it does offer, rather than being dropped on the way.
+    let caps = crate::provider::video_capabilities_for(backend, &request.model);
+    caps.check(&request)?;
+
+    let resolved = match backend {
+        crate::provider::VideoBackend::Google => crate::video::resolve_video_model(&request.model),
+        crate::provider::VideoBackend::Runway => crate::runway::resolve_model(&request.model),
     };
 
     // Video bills per second, so the check happens before the round trip that
     // starts the meter.
-    let price = crate::spend::video_price(&crate::video::resolve_video_model(&request.model));
+    let price = crate::spend::video_price(backend, &resolved, request.duration);
     crate::spend::check(price, "video render")?;
 
-    let operation = genai::Client::from_env()?.start_video(&request)?;
+    let client: Box<dyn crate::provider::VideoProvider> = match backend {
+        crate::provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
+        crate::provider::VideoBackend::Runway => Box::new(crate::runway::Client::from_env()?),
+    };
+
+    let operation = client.start(&request)?;
     // Written down before it is reported, because the reporting is the fragile
     // half: an agent's session can end between this line and the render
     // finishing, and the id would then exist only in a transcript nobody reads
     // again. `lucida ops` reads it back.
     crate::ledger::video_started(
-        &request.model,
+        &resolved,
         &request.prompt,
         &operation,
         price.against_budget(),
@@ -984,7 +1091,16 @@ fn check_video(args: &Value) -> Result<String> {
     let operation = req_str(args, "operation")?;
     let output_path = req_str(args, "output_path")?;
 
-    match genai::Client::from_env()?.poll_video(operation)? {
+    let backend = match opt_str(args, "provider")? {
+        Some(name) => crate::provider::VideoBackend::parse(name)?,
+        None => crate::provider::infer_video_backend_from_operation(operation),
+    };
+    let client: Box<dyn crate::provider::VideoProvider> = match backend {
+        crate::provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
+        crate::provider::VideoBackend::Runway => Box::new(crate::runway::Client::from_env()?),
+    };
+
+    match client.poll(operation)? {
         VideoStatus::Pending => Ok(
             "Still rendering. Wait roughly 30 seconds before checking again — \
              polling faster will not make it finish sooner."

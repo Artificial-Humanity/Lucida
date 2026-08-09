@@ -24,6 +24,7 @@ mod openai;
 mod out;
 mod provider;
 mod retry;
+mod runway;
 mod setup;
 mod skill;
 mod spend;
@@ -43,10 +44,10 @@ use video::{DEFAULT_VIDEO_MODEL, VideoRequest};
 #[command(
     name = "lucida",
     version,
-    about = "Generate images and video with Google Gemini, Veo, a local ComfyUI, FLUX, Stability AI or OpenAI",
+    about = "Generate images and video with Google Gemini, Veo, Runway, a local ComfyUI, FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
                   hosted FLUX from Black Forest Labs, Stability AI, or OpenAI, \
-                  and video with Veo.\n\n\
+                  and video with Veo or Runway.\n\n\
                   Google reads GEMINI_API_KEY — one key for both images and Veo \
                   video. Image generation requires billing to be enabled on the \
                   project behind the key; free-tier keys report a quota of \
@@ -214,9 +215,24 @@ enum Command {
         #[arg(short, long)]
         negative: Option<String>,
 
-        /// Model id or alias: veo, veo-standard, veo-lite
+        /// Model id or alias: veo, veo-standard, veo-lite, runway, gen4-turbo
         #[arg(short, long, default_value = DEFAULT_VIDEO_MODEL)]
         model: String,
+
+        /// Which provider to use: google or runway. Inferred from the model when
+        /// omitted.
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Seconds of output. Every video provider bills per second, so this is
+        /// the flag where a wrong value is expensive rather than annoying — what
+        /// each accepts is a capability, not a fixed list.
+        #[arg(short = 'd', long)]
+        duration: Option<u32>,
+
+        /// Seed, for a reproducible render. Runway has one; Veo does not.
+        #[arg(long)]
+        seed: Option<u64>,
 
         /// Start the render and print its operation id instead of waiting.
         /// Collect it later with `lucida check`.
@@ -228,6 +244,11 @@ enum Command {
     Check {
         /// The operation id reported when the render started
         operation: String,
+
+        /// Which provider started it. Inferred from the id's shape when omitted
+        /// — Veo's are `operations/...` and Runway's are bare UUIDs.
+        #[arg(long)]
+        provider: Option<String>,
 
         /// Where to write the video once it is ready
         #[arg(short, long, default_value = "video.mp4")]
@@ -343,7 +364,20 @@ fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::Mcp => mcp::serve().map(|()| out::OK),
 
-        Command::Models { provider } => list_models(Backend::parse(&provider)?).map(|()| out::OK),
+        // Image backends first, then video: `runway` is not an image provider
+        // and `google` is both, so the image answer wins where a name is
+        // ambiguous — which keeps the existing behaviour of every command that
+        // has ever been typed.
+        Command::Models { provider } => match Backend::parse(&provider) {
+            Ok(backend) => list_models(backend).map(|()| out::OK),
+            Err(image_error) => match provider::VideoBackend::parse(&provider) {
+                Ok(backend) => list_video_models(backend).map(|()| out::OK),
+                // The image error, not the video one: five of the six providers
+                // are image providers, so that is the more likely mistake and
+                // the more useful list to be shown.
+                Err(_) => Err(image_error),
+            },
+        },
 
         Command::Setup {
             project,
@@ -412,8 +446,16 @@ fn run(cli: Cli) -> Result<i32> {
             execute(request, backend, destination, count).map(|()| out::OK)
         }
 
-        Command::Check { operation, out } => {
-            match genai::Client::from_env()?.poll_video(&operation)? {
+        Command::Check {
+            operation,
+            provider,
+            out,
+        } => {
+            let backend = match &provider {
+                Some(name) => provider::VideoBackend::parse(name)?,
+                None => provider::infer_video_backend_from_operation(&operation),
+            };
+            match open_video(backend)?.poll(&operation)? {
                 video::VideoStatus::Pending => {
                     // Its own exit code. This used to be 0 with nothing on
                     // stdout, which a polling script cannot tell apart from a
@@ -465,32 +507,50 @@ fn run(cli: Cli) -> Result<i32> {
             resolution,
             negative,
             model,
+            provider,
+            duration,
+            seed,
             no_wait,
         } => {
+            // Named explicitly, or inferred from the model id — the same rule
+            // images have used since `--provider` became optional there.
+            let backend = match &provider {
+                Some(name) => provider::VideoBackend::parse(name)?,
+                None => provider::infer_video_backend(&model),
+            };
+
             let request = VideoRequest {
                 prompt,
                 model,
-                aspect_ratio: aspect,
+                aspect: aspect.map(|a| Aspect::parse(&a)).transpose()?,
                 resolution,
                 negative_prompt: negative,
                 image,
+                duration,
+                seed,
             };
-            let resolved = video::resolve_video_model(&request.model);
+
+            // Before a client exists, so asking Veo for a seed says so with no
+            // key set — the key was never the problem.
+            let caps = provider::video_capabilities_for(backend, &request.model);
+            caps.check(&request)?;
+
+            let resolved = resolve_video_model(backend, &request.model);
 
             // Video is the one lane billed per second, so the rate is stated
             // before the render rather than after it — this is where a wrong
             // parameter is expensive rather than merely annoying.
-            let price = spend::video_price(&resolved);
+            let price = spend::video_price(backend, &resolved, request.duration);
             spend::check(price, "video render")?;
             eprintln!("Rendering with {resolved} — {}.", price.describe());
 
-            let client = genai::Client::from_env()?;
+            let client = open_video(backend)?;
 
             // Started and waited on in two visible steps, so the operation id
             // exists out here where it can be printed and written down. It used
             // to live inside one blocking call, which is why nothing but the
             // deadline message ever mentioned it.
-            let operation = client.start_video(&request)?;
+            let operation = client.start(&request)?;
             ledger::video_started(
                 &resolved,
                 &request.prompt,
@@ -521,7 +581,7 @@ fn run(cli: Cli) -> Result<i32> {
                 return Ok(out::OK);
             }
 
-            let bytes = client.await_video(&operation)?;
+            let bytes = await_video(client.as_ref(), &operation)?;
             let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
             eprintln!(
                 "Wrote {} ({:.1} MB)",
@@ -1047,6 +1107,105 @@ fn init_config() -> Result<()> {
 }
 
 
+
+/// What a video provider can be asked for, and whether it can be reached.
+///
+/// The video twin of [`list_models`], and it earns its place for the same reason
+/// that one does: the capability table is a fact about the provider rather than
+/// about your credentials, so it prints whether or not a key is present. There
+/// is no model *list* to fetch — both providers' catalogues are fixed at release
+/// — so what the probe buys here is the credential check and, on Runway, the
+/// balance.
+fn list_video_models(backend: provider::VideoBackend) -> Result<()> {
+    let caps = provider::video_capabilities_for(backend, backend.default_model());
+
+    match backend {
+        provider::VideoBackend::Google => {
+            println!("Video models available to the google provider:");
+            for (alias, id) in video::VIDEO_ALIASES {
+                let default = if *id == video::DEFAULT_VIDEO_MODEL { "  (default)" } else { "" };
+                println!("  {alias:<14} -> {id}{default}");
+            }
+        }
+        provider::VideoBackend::Runway => {
+            match runway::Client::from_env().and_then(|c| c.credits()) {
+                Ok(credits) => println!("Key is valid. Remaining credits: {credits}"),
+                Err(e) => println!("The runway provider cannot be used right now:\n\n  {e:#}\n"),
+            }
+            println!("Video models available to the runway provider:");
+            for model in runway::MODELS {
+                let default = if *model == runway::DEFAULT_MODEL { "  (default)" } else { "" };
+                let per_model = provider::video_capabilities_for(backend, model);
+                let text = if per_model.text_to_video { "" } else { ";  needs a still" };
+                println!("  {model}{default}{text}");
+            }
+        }
+    }
+
+    println!("\nThis provider supports:");
+    println!("  aspect ratio    {}", describe_aspect(caps.aspect));
+    println!("  duration        {}", caps.duration.describe());
+    println!("  from a still    {}", yes_no(caps.image_to_video));
+    println!("  from text alone {}", yes_no(caps.text_to_video));
+    println!("  negative prompt {}", yes_no(caps.negative_prompt));
+    println!("  resolution      {}", yes_no(caps.resolution));
+    println!("  seed            {}", yes_no(caps.seed));
+    println!("  output carries  {}", caps.provenance.describe());
+
+    Ok(())
+}
+
+fn open_video(backend: provider::VideoBackend) -> Result<Box<dyn provider::VideoProvider>> {
+    Ok(match backend {
+        provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
+        provider::VideoBackend::Runway => Box::new(runway::Client::from_env()?),
+    })
+}
+
+/// The model actually sent, once each provider's aliases are applied.
+fn resolve_video_model(backend: provider::VideoBackend, model: &str) -> String {
+    match backend {
+        provider::VideoBackend::Google => video::resolve_video_model(model),
+        provider::VideoBackend::Runway => runway::resolve_model(model),
+    }
+}
+
+/// Polls a render to completion, for the CLI's blocking path.
+///
+/// Lives here rather than on the trait because the waiting is a *front-end*
+/// decision, not a provider one: the MCP surface deliberately never blocks, and
+/// a provider that had to implement both would be implementing a policy it does
+/// not own. Both providers get the same backoff, the same deadline and the same
+/// cancellation check this way, rather than each reinventing them.
+fn await_video(client: &dyn provider::VideoProvider, operation: &str) -> Result<Vec<u8>> {
+    let started = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs(900);
+    let mut interval = std::time::Duration::from_secs(5);
+
+    loop {
+        cancel::check().map_err(|e| {
+            anyhow::anyhow!("{e}\n\nCollect it later with: lucida check {operation}")
+        })?;
+
+        if started.elapsed() > deadline {
+            anyhow::bail!(
+                "gave up after {} minutes; the render may still finish. \
+                 Poll it with: lucida check {operation}",
+                deadline.as_secs() / 60
+            );
+        }
+
+        std::thread::sleep(interval);
+        interval = (interval * 2).min(std::time::Duration::from_secs(30));
+
+        if let video::VideoStatus::Done(bytes) = client.poll(operation)? {
+            eprintln!("Render finished in {}s.", started.elapsed().as_secs());
+            return Ok(bytes);
+        }
+
+        eprintln!("  still rendering ({}s elapsed)…", started.elapsed().as_secs());
+    }
+}
 
 fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
     Ok(match backend {
@@ -1615,10 +1774,16 @@ mod tests {
                     backend.product_name()
                 );
             }
-            assert!(
-                surface.contains("Veo") || surface.contains("video"),
-                "video is not mentioned at all: {surface}"
-            );
+            // Video providers too, now that there is more than one of them —
+            // "video comes from Veo" was the whole capability the description
+            // omitted last time, and a second lane is exactly as easy to forget.
+            for backend in provider::VideoBackend::ALL {
+                let name = Backend::video_product_name(*backend);
+                assert!(
+                    surface.contains(name),
+                    "`{name}` is missing from a surface someone reads before installing: {surface}"
+                );
+            }
         }
     }
 

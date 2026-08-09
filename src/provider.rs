@@ -238,12 +238,12 @@ pub enum Provenance {
     /// is a materially different claim from "we assume nothing is there" — the
     /// second is the kind of thing people repeat until it becomes folklore.
     ///
-    /// Currently unused, and kept anyway: it is where a new provider starts
-    /// before anyone has rendered anything with it, and BFL is the case in
-    /// point. It shipped as `Unverified`, one render proved it was
-    /// [`Self::C2paOnly`], and the guess most people would have made — unmarked,
-    /// like other non-Google generators — was wrong.
-    #[allow(dead_code, reason = "the starting state for the next provider added")]
+    /// Kept for exactly the moment it is now serving: it is where a new
+    /// provider starts before anyone has rendered anything with it. BFL was the
+    /// case in point — it shipped as `Unverified`, one render proved it
+    /// [`Self::C2paOnly`], and the guess most people would have made (unmarked,
+    /// like other non-Google generators) was wrong. Runway holds it now, as of
+    /// 2026-08-09, and one paid render is what will retire it.
     Unverified,
 }
 
@@ -382,6 +382,223 @@ pub fn mask_semantics() -> String {
         return "No provider currently accepts a mask.".to_string();
     }
     format!("{}.", parts.join(". "))
+}
+
+/// How long a clip a provider will make.
+///
+/// A third shape, because the two video providers disagree in the way that
+/// matters: Veo offers three fixed lengths and Runway a continuous range. Held
+/// as a value for the same reason `AspectSupport` is — the alternative is prose
+/// saying "4, 6 or 8 seconds" in five places, four of which go wrong when a
+/// second provider arrives.
+#[derive(Debug, Clone, Copy)]
+pub enum DurationSupport {
+    /// Exactly these lengths, in seconds.
+    Named(&'static [u32]),
+    /// Any whole number of seconds between these, inclusive.
+    Range { min: u32, max: u32 },
+}
+
+impl DurationSupport {
+    pub fn accepts(self, seconds: u32) -> bool {
+        match self {
+            DurationSupport::Named(lengths) => lengths.contains(&seconds),
+            DurationSupport::Range { min, max } => (min..=max).contains(&seconds),
+        }
+    }
+
+    pub fn describe(self) -> String {
+        match self {
+            DurationSupport::Named(lengths) => {
+                let seconds: Vec<String> = lengths.iter().map(u32::to_string).collect();
+                format!("{} seconds", join_and(&seconds.iter().map(String::as_str).collect::<Vec<_>>()))
+            }
+            DurationSupport::Range { min, max } => format!("{min}-{max} seconds"),
+        }
+    }
+}
+
+/// What a video provider can be asked for.
+///
+/// Deliberately its own struct rather than a reuse of [`Capabilities`]. Video and
+/// images disagree about almost everything that matters — there is no mask, no
+/// negative prompt on some models, no steps or guidance anywhere, and a duration
+/// that images have no concept of — so sharing one type would mean a struct where
+/// half the fields are meaningless depending on which kind of request it is
+/// describing. That is the union-pretending-to-be-an-interface this module's own
+/// header rejects.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoCapabilities {
+    pub provider: &'static str,
+    pub tagline: &'static str,
+    pub aspect: AspectSupport,
+    pub duration: DurationSupport,
+    /// Whether a still can be animated, rather than only text rendered.
+    pub image_to_video: bool,
+    /// Whether text alone is enough. Not a given: Runway's gen4_turbo animates
+    /// an image and cannot start from a prompt at all.
+    pub text_to_video: bool,
+    pub negative_prompt: bool,
+    pub resolution: bool,
+    pub seed: bool,
+    pub provenance: Provenance,
+}
+
+impl VideoCapabilities {
+    /// Rejects a request carrying anything this provider cannot express.
+    ///
+    /// The video twin of [`Capabilities::check`], and tagged as a refusal for the
+    /// same reason: it happens before the money moves, and video is the lane
+    /// where money moves fastest.
+    pub fn check(&self, req: &crate::video::VideoRequest) -> Result<()> {
+        self.refuse(req)
+            .map_err(|e| anyhow::Error::new(crate::out::Refused(format!("{e:#}"))))
+    }
+
+    fn refuse(&self, req: &crate::video::VideoRequest) -> Result<()> {
+        let me = self.provider;
+
+        if req.image.is_some() && !self.image_to_video {
+            bail!("`{me}` cannot animate a still image; it renders from a prompt alone.");
+        }
+
+        if req.image.is_none() && !self.text_to_video {
+            bail!(
+                "`{me}` renders only from a still image, so it needs one to \
+                 animate.\n\nPass an image, or use a model that starts from text."
+            );
+        }
+
+        if let Some(seconds) = req.duration
+            && !self.duration.accepts(seconds)
+        {
+            bail!(
+                "`{me}` cannot render {seconds} seconds. It offers {}.",
+                self.duration.describe()
+            );
+        }
+
+        if req.negative_prompt.is_some() && !self.negative_prompt {
+            bail!("`{me}` has no negative prompt, so what to keep out cannot be honoured.");
+        }
+
+        if req.resolution.is_some() && !self.resolution {
+            bail!(
+                "`{me}` does not take a resolution; the shape you ask for decides \
+                 the pixel count."
+            );
+        }
+
+        if req.seed.is_some() && !self.seed {
+            bail!("`{me}` has no concept of a seed, so a render there cannot be repeated.");
+        }
+
+        if let Some(aspect) = req.aspect
+            && let AspectSupport::Named(accepted) = self.aspect
+            && !accepted.iter().any(|a| *a == aspect.to_string())
+        {
+            bail!(
+                "`{me}` does not offer {aspect}. It accepts: {}.",
+                accepted.join(", ")
+            );
+        }
+
+        Ok(())
+    }
+}
+
+/// Which backend serves a video request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoBackend {
+    Google,
+    Runway,
+}
+
+impl VideoBackend {
+    pub const ALL: &'static [VideoBackend] = &[VideoBackend::Google, VideoBackend::Runway];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Runway => "runway",
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Google => crate::video::DEFAULT_VIDEO_MODEL,
+            Self::Runway => crate::runway::DEFAULT_MODEL,
+        }
+    }
+
+    pub fn parse(name: &str) -> Result<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "google" | "veo" | "gemini" => Ok(Self::Google),
+            "runway" | "runwayml" => Ok(Self::Runway),
+            other => bail!(
+                "`{other}` is not a video provider. Available: {}.",
+                Self::ALL.iter().map(|b| b.name()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+}
+
+/// What a video backend supports for a given model, without constructing one.
+pub fn video_capabilities_for(backend: VideoBackend, model: &str) -> VideoCapabilities {
+    match backend {
+        VideoBackend::Google => crate::video::CAPABILITIES,
+        VideoBackend::Runway => crate::runway::capabilities(model),
+    }
+}
+
+/// Guesses the video backend from a model id, so `--provider` stays optional.
+pub fn infer_video_backend(model: &str) -> VideoBackend {
+    if crate::runway::is_runway_model(model) {
+        VideoBackend::Runway
+    } else {
+        VideoBackend::Google
+    }
+}
+
+/// Which provider a render in flight belongs to, from its id alone.
+///
+/// Needed because `lucida check <id>` is handed nothing else, and the two
+/// providers' ids are shaped differently enough to tell apart: Veo's are
+/// `operations/...` and Runway's are bare UUIDs. Guessing is acceptable here
+/// only because it is *correctable* — `--provider` overrides it, and the ledger
+/// records which provider started each render, so `lucida ops` prints an
+/// unambiguous command rather than relying on this at all.
+///
+/// A third provider using UUIDs would collide, and the fix then is the ledger
+/// rather than a cleverer guess.
+pub fn infer_video_backend_from_operation(operation: &str) -> VideoBackend {
+    if operation.starts_with("operations/") || operation.starts_with("models/") {
+        VideoBackend::Google
+    } else if looks_like_uuid(operation) {
+        VideoBackend::Runway
+    } else {
+        VideoBackend::Google
+    }
+}
+
+fn looks_like_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && [8, 4, 4, 4, 12] == groups.iter().map(|g| g.len()).collect::<Vec<_>>()[..]
+        && text.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// A render in flight, and the one thing that can finish it.
+///
+/// Kept as a trait rather than folded into `ImageProvider` because the shape is
+/// genuinely different: video submits and polls, where every image provider but
+/// two returns bytes from one request.
+pub trait VideoProvider {
+    /// Starts a render and returns the id that will collect it.
+    fn start(&self, req: &crate::video::VideoRequest) -> Result<String>;
+
+    /// One non-blocking check.
+    fn poll(&self, operation: &str) -> Result<crate::video::VideoStatus>;
 }
 
 /// A model whose provider has announced the date it stops working.
@@ -751,6 +968,16 @@ impl Backend {
             Self::Bfl => "FLUX",
             Self::Stability => "Stability",
             Self::OpenAi => "OpenAI",
+        }
+    }
+
+    /// The same, for a video backend. Separate because the two enums are
+    /// separate, and `google` means Gemini in one and Veo in the other.
+    #[cfg(test)]
+    pub fn video_product_name(backend: VideoBackend) -> &'static str {
+        match backend {
+            VideoBackend::Google => "Veo",
+            VideoBackend::Runway => "Runway",
         }
     }
 

@@ -9,7 +9,6 @@ use crate::genai::{Client, explain_error};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
 
 pub const DEFAULT_VIDEO_MODEL: &str = "veo-3.1-fast-generate-preview";
 
@@ -32,16 +31,45 @@ pub fn resolve_video_model(input: &str) -> String {
         .unwrap_or_else(|| input.trim().to_string())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VideoRequest {
     pub prompt: String,
     pub model: String,
-    pub aspect_ratio: Option<String>,
+    /// Normalized, so a provider taking pixel pairs and one taking `16:9` can
+    /// both be handed the same request. Runway forced this: its ratios are
+    /// `1280:720`-style pixel pairs, which is a seventh geometry model across
+    /// six providers, and `Aspect` already holds a width and a height.
+    pub aspect: Option<crate::provider::Aspect>,
     pub resolution: Option<String>,
     pub negative_prompt: Option<String>,
     /// A still to animate. Supplying one makes this image-to-video.
     pub image: Option<String>,
+    /// Seconds of output. The one parameter where a wrong value is expensive
+    /// rather than annoying, since every video provider bills per second.
+    pub duration: Option<u32>,
+    pub seed: Option<u64>,
 }
+
+/// Veo, as of the 3.1 family.
+///
+/// Durations are 4, 6 and 8 — which answers a question the roadmap left open
+/// ("is 8 s a hard limit?") with a no, and is exactly the sort of fact that
+/// belongs in a value rather than in prose nobody re-reads.
+pub const CAPABILITIES: crate::provider::VideoCapabilities = crate::provider::VideoCapabilities {
+    provider: "google",
+    tagline: "Veo. Native audio, and the only video lane whose output carries a pixel watermark that survives re-encoding.",
+    aspect: crate::provider::AspectSupport::Named(&["16:9", "9:16"]),
+    duration: crate::provider::DurationSupport::Named(&[4, 6, 8]),
+    image_to_video: true,
+    text_to_video: true,
+    // True of the family; `veo-lite` rejects one outright and says so before
+    // spending a round trip — see `start_video`.
+    negative_prompt: true,
+    resolution: true,
+    // Google exposes no seed on video any more than on images.
+    seed: false,
+    provenance: crate::provider::Provenance::SynthIdAndC2pa,
+};
 
 /// One poll of a render in flight.
 pub enum VideoStatus {
@@ -51,20 +79,11 @@ pub enum VideoStatus {
 }
 
 impl Client {
-    /// Waits for a render already in flight, then downloads it.
-    ///
-    /// The other half of `start_video`, kept separate from it rather than joined
-    /// into one blocking call. The CLI now starts and waits in two visible steps
-    /// so it can print the operation id and write it to the ledger *between*
-    /// them — which is the whole difference between a render that can be
-    /// recovered and one that cannot. A single `generate_video` hid the id inside
-    /// itself, where nothing else could reach it.
-    pub fn await_video(&self, operation: &str) -> Result<Vec<u8>> {
-        let done = self.await_operation(operation)?;
-        self.fetch_video(&done)
-    }
-
     /// Kicks off a render and returns the operation name to poll.
+    ///
+    /// Kept as an inherent method as well as a trait one: `mcp.rs` and the tests
+    /// hold a concrete `genai::Client`, and making them go through the trait
+    /// would be ceremony rather than clarity.
     pub fn start_video(&self, req: &VideoRequest) -> Result<String> {
         let model = resolve_video_model(&req.model);
 
@@ -116,14 +135,17 @@ impl Client {
         }
 
         let mut parameters = serde_json::Map::new();
-        if let Some(v) = &req.aspect_ratio {
-            parameters.insert("aspectRatio".into(), json!(v));
+        if let Some(v) = &req.aspect {
+            parameters.insert("aspectRatio".into(), json!(v.to_string()));
         }
         if let Some(v) = &req.resolution {
             parameters.insert("resolution".into(), json!(v));
         }
         if let Some(v) = &req.negative_prompt {
             parameters.insert("negativePrompt".into(), json!(v));
+        }
+        if let Some(seconds) = req.duration {
+            parameters.insert("durationSeconds".into(), json!(seconds));
         }
 
         Ok(json!({
@@ -175,46 +197,6 @@ impl Client {
         }
 
         response.json().context("parsing poll response")
-    }
-
-    /// Polls until the operation reports done. Veo renders are slow and the wait
-    /// is unpredictable, so this backs off rather than hammering.
-    fn await_operation(&self, operation: &str) -> Result<Value> {
-        let started = Instant::now();
-        let deadline = Duration::from_secs(900);
-        let mut interval = Duration::from_secs(5);
-
-        loop {
-            // The operation id has already been printed by `generate_video`, so
-            // a cancellation here loses the wait and not the render.
-            crate::cancel::check()
-                .map_err(|e| anyhow!("{e}\n\nCollect it later with: lucida check {operation}"))?;
-
-            if started.elapsed() > deadline {
-                bail!(
-                    "gave up after {} minutes; the render may still finish. \
-                     Poll it with: lucida check {operation}",
-                    deadline.as_secs() / 60
-                );
-            }
-
-            std::thread::sleep(interval);
-            interval = (interval * 2).min(Duration::from_secs(30));
-
-            let payload = self.poll_once(operation)?;
-
-            if let Some(error) = payload.get("error") {
-                let message = error["message"].as_str().unwrap_or("unknown error");
-                bail!("the render failed: {message}");
-            }
-
-            if payload["done"].as_bool().unwrap_or(false) {
-                eprintln!("Render finished in {}s.", started.elapsed().as_secs());
-                return Ok(payload);
-            }
-
-            eprintln!("  still rendering ({}s elapsed)…", started.elapsed().as_secs());
-        }
     }
 
     /// Digs the video out of a completed operation.
@@ -281,6 +263,16 @@ fn find_key<'a>(value: &'a Value, target: &str) -> Option<&'a Value> {
     }
 }
 
+impl crate::provider::VideoProvider for Client {
+    fn start(&self, req: &VideoRequest) -> Result<String> {
+        self.start_video(req)
+    }
+
+    fn poll(&self, operation: &str) -> Result<VideoStatus> {
+        self.poll_video(operation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,10 +282,8 @@ mod tests {
         VideoRequest {
             prompt: "a fox running".into(),
             model: model.into(),
-            aspect_ratio: Some("16:9".into()),
-            resolution: None,
-            negative_prompt: None,
-            image: None,
+            aspect: crate::provider::Aspect::parse("16:9").ok(),
+            ..Default::default()
         }
     }
 

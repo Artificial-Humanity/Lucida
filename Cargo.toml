@@ -7,7 +7,7 @@ edition = "2024"
 # is what `cargo install --git`, the update path for anyone who did not take a
 # release binary, does today.
 rust-version = "1.85"
-description = "Generate images and video with Google Gemini, Veo, a local ComfyUI, FLUX, Stability AI or OpenAI — a CLI and an MCP server"
+description = "Generate images and video with Google Gemini, Veo, Runway, a local ComfyUI, FLUX, Stability AI or OpenAI — a CLI and an MCP server"
 license = "Apache-2.0"
 
 [dependencies]

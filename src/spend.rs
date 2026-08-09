@@ -43,7 +43,8 @@ pub enum Price {
     PerImage { usd: f64, verified: &'static str },
     /// Verified, and billed per second of output — which is why video is the
     /// one lane where a wrong parameter is expensive rather than annoying.
-    PerSecond { usd: f64, verified: &'static str },
+    /// Carries the clip length, because a rate without one is not a price.
+    PerSecond { usd: f64, verified: &'static str, seconds: u32 },
     /// Billed, but at no rate this table has verified.
     Unverified,
 }
@@ -62,9 +63,10 @@ impl Price {
         match self {
             Price::Free => 0.0,
             Price::PerImage { usd, .. } => usd,
-            // A duration this cannot know; the video path prices itself and
-            // passes the number in. Treated as the ceiling if it reaches here.
-            Price::PerSecond { .. } | Price::Unverified => CEILING,
+            // Rate times length: video is the one lane where the parameter and
+            // the price are the same conversation.
+            Price::PerSecond { usd, seconds, .. } => usd * f64::from(seconds),
+            Price::Unverified => CEILING,
         }
     }
 
@@ -75,9 +77,11 @@ impl Price {
             Price::PerImage { usd, verified } => {
                 format!("about ${usd:.3} per image (published rate, checked {verified})")
             }
-            Price::PerSecond { usd, verified } => {
-                format!("about ${usd:.2} per second of output (published rate, checked {verified})")
-            }
+            Price::PerSecond { usd, verified, seconds } => format!(
+                "about ${:.2} for {seconds}s at ${usd:.2}/second (published rate, \
+                 checked {verified})",
+                usd * f64::from(seconds)
+            ),
             Price::Unverified => {
                 "billed, at a rate this table has not verified — see the provider's \
                  own pricing"
@@ -120,20 +124,38 @@ pub fn price_for(backend: Backend, model: &str) -> Price {
     }
 }
 
-/// Veo, per second of output, by tier.
-pub fn video_price(model: &str) -> Price {
+/// Video, per second of output, by provider and tier.
+///
+/// `duration` is taken because per-second billing means the *clip length* is
+/// half the price, and a budget that ignored it would treat a two-second test
+/// and a ten-second render as the same spend. Where no duration is asked for,
+/// the provider's own default length is assumed — stated below rather than
+/// guessed at the call site.
+pub fn video_price(backend: crate::provider::VideoBackend, model: &str, duration: Option<u32>) -> Price {
     const CHECKED: &str = "2026-08-09";
 
-    let usd = if model.contains("lite") {
-        0.05
-    } else if model.contains("fast") {
-        0.15
-    } else {
-        0.40
+    let per_second = match backend {
+        crate::provider::VideoBackend::Google => {
+            if model.contains("lite") {
+                0.05
+            } else if model.contains("fast") {
+                0.15
+            } else {
+                0.40
+            }
+        }
+        // Runway bills in credits rather than dollars and this table has not
+        // verified the conversion, so its rate is not stated. `Unverified`
+        // counts at the ceiling, which is the honest answer until a render and
+        // a balance reading settle it.
+        crate::provider::VideoBackend::Runway => return Price::Unverified,
     };
+
     Price::PerSecond {
-        usd,
+        usd: per_second,
         verified: CHECKED,
+        // Veo's own default when none is asked for.
+        seconds: duration.unwrap_or(8),
     }
 }
 
@@ -359,7 +381,7 @@ mod tests {
         for price in [
             Price::Free,
             Price::PerImage { usd: 0.067, verified: "2026-08-09" },
-            Price::PerSecond { usd: 0.15, verified: "2026-08-09" },
+            Price::PerSecond { usd: 0.15, verified: "2026-08-09", seconds: 8 },
             Price::Unverified,
         ] {
             let described = price.describe().to_lowercase();
@@ -376,7 +398,8 @@ mod tests {
     /// rather than annoying — and why the tiers must not collapse into one.
     #[test]
     fn the_video_tiers_are_priced_apart() {
-        let rate = |model: &str| match video_price(model) {
+        use crate::provider::VideoBackend;
+        let rate = |model: &str| match video_price(VideoBackend::Google, model, Some(8)) {
             Price::PerSecond { usd, .. } => usd,
             other => panic!("video priced as {other:?}"),
         };
