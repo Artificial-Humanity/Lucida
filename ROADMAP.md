@@ -667,24 +667,22 @@ Three things worth keeping from that:
   `.dmg`. A notarized bare binary is checked online instead, so shipping a
   `.pkg` is the only way to get an offline ticket. Signing also has to happen
   *after* `lipo`, since fusing strips signatures.
-- **crates.io — waiting on the Apple signing certificate.** Owner decision,
-  2026-08-09. The original condition (publish once the API surface settles) was
-  **met at v1.0.0**; this is a second, deliberate one.
+- **crates.io — publishing at v1.0.1.** Owner decision, 2026-08-09, after a
+  brief gate on the Apple signing certificate was lifted: the two are
+  independent. **A published crate ships no binary** — `cargo install lucida`
+  compiles from source on the user's machine, so nothing there is ever
+  Gatekeeper-evaluated and no certificate would change that path. Signing affects
+  exactly one route, a binary downloaded from the releases page **in a browser**
+  (curl and the installer never set quarantine), plus Windows SmartScreen.
 
-  Recorded with a caveat, because the two are technically independent and the
-  note is worth having before the wait gets longer than intended. **A published
-  crate ships no binary** — `cargo install lucida` compiles from source on the
-  user's machine, so nothing there is ever Gatekeeper-evaluated and no
-  certificate would change what that path does. Signing affects exactly one
-  route: a binary downloaded from the releases page **in a browser** (curl and
-  the installer do not set quarantine at all), plus Windows SmartScreen.
+  The original condition — publish once the API surface settles — was met at
+  v1.0.0. v1.0.1 exists because the tag preceded the packaging metadata, and a
+  crate whose `Cargo.toml` does not match the tag it claims to be is a
+  discrepancy worth one patch release to avoid.
 
-  So the coupling is a positioning judgement rather than a technical dependency,
-  and a defensible one — public adoption is a goal, and arriving with signed
-  binaries and a published crate at once is a stronger first impression than
-  doing it in two halves. Held here so that if org enrollment stalls, the
-  decision is re-taken on purpose rather than by default. The name is still free;
-  `cargo install --git` works meanwhile.
+  **Publishing requires the owner's registry token and is not an agent's to
+  hold.** Everything else is prepared: metadata, `exclude`, and a package
+  verified to compile from its own contents.
 - **Video beyond Veo.** Runway, Pika, Kling and Sora occupy the same space. The
   start/poll abstraction already exists and should generalize, but this trails
   images.

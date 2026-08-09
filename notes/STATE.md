@@ -10,7 +10,10 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
 
 ## Current State
 
-- **v1.0.0 is the latest release (2026-08-09)** — *video became a substitution, and the tests
+- **v1.0.1 is the latest release (2026-08-09)** — packaging only, no behaviour change, cut so
+  that the published crate and the git tag are the **same tree**. v1.0.0 was tagged before the
+  crates.io metadata existed. See the note on crates.io below.
+- **v1.0.0 (2026-08-09)** — *video became a substitution, and the tests
   grew a second layer*. The version number is a claim about **surfaces**, not about being
   finished: the `ImageProvider` and `VideoProvider` traits, the six MCP tools, the four exit
   codes, the `--json` documents, the ledger format and the config names are what callers may
@@ -19,11 +22,12 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   audio declined on the day it was cheapest to add; and the layer a user touches moved into
   `cargo test`, which immediately found an unreachable bash assertion and three hand-written
   MCP `provider` enums. 255 tests, CI green on all three platforms at `11409e1`.
-  **crates.io waits on the Apple signing certificate** (owner, 2026-08-09) — a positioning
-  call, not a technical dependency: `cargo install` compiles from source, so a published crate
-  ships no binary for Gatekeeper to evaluate. Signing affects only a browser download from the
-  releases page, plus SmartScreen. Noted in [ROADMAP.md](../ROADMAP.md) § 4 so that if org
-  enrollment stalls, the coupling is re-taken on purpose rather than by default.
+  **crates.io: decoupled from signing and being published** (owner, 2026-08-09, reversing the
+  earlier gate once it was clear the two are independent — `cargo install` compiles from
+  source, so a published crate ships no binary for Gatekeeper to evaluate; signing affects only
+  a browser download from the releases page, plus SmartScreen). The name `lucida` was free.
+  **Publishing needs the owner's token** (`cargo login`) and is not something an agent should
+  hold.
 - **v0.10.0 (2026-08-09)** — *dependable unattended use*, the second
   tranche of the [2026-08-09 product review](product-review-20260809.md). **All three of the
   review's structural findings are now closed.** The MCP server dispatches tool calls on a

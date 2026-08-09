@@ -20,7 +20,35 @@ for Lucida.
 
 ## Working section — unreleased
 
-*(empty — the entries below collected under v1.0.0 when it was tagged)*
+*(empty — the entries below collected under their version headings when tagged)*
+
+---
+
+## v1.0.1 — released 2026-08-09
+
+**Packaging only. No behaviour changed, and the compiled binary is the same as v1.0.0's.**
+
+Cut so that a published crate and a git tag are the same tree. v1.0.0 was tagged before the
+crates.io metadata existed, and publishing 1.0.0 afterwards would have meant a package whose
+`Cargo.toml` did not match the tag it claimed to be — identical code, but a discrepancy of
+exactly the kind this project spends its time refusing elsewhere. A patch release costs one
+workflow run and removes the footnote entirely.
+
+#### Added
+
+- **crates.io package metadata** (`b8bb83a`) — `repository`, `homepage`, `readme`, five
+  `keywords` and three `categories`. None of it is needed to build, which is why nothing ever
+  warned: the package would have published with a description and nothing else — no link to
+  the source, and no category or keyword anyone could have found it under.
+- **`exclude`** (`b8bb83a`), stating what ships rather than inheriting whatever is tracked. It
+  keeps out `video.mp4` — a 4.9 MB test render committed by accident in `d37737c` — and the
+  internal review notes. Roughly a tenth of the crate would otherwise have been a video of
+  fog. `notes/CHANGELOG.md` stays; a product review does not belong in a package. Result: 43
+  files, 273 KiB compressed, verified to compile from the packaged sources rather than from
+  the working tree.
+
+**Still tracked in the repository:** `video.mp4` itself. Excluding it from the package is not
+the same as removing it from git, and the second is the owner's call.
 
 ---
 

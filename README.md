@@ -39,7 +39,7 @@ irm https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.ps
 That picks the binary for your platform, verifies its published checksum,
 installs it to `~/.local/bin` (or `%LOCALAPPDATA%\Programs\lucida`), and tells
 you if that directory is not on your PATH. `LUCIDA_INSTALL_DIR` chooses
-somewhere else; `LUCIDA_VERSION=v1.0.0` pins a version instead of taking the
+somewhere else; `LUCIDA_VERSION=v1.0.1` pins a version instead of taking the
 latest. Both are read by the installer only — they are not Lucida settings and
 do not belong in the config file. Nothing needs a toolchain, and nothing needs
 sudo.
