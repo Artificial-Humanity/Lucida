@@ -110,6 +110,7 @@ $ lucida generate "a brass astrolabe on dark slate" \
     --provider comfyui --seed 12345 --negative "text, watermark"
 
 $ lucida video "a red maple leaf drifting down against white" --out clip.mp4
+$ lucida video "waves against a harbour wall at dusk" --no-wait
 $ lucida check operations/xyz --out clip.mp4
 
 $ lucida models --provider comfyui
@@ -264,8 +265,8 @@ a ComfyUI in a container or on another machine works with no shared mount.
 |---|---|
 | `lucida generate <prompt>` | Prompt to image. Writes `image.png` unless `--out` |
 | `lucida edit <image> <prompt>` | Edits an existing image. **Overwrites its input** unless `--out` |
-| `lucida video <prompt>` | Renders with Veo. Takes minutes, and bills per second of output |
-| `lucida check <operation>` | Resumes a video render by operation id — after a timeout, or from a different shell |
+| `lucida video <prompt>` | Renders with Veo. Takes minutes, and bills per second of output. `--no-wait` prints the operation id and returns |
+| `lucida check <operation>` | Resumes a video render by operation id — after a timeout, an interruption, or from a different shell |
 | `lucida models` | What a provider can reach, and what it can be asked for |
 | `lucida config` | What settings this process can see |
 | `lucida setup` | Wires Lucida into Claude Code and the Claude app |

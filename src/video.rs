@@ -56,7 +56,7 @@ impl Client {
     /// separately, because a render outlasts a tool call.
     pub fn generate_video(&self, req: &VideoRequest) -> Result<Vec<u8>> {
         let operation = self.start_video(req)?;
-        eprintln!("Render started; this usually takes 1-3 minutes.");
+        eprintln!("{}", resume_notice(&operation));
         let done = self.await_operation(&operation)?;
         self.fetch_video(&done)
     }
@@ -243,6 +243,22 @@ impl Client {
 
         Ok(response.bytes().context("reading video bytes")?.to_vec())
     }
+}
+
+/// The operation id, and the one command that turns it back into a file.
+///
+/// Printed the moment the render starts, before any waiting — which is the
+/// whole point. Previously the id appeared only in the message announcing the
+/// 15-minute deadline, so every other way of leaving the wait lost it: a single
+/// 502, a closed laptop, a Ctrl-C, a dropped connection. Minutes of billed Veo
+/// output, unreachable, because the one string needed to fetch it was never
+/// shown. Nothing about this is expensive; it was simply never printed.
+pub fn resume_notice(operation: &str) -> String {
+    format!(
+        "Render started; this usually takes 1-3 minutes.\n\
+         If this command is interrupted, the render continues and can be \
+         collected with:\n\n  lucida check {operation}\n"
+    )
 }
 
 /// Depth-first search for the first value under `target`, at any depth.

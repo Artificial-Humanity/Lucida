@@ -196,6 +196,11 @@ enum Command {
         /// Model id or alias: veo, veo-standard, veo-lite
         #[arg(short, long, default_value = DEFAULT_VIDEO_MODEL)]
         model: String,
+
+        /// Start the render and print its operation id instead of waiting.
+        /// Collect it later with `lucida check`.
+        #[arg(long)]
+        no_wait: bool,
     },
 
     /// Resume a video render by operation id, e.g. after a timeout
@@ -384,6 +389,7 @@ fn run(cli: Cli) -> Result<()> {
             resolution,
             negative,
             model,
+            no_wait,
         } => {
             let request = VideoRequest {
                 prompt,
@@ -396,7 +402,22 @@ fn run(cli: Cli) -> Result<()> {
             let resolved = video::resolve_video_model(&request.model);
             eprintln!("Rendering with {resolved}…");
 
-            let bytes = genai::Client::from_env()?.generate_video(&request)?;
+            let client = genai::Client::from_env()?;
+
+            // The shape the MCP surface has had since it existed — start, hand
+            // back the id, let the caller collect it — finally available to the
+            // shell too. Unattended callers want it: a render that outlives the
+            // process is fine, a process that must survive the render is not.
+            if no_wait {
+                let operation = client.start_video(&request)?;
+                eprintln!("{}", video::resume_notice(&operation));
+                // The id on stdout, where the path goes when we do wait: one
+                // line, the useful part, capturable by a script.
+                println!("{operation}");
+                return Ok(());
+            }
+
+            let bytes = client.generate_video(&request)?;
             let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
             eprintln!(
                 "Wrote {} ({:.1} MB)",
@@ -1100,6 +1121,34 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A started render must always be collectable from the terminal, and the
+    /// only thing that makes it so is the operation id being on screen. It was
+    /// printed in exactly one branch — the 15-minute deadline — so every other
+    /// way of leaving the wait lost a paid render.
+    #[test]
+    fn the_resume_notice_carries_the_id_and_the_command_that_uses_it() {
+        let notice = video::resume_notice("operations/abc123");
+        assert!(notice.contains("operations/abc123"), "{notice}");
+        assert!(
+            notice.contains("lucida check operations/abc123"),
+            "the id alone is not a way forward; the command has to be there: {notice}"
+        );
+    }
+
+    /// `--no-wait` is the CLI catching up with the MCP surface, which has
+    /// returned an operation id rather than blocking since it existed.
+    #[test]
+    fn video_can_start_a_render_without_waiting_for_it() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["lucida", "video", "a fox running", "--no-wait"])
+            .expect("--no-wait must parse");
+        match cli.command {
+            Command::Video { no_wait, .. } => assert!(no_wait),
+            _ => panic!("`video --no-wait` parsed as the wrong subcommand"),
+        }
+    }
 
     /// The `--mask` help is the only mask surface that cannot be generated, so
     /// it is the one that has to be guarded.
