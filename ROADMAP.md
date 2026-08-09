@@ -683,11 +683,101 @@ Three things worth keeping from that:
   **Publishing requires the owner's registry token and is not an agent's to
   hold.** Everything else is prepared: metadata, `exclude`, and a package
   verified to compile from its own contents.
-- **Video beyond Veo.** Runway, Pika, Kling and Sora occupy the same space. The
-  start/poll abstraction already exists and should generalize, but this trails
-  images.
+- **Video beyond Veo — DONE at v1.0.0.** Runway and Kling shipped behind
+  `VideoProvider`. What remains is the *other* axis: providers that are present
+  for one medium and absent for the other. See § 5.
 - **Untested surface.** `--resolution` and image-to-video are verified;
   `negative_prompt` is verified on fast and standard but the *effect* was never
   A/B'd, only its acceptance. Worth an actual comparison.
 - **Clip length.** Veo returns 8 seconds with no parameter to change it. Confirm
   whether that is a hard limit or an undocumented one.
+
+---
+
+## 5. Coverage — each provider, both media
+
+**Owner, 2026-08-09:** Lucida covers image generation *and* video generation, and
+**each provider should be as completely represented as possible across both**.
+
+This is the same rule as [coverage is per-credential](../AGENTS.md), turned
+sideways. That rule says a lane exists so someone holding *that* subscription
+gets the full width of what they pay for. The width is not only "which
+providers" — it is also "how much of each provider". Someone with a Runway
+subscription and nothing else gets **no image generation at all** from Lucida
+today, while paying for eight image models. "They could use Gemini instead"
+reasons from a keyring that happens to hold every key.
+
+Scope note: this is about **widening providers that already exist**, which the
+2026-08-09 pause on new providers does not cover (owner clarified the pause meant
+new *providers*, not new endpoints).
+
+### The matrix, as of 2026-08-09
+
+Verified by free probes where marked; see AGENTS.md § 2 for the technique.
+
+| Provider | Images | Video |
+|---|---|---|
+| `google` | shipped | shipped (Veo) |
+| `comfyui` | shipped | **missing** — possible via workflow graphs, unverified |
+| `bfl` | shipped | **missing** — FLUX 3 announced video 2026-07-23, gated early access |
+| `openai` | shipped | **missing** — see Sora below |
+| `stability` | shipped | **missing** — `/v2beta/image-to-video` returns 404 today; retired or moved, unverified |
+| `runway` | **missing** — 8 models, probe-confirmed | shipped |
+| `kling` | **missing** — endpoint confirmed, models not enumerable free | shipped |
+
+### The items, in the order worth doing them
+
+1. **Runway images — `gen4_image` and `gen4_image_turbo`.** Its own two models,
+   which is the scope already set for Runway (owner, 2026-08-09). The endpoint is
+   `POST /v1/text_to_image`, confirmed live: an invalid model is rejected with
+   the full list. `ImageProvider` already exists to implement against, and the
+   auth, base URL and mandatory `X-Runway-Version` header are already in
+   `runway.rs`. Smallest of these by a wide margin.
+
+2. **Kling images.** `POST /v1/images/generations` exists and validates —
+   an invalid `model_name` came back `code 1201`. It does **not** enumerate the
+   valid ones, and the obvious next probe is the trap: on Kling a *valid* model
+   renders, which is how 6 units went on 2026-08-09. So the model list has to
+   come from documentation or a deliberate paid probe, decided in advance rather
+   than discovered.
+
+3. **OpenAI video — Sora, and read the date first.** `sora-2` and `sora-2-pro`
+   are in the live model list. But the 2026-08-09 product review records, from
+   official sources, that the **Sora Videos API is removed 2026-09-24 with no
+   successor named** — and a model appearing in `/v1/models` does not contradict
+   the withdrawal of the endpoint that drives it.
+
+   So this one is a judgement rather than a task, and the owner's leaning is to
+   **punt until OpenAI announces something official** (2026-08-09). That is the
+   right instinct: building it buys a lane with a published expiry roughly six
+   weeks out, and shipping a provider lane and retiring it in the same quarter is
+   worse than not shipping it — a capability that appears and vanishes is the
+   kind of thing users remember as unreliability rather than as a vendor's
+   decision.
+
+   Skipping it does leave OpenAI image-only, which the coverage rule dislikes.
+   That tension is real and is resolved by the *dates*, not by preference: an API
+   with a removal date is not coverage, it is a countdown.
+
+   **What would change the answer:** OpenAI naming a successor endpoint, moving
+   the date, or the date passing with `sora-2` still reachable — in which case
+   the withdrawal notice was about something narrower than it read. Worth
+   re-checking around 2026-09-24 rather than acting before it. `RETIREMENTS` in
+   `provider.rs` is where the date belongs either way, and `scripts/canary.sh`
+   is what would notice the models disappearing from `/v1/models`.
+
+   **Do not treat the live model list as evidence to the contrary.** `sora-2` and
+   `sora-2-pro` list today and will very likely list on 2026-09-23. Models are
+   catalogue entries; the Videos API is the thing being removed.
+
+4. **Runway's six fronted image models** (`gemini_*`, `gpt_image_2`,
+   `seedream5_*`). The aggregator question, already recorded as open rather than
+   settled. The coverage rule argues *for* them — a Runway-only subscriber
+   reaches Seedream no other way — and the honest-labelling vocabulary already
+   exists (`Provenance::Unverified`, `Price::Unverified`). Kept separate from
+   item 1 so the easy decision is not held up by the contested one.
+
+5. **The remaining video gaps** — comfyui, bfl, stability. All three are
+   unverified rather than known-absent, and each needs a free probe before it is
+   worth an opinion. ComfyUI is the interesting one: video there is a workflow
+   graph rather than an endpoint, so `--workflow` may already cover it.

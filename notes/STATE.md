@@ -102,6 +102,17 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   review is being addressed in full — all three tranches, expansion axes included. So the
   positioning work is live (description and topics done; the ledger and video APIs settled at
   v1.0.0, so crates.io is now gated only on the signing certificate above).
+- **Next up, documented not started (owner, 2026-08-09):** *each provider as completely
+  represented as possible across images **and** video*. Runway and Kling are video-only here
+  while both sell image generation; OpenAI is image-only. **Probe-confirmed 2026-08-09:**
+  Runway exposes 8 image models at `POST /v1/text_to_image` (its own `gen4_image` /
+  `gen4_image_turbo` plus six fronted), and Kling's `POST /v1/images/generations` exists and
+  validates but will not enumerate its models for free — and on Kling a *valid* model renders,
+  which is the trap that cost 6 units. **Sora is a countdown, not coverage:** `sora-2` and
+  `sora-2-pro` list live, but the Videos API is **removed 2026-09-24, no successor named**, so
+  the owner's leaning is to punt until OpenAI announces something official. Matrix and ordered
+  work list: [ROADMAP.md](../ROADMAP.md) § 5. The pause on new providers does **not** block
+  this — it meant new *providers*, not new endpoints.
 - **Phase 3's video work shipped in v1.0.0.** The `VideoProvider` trait landed
   and video now has **three providers**: Veo, Runway (its own gen4 models only) and Kling
   (direct — all eight versions, three quality tiers). `--duration` answers the ROADMAP's open

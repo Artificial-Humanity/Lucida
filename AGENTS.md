@@ -37,6 +37,17 @@ current state of the project.
   `gh repo edit`, and nothing will remind you.
 * **Provenance:** hosted-provider output carries SynthID and/or C2PA marks; local ComfyUI is
   the only unmarked lane.
+* **Width is per-provider too** (owner, 2026-08-09). Lucida covers image generation *and*
+  video generation, and **each provider should be as completely represented as possible across
+  both**. A provider present for one medium and absent for the other is a coverage gap, not a
+  finished integration: as of v1.0.1, runway and kling are video-only here while both offer
+  image generation, and openai is image-only. The live matrix and the ordered work list are in
+  `ROADMAP.md` § 5. This widens providers that already exist, which is **not** what the
+  2026-08-09 pause on new providers covers — the owner clarified the pause meant new
+  *providers*, not new endpoints.
+
+  One caveat that section records and this rule does not override: **an API with a published
+  removal date is a countdown, not coverage.** OpenAI's Sora is the live case.
 * **Coverage is per-credential, not global** (owner, 2026-08-09). The point of many providers
   is not one entry per model family — it is that someone holding a *subset* of these
   subscriptions can use the **full width of what they pay for**. So "that model is reachable
