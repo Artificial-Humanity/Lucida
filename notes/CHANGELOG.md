@@ -20,7 +20,65 @@ for Lucida.
 
 ## Working section — unreleased
 
-_No entries yet. The next cycle opens with the first code commit after v0.9.2._
+### 2026-08-09 — the product review's second tranche, in progress
+
+Towards v0.10, "dependable unattended use". The review's **third and last structural finding
+closes here**. 178 tests, up from 163 at v0.9.2.
+
+#### Added
+
+- **`src/cancel.rs`** (`e52cbd5`) — a `Token` (an `Arc<AtomicBool>`), `with()` to install one
+  for the duration of a call, and `check()` for poll loops to call between sleeps. Ambient to
+  the thread rather than a parameter on `ImageProvider::generate`: threading it through the
+  trait would be paid for by five implementors, the CLI and every future provider to serve one
+  caller, and the CLI has a user with a Ctrl-C. Wired into the poll loops in `comfy.rs`,
+  `bfl.rs` and `video.rs`.
+- **A worker pool on the MCP server** (`e52cbd5`) — four workers, an `InFlight` registry keyed
+  by request id, a `Mutex`-guarded writer, and `guarded()` catching a panicking tool call.
+  `serve` splits into `run(reader, out, handle)` so the behaviour can be asserted.
+- **`Clients` in `src/setup.rs`** (`bda08fe`) — client presence as a parameter rather than a
+  probe, so `plan()` is testable in all four combinations.
+- **`Client::unique_upload_name`** (`bda08fe`) — pid + counter + clock, with the source
+  basename kept in the middle.
+- **`genai::mime_of`** (`e85f662`) — sniff first, extension only for what the sniffer does not
+  know (GIF), PNG as the last resort.
+- **A `verify` job in `release.yml` and an `audit` job in `ci.yml`** (`e85f662`).
+
+#### Fixed
+
+- **The MCP server no longer blocks its stdio loop for the whole render** (`e52cbd5`) — the
+  review's first structural finding. `dispatch` ran to completion before the next line was
+  read, so a ComfyUI render held the loop for up to 1800 s: `ping` went unanswered (read as a
+  dead server), a second call queued invisibly, and `notifications/cancelled` was unreachable
+  — it carries no id of its own, so the early return for id-less messages dropped the one
+  message whose purpose is stopping a paid render. Cancellation is cooperative and lands only
+  where there is a poll loop; a single blocking POST runs to completion, and the message says
+  the charge stands.
+- **Capabilities print without a credential** (`4751e9f`) — both `lucida models` and
+  `image_providers` opened a client first and returned before the table when one could not be
+  built, contradicting `capabilities_for`'s own doc comment. `ImageProvider::capabilities()` is
+  removed from the trait and all five implementors, since asking a *client* what its provider
+  supports is the coupling itself.
+- **ComfyUI upload collisions** (`bda08fe`) — two callers editing different files both named
+  `image.png` overwrote each other's upload between the upload and the render, silently, each
+  getting an edit of the other's picture.
+- **Provenance on CLI renders** (`bda08fe`) — reported by MCP on every render, by the CLI only
+  in `lucida models`.
+- **`lucida setup` named a skill file it never wrote** (`bda08fe`) — with the Claude app and no
+  Claude Code CLI, the skill step was never planned but the note telling you to upload it still
+  printed.
+- **Release tags could ship without the suite having run** (`e85f662`) — the three build jobs
+  smoke-tested their own binary; `cargo test` ran only on `main`. Also `--locked` everywhere,
+  `rust-version = "1.85"`, and the genai MIME guess replaced by `sniff_mime`.
+
+#### Changed
+
+- **Two bugs found by the new tests rather than by reading** (`e52cbd5`) — the worker loop was
+  written `while let Ok(job) = receiver.lock().unwrap().recv()`, which holds the scrutinee's
+  `MutexGuard` for the whole body, so four workers behaved exactly like one loop
+  (`tool_calls_run_concurrently_rather_than_queueing` failed with "only 1 of 4 calls ran at
+  once"); and a panicking tool call silently cost a worker, so after four the server would
+  accept calls and answer none while still passing `ping`.
 
 ---
 
