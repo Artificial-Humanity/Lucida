@@ -4,6 +4,26 @@ Generate and edit images and video — as a CLI, or as an MCP server so coding
 agents can make their own assets. Images come from Google Gemini, a local
 ComfyUI, hosted FLUX, Stability AI or OpenAI; video comes from Veo, Runway or Kling.
 
+## Contents
+
+- [Install](#install) · [Updating](#updating)
+- [Usage](#usage)
+- [Configuration](#configuration)
+  - [Every setting](#every-setting) — the complete list `config --set` writes
+  - [Where settings come from](#where-settings-come-from)
+- [Providers](#providers)
+- [Commands](#commands)
+  - [Configuration](#configuration-commands)
+  - [Generating and collecting renders](#generating-and-collecting-renders)
+  - [Geometry and output](#geometry-and-output)
+  - [Your own ComfyUI workflow](#your-own-comfyui-workflow)
+- [Use as an MCP server](#use-as-an-mcp-server)
+  - [Other clients](#other-clients) · [Tools](#tools) · [Scripting](#scripting)
+  - [Cost, budget and the ledger](#cost-budget-and-the-ledger)
+  - [The skill](#the-skill)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap) · [Licence](#licence)
+
 ## Install
 
 ```console
@@ -19,8 +39,10 @@ irm https://raw.githubusercontent.com/Artificial-Humanity/Lucida/main/install.ps
 That picks the binary for your platform, verifies its published checksum,
 installs it to `~/.local/bin` (or `%LOCALAPPDATA%\Programs\lucida`), and tells
 you if that directory is not on your PATH. `LUCIDA_INSTALL_DIR` chooses
-somewhere else; `LUCIDA_VERSION=v0.9.0` pins a version instead of taking the
-latest. Nothing needs a toolchain, and nothing needs sudo.
+somewhere else; `LUCIDA_VERSION=v0.10.0` pins a version instead of taking the
+latest. Both are read by the installer only — they are not Lucida settings and
+do not belong in the config file. Nothing needs a toolchain, and nothing needs
+sudo.
 
 Or download it first and read it:
 
@@ -147,24 +169,42 @@ $ lucida config --remove BFL_API_KEY    # clears it again
 $ lucida config                         # what this process sees, and from where
 ```
 
-| Variable | For |
-|---|---|
-| `GEMINI_API_KEY` | Google — images via Gemini, video via Veo. One key covers both |
-| `BFL_API_KEY` | Black Forest Labs — hosted FLUX |
-| `STABILITY_API_KEY` | Stability AI |
-| `OPENAI_API_KEY` | OpenAI |
-| `RUNWAY_API_KEY` | Runway — Gen-4 video |
-| `KLINGAI_API_KEY` | Kling — video. The single-key scheme, not a legacy AccessKey/SecretKey pair |
-| `LUCIDA_COMFYUI_URL` | Where ComfyUI is listening. Defaults to `http://127.0.0.1:8188`; no credential needed |
-| `LUCIDA_COMFYUI_AUTH` | ComfyUI credentials, if it is fenced. `user:password`, a complete `Bearer …` / `Basic …` header, or a bare token. Sent on every request including the image download |
-| `LUCIDA_COMFYUI_CA` | Path to a PEM certificate, to trust a private CA |
-| `LUCIDA_CONFIG` | Path to the config file, overriding where it is looked for |
-| `LUCIDA_NO_UPDATE_CHECK` | Set to silence the daily "a newer release exists" notice |
-| `LUCIDA_NO_LEDGER` | Set to stop recording renders. The ledger stores prompts; `lucida config` says where it lives |
-| `LUCIDA_BUDGET` | Dollars of estimated spend allowed in a rolling 24 hours. A render that would exceed it is refused before anything is sent |
+### Every setting
+
+The complete list. These are exactly the names `lucida config --set <NAME>`
+writes and `lucida config` reports — the table is checked against the same
+constant the binary reads, and a test fails the build if the two drift apart.
 
 You only need the ones for providers you actually use. Keys come from each
 provider's own dashboard.
+
+<!-- SETTINGS TABLE: checked against config::KNOWN_KEYS by a test. -->
+
+| `lucida config --set …` | Value | For |
+|---|---|---|
+| `GEMINI_API_KEY` | key | Google — images via Gemini, video via Veo. One key covers both. Image generation needs billing enabled on the project behind it; a free-tier key reports a quota of zero |
+| `BFL_API_KEY` | key | Black Forest Labs — hosted FLUX. Bills per image |
+| `STABILITY_API_KEY` | key | Stability AI developer platform |
+| `OPENAI_API_KEY` | key | OpenAI. Model access is granted per project |
+| `RUNWAY_API_KEY` | key | Runway — Gen-4 video. Runway's own docs call this `RUNWAYML_API_SECRET`; Lucida uses the house `<PROVIDER>_API_KEY` spelling |
+| `KLINGAI_API_KEY` | key | Kling — video. The single-key scheme, **not** a legacy AccessKey/SecretKey pair |
+| `LUCIDA_COMFYUI_URL` | URL | Where ComfyUI is listening. Defaults to `http://127.0.0.1:8188`; no credential needed |
+| `LUCIDA_COMFYUI_AUTH` | `user:password`, a complete `Bearer …` / `Basic …` header, or a bare token | ComfyUI credentials, if it is fenced. Sent on every request including the image download |
+| `LUCIDA_COMFYUI_CA` | path to a PEM file | Trust a private CA. Only needed for a genuinely private certificate — see [Troubleshooting](#troubleshooting) |
+| `LUCIDA_NO_UPDATE_CHECK` | any non-empty value | Silences the daily "a newer release exists" notice |
+| `LUCIDA_NO_LEDGER` | any non-empty value | Stops recording renders. The ledger stores your prompts; `lucida config` says where it lives either way |
+| `LUCIDA_BUDGET` | dollars, e.g. `25` | Estimated spend allowed in a rolling 24 hours. A render that would exceed it is refused before anything is sent |
+
+Two more names are recognised but are **not** config-file settings:
+
+| Variable | Why it is not in the table above |
+|---|---|
+| `LUCIDA_CONFIG` | Names the config file, so it cannot be a line inside it. Environment only, and it wins outright over every other location |
+| `GOOGLE_API_KEY` | **Retired.** Recognised only so `lucida config` can say what replaced it, and `--set` refuses it by name. Never used as a credential |
+
+`--set` will write a name outside that table rather than refusing it, but nothing
+reads it: `lucida config` lists any such line under *"in the config file but not
+recognised"*, so a typo is reported rather than silently obeyed.
 
 > **`GOOGLE_API_KEY` was renamed to `GEMINI_API_KEY`** and is no longer read.
 > Everything Lucida reaches on Google is the Gemini API — images and Veo alike —
@@ -173,6 +213,11 @@ provider's own dashboard.
 > config --remove GOOGLE_API_KEY` clears it from the file. Once `GEMINI_API_KEY`
 > is set the migration is done and nothing mentions the old name again, whether
 > or not a stale export is still lying around.
+
+### Where settings come from
+
+The four `lucida config` invocations are in the
+[configuration command table](#configuration-commands). What they do:
 
 **`lucida config`** prints whether each setting is present and where it came
 from — never a value — so its output is safe to paste into a bug report.
@@ -223,11 +268,22 @@ file it reads is readable by other users.
 
 ## Providers
 
-Five: `google`, `comfyui`, `bfl`, `stability` and `openai`.
+**Images:** `google`, `comfyui`, `bfl`, `stability`, `openai`.
+**Video:** `google` (Veo), `runway`, `kling`.
+
+They are separate sets, and `--provider` means the one belonging to the command
+you are running — `google` is Gemini under `generate` and Veo under `video`.
 
 The provider is inferred from the model id, so `--model klein` reaches ComfyUI
 and `--model banana` reaches Google. `--provider` overrides it and supplies that
-provider's default model, so `--provider comfyui` alone works.
+provider's default model, so `--provider comfyui` alone works. `lucida check`
+infers the provider from the shape of the operation id, so resuming a render
+needs nothing but the id.
+
+Providers exist so that a **subset** of subscriptions still buys the full width
+of what you pay for. Nothing here assumes you hold all of them: every command
+works with one key, `lucida models` says what that one key reaches, and a
+capability refusal names alternatives without requiring you to have them.
 
 They do not support the same things — seeds, negative prompts, masks, sampler
 settings and aspect ratios all vary, and on some providers they vary per model.
@@ -269,22 +325,38 @@ a ComfyUI in a container or on another machine works with no shared mount.
 
 ## Commands
 
+`--help` on any of them lists its options and notes which providers honour each.
+`--json` works on every one of them.
+
+<h3 id="configuration-commands">Configuration</h3>
+
+Everything that reads or writes a setting. `<NAME>` is one of the twelve in
+[Every setting](#every-setting).
+
 | Command | What it does |
 |---|---|
-| `lucida generate <prompt>` | Prompt to image. Writes `image.png` unless `--out` |
-| `lucida edit <image> <prompt>` | Edits an existing image. **Overwrites its input** unless `--out` |
-| `lucida video <prompt>` | Renders with Veo. Takes minutes, and bills per second of output. `--no-wait` prints the operation id and returns |
-| `lucida check <operation>` | Resumes a video render by operation id — after a timeout, an interruption, or from a different shell |
+| `lucida config` | Every setting, whether it is present, and which source it came from — never a value. Also prints the config file path, the ledger path, and any name in the file that Lucida does not read |
+| `lucida config --set <NAME>` | Writes one setting into the config file. Prompts with masked input at a terminal; reads stdin from a pipe, so the value never enters shell history. Refuses a retired name, naming its replacement |
+| `lucida config --remove <NAME>` | Deletes one setting from whichever file is in use. Says so if the same name is also in the environment, since that value is what applies afterwards |
+| `lucida config --init` | Writes a starter config file, mode 600, and prints its path. Never overwrites an existing one |
+
+<h3 id="generating-and-collecting-renders">Generating and collecting renders</h3>
+
+| Command | What it does |
+|---|---|
+| `lucida generate <prompt>` | Prompt to image. Writes `image.png` unless `--out`. `--count N` renders a batch; `--dry-run` prints the plan and its cost without sending anything |
+| `lucida edit <image> <prompt>` | Edits an existing image. **Overwrites its input** unless `--out`. `--mask` concentrates the change; what that guarantees differs per provider |
+| `lucida video <prompt>` | Renders with Veo, Runway or Kling. Takes minutes and bills per second, so `--duration` is the flag that decides the bill. `--no-wait` prints the operation id and returns; `--mode` picks a quality tier where the provider has one; `--image` animates a still |
+| `lucida check <operation>` | Resumes a video render by operation id — after a timeout, an interruption, or from a different shell. Infers the provider from the id |
 | `lucida ops` | Video renders started and never collected, each with the command that finishes it |
-| `lucida history` | Recent renders — prompt, provider, file, seed |
-| `lucida models` | What a provider can reach, and what it can be asked for |
-| `lucida config` | What settings this process can see |
-| `lucida setup` | Wires Lucida into Claude Code and the Claude app |
+| `lucida history` | Recent renders — prompt, provider, file, seed — and the running spend total. `-n` limits how many |
+| `lucida models` | What a provider can reach and what it can be asked for. Answers for video providers too, including remaining credits |
+| `lucida setup` | Wires Lucida into Claude Code and the Claude app. `--dry-run` stops after the plan |
 | `lucida skill` | Prints the agent skill, for a client's skills directory |
 | `lucida update` | Replaces this binary with the latest release; `--check` only reports |
 | `lucida mcp` | Runs as an MCP server over stdio |
 
-`--help` on any of them lists its options and notes which providers honour each.
+### Geometry and output
 
 **Geometry.** `--aspect` takes `W:H`; `--size` takes a tier (`1K`, `2K`, `4K`)
 or a pixel count for the long edge. Both are resolved onto whatever grid the
@@ -379,14 +451,18 @@ and `lucida skill` prints the skill for clients that support them. Deliberately
 no per-client instructions here: directory layouts are theirs to change, and a
 list of them would be stale before it was useful.
 
-Four tools are exposed:
+### Tools
+
+Six are exposed:
 
 | Tool | Purpose |
 |---|---|
 | `generate_image` | Prompt to image, or image editing via `reference_images` |
-| `image_providers` | Reports which providers are reachable and what each supports |
-| `start_video` | Begins a Veo render, returns an operation id immediately |
+| `image_providers` | Which image providers are reachable, and what each supports |
+| `video_providers` | The same for video, including remaining credits where a provider exposes a balance |
+| `start_video` | Begins a render on Veo, Runway or Kling; returns an operation id immediately |
 | `check_video` | Polls that operation; downloads it once finished |
+| `list_operations` | Every started render, so a lost operation id can be recovered instead of paid for twice |
 
 **The schema is deliberately generic, and `image_providers` is why.** Version
 0.1 advertised Google's aspect ratios and size tiers as hard enums. Those are
@@ -397,12 +473,12 @@ could be published. So parameter descriptions name which providers honour them,
 `image_providers` reports live capabilities on request, and a parameter the
 chosen provider cannot honour comes back as an error naming one that can.
 
-Video is split in two deliberately. A Veo render takes minutes — long enough
-that a single blocking call would likely hit the client's timeout and abandon a
-render you had already paid for. Starting and polling separately keeps every
-call fast, and because the operation id is just a string, a render started by an
-agent can be recovered from the shell with `lucida check <operation>` even if
-the agent session dies.
+Video is split in two deliberately. A render takes minutes — long enough that a
+single blocking call would likely hit the client's timeout and abandon a render
+you had already paid for. Starting and polling separately keeps every call fast,
+and because the operation id is just a string, a render started by an agent can
+be recovered from the shell with `lucida check <operation>` even if the agent
+session dies. `list_operations` is the same list, for when the id is gone.
 
 Failures come back as tool content rather than protocol errors, so the agent
 reads the message and adapts instead of the call simply dying.
@@ -413,6 +489,8 @@ Every probe is free by construction: a model list, a balance, or a render reques
 naming a model that cannot exist. A render that *succeeds* there is reported as a
 failure, since it would mean money was spent by a script whose whole contract is
 that it spends none.
+
+<h3 id="scripting">Scripting: <code>--json</code> and exit codes</h3>
 
 `--json` works on any subcommand and puts one object on stdout — including on
 failure, so a caller never has to switch parsers depending on the outcome. Human
@@ -431,6 +509,8 @@ do instead — so a wrapper that retries on 1 should not retry on 2. And `lucida
 check` used to report "still rendering" with the same 0 as "finished and
 written", which a polling script cannot tell apart.
 
+### Cost, budget and the ledger
+
 Every render says what it is expected to cost, before it happens and again
 afterwards, and `LUCIDA_BUDGET` turns that into a cap: a render that would take
 the last 24 hours past it is refused before anything is sent, in the same voice
@@ -439,6 +519,12 @@ Prices are estimates from published rates, each carrying the date it was checked
 — a provider whose rate is not verified here is counted at a stated upper bound
 rather than guessed at, and the provider's own invoice is always the authority.
 `lucida history` shows the running total.
+
+**`--dry-run` answers "what would you send?" without sending it** — the resolved
+provider and model, every parameter, and the estimated cost. It runs after every
+capability and budget check, so a refusal still refuses and still exits 2: it is
+a rehearsal rather than a cheaper path that happens to be free. Use it before a
+batch or a long clip, where the number you are choosing is the bill.
 
 Every render is written to a ledger — one JSON object per line, beside the config
 file — so a render that has been paid for can be found again afterwards. That is
@@ -522,7 +608,11 @@ its host's quirks — on ROCm, for instance, ComfyUI needs `--disable-mmap` or
 diffusion models hang on load rather than failing.
 
 **The written file has a different extension than requested.** Intended — see
-[Commands](#commands).
+[Geometry and output](#geometry-and-output).
+
+**`lucida config` says a setting is "not recognised".** That name is not one
+Lucida reads — check it against [Every setting](#every-setting). The message is
+the only report you get, since a name nothing reads cannot fail any other way.
 
 ## Roadmap
 

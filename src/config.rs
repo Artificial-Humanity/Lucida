@@ -62,6 +62,22 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
         "LUCIDA_NO_LEDGER",
         "Set to stop recording renders (the ledger stores your prompts)",
     ),
+    // Missing from this list until 2026-08-09, and it was the worst omission to
+    // have: `spend::budget` reads it through `var` like everything else, so a
+    // budget set in the config file was fully enforced — while `lucida config`
+    // filed it under "in the config file but not recognised (ignored — check the
+    // spelling)". The one command whose job is to say what is in effect said the
+    // spending cap was not.
+    //
+    // Which way that misleads is what makes it worth a comment. Someone who
+    // believes the message concludes they have no cap and behaves accordingly,
+    // or deletes a line that was protecting them. `every_setting_read_is_a_known_key`
+    // now derives this list's completeness from the source rather than from
+    // whoever remembers to update both places.
+    (
+        "LUCIDA_BUDGET",
+        "Dollars of estimated spend allowed per rolling 24 hours",
+    ),
 ];
 
 /// Names Lucida used to read and no longer does, with what replaced each.
@@ -480,6 +496,131 @@ mod tests {
             assert!(
                 !KNOWN_KEYS.iter().any(|(known, _)| known == retired),
                 "{retired} is both retired and current"
+            );
+        }
+    }
+
+    /// The README's settings table must list every setting, and no others.
+    ///
+    /// It claims to be exhaustive, which is a claim worth enforcing rather than
+    /// making: `README.md` is one of the drift surfaces AGENTS.md names, it is
+    /// the first thing anyone reads, and its previous table both omitted a
+    /// setting that existed and listed `LUCIDA_CONFIG` among names you can
+    /// `--set` — which you cannot, since it names the file the settings live in.
+    ///
+    /// Checked in both directions. A missing row is a setting nobody knows
+    /// about; a surplus row is a setting that does not exist, which costs
+    /// somebody an afternoon.
+    #[test]
+    fn the_readme_lists_every_setting() {
+        let readme = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("README.md must exist");
+
+        // The one table between the marker and the paragraph after it — scoped
+        // so a name merely *mentioned* in prose elsewhere does not count as
+        // documented, and so the environment-only table below it does not.
+        let marker = "<!-- SETTINGS TABLE:";
+        let start = readme.find(marker).expect(
+            "the settings table has lost its marker comment, so this test is \
+             no longer checking anything",
+        );
+        // Collected row by row rather than by slicing to the next blank line:
+        // the marker is separated from its table by one, so slicing that way
+        // captured nothing at all and the test passed by checking an empty
+        // string. Taking the rows themselves cannot fail that way.
+        let table: String = readme[start..]
+            .lines()
+            .skip_while(|line| !line.starts_with('|'))
+            .take_while(|line| line.starts_with('|'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for (key, _) in KNOWN_KEYS {
+            assert!(
+                table.contains(&format!("`{key}`")),
+                "{key} is a real setting and the README's table does not list it"
+            );
+        }
+
+        // And nothing in the table that is not a setting. Every row names its
+        // key first in backticks. Rows only, so the header — which is itself in
+        // backticks, being `lucida config --set …` — is not read as a name.
+        let rows = table
+            .lines()
+            .skip_while(|line| !line.starts_with("|---"))
+            .skip(1);
+
+        for line in rows.filter(|l| l.starts_with("| `")) {
+            let name = line
+                .trim_start_matches("| `")
+                .split('`')
+                .next()
+                .unwrap_or_default();
+            assert!(
+                KNOWN_KEYS.iter().any(|(known, _)| *known == name),
+                "the README's settings table lists `{name}`, which Lucida does not read"
+            );
+        }
+    }
+
+    /// Anything read through [`var`] must appear in [`KNOWN_KEYS`].
+    ///
+    /// `KNOWN_KEYS` is not documentation — it is what `lucida config` reports,
+    /// what `--init` writes into the template, and what `--set` will accept. A
+    /// setting missing from it is read normally and reported as **"ignored —
+    /// check the spelling"**, which is a lie in the most damaging direction: it
+    /// says a setting that is in force is not. `LUCIDA_BUDGET` sat that way from
+    /// the day the budget guard shipped, so someone could set a spending cap,
+    /// have it enforced, and be told it did nothing.
+    ///
+    /// Scanned from the sources rather than listed here, so a new setting is
+    /// covered the moment it is read — a second hand-written list would only
+    /// move the problem. Directory-walked rather than `include_str!`ed for the
+    /// same reason: a new module joins without anyone remembering to add it.
+    #[test]
+    fn every_setting_read_is_a_known_key() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut checked: Vec<String> = Vec::new();
+
+        for entry in std::fs::read_dir(&src).expect("src/ must be readable") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).unwrap();
+
+            // A qualified call with a literal name. Call sites passing a
+            // constant instead — `update::OPT_OUT` — are not matched and do not
+            // need to be: a constant is already a single definition, which is
+            // the property being enforced here.
+            let call = concat!("config::", "var(\"");
+            for (offset, _) in body.match_indices(call) {
+                let rest = &body[offset + call.len()..];
+                let name = &rest[..rest.find('"').expect("an unterminated string literal")];
+                checked.push(name.to_string());
+
+                assert!(
+                    KNOWN_KEYS.iter().any(|(known, _)| *known == name),
+                    "{}: `{name}` is read but missing from KNOWN_KEYS, so `lucida config` \
+                     reports it as ignored while Lucida acts on it",
+                    path.file_name().unwrap().to_string_lossy()
+                );
+            }
+        }
+
+        // The scan has to actually be finding call sites, or this test passes by
+        // matching nothing at all — which is how it would behave the day someone
+        // renames `var` or qualifies it differently. Two settings read from two
+        // different modules, so a change that breaks the scan cannot look like a
+        // change that merely moved one caller.
+        for expected in ["GEMINI_API_KEY", "LUCIDA_BUDGET"] {
+            assert!(
+                checked.iter().any(|name| name == expected),
+                "the scan found {} call sites and none of them was {expected} — \
+                 it has stopped matching how settings are read",
+                checked.len()
             );
         }
     }

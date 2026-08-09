@@ -196,7 +196,8 @@ enum Command {
         opts: ImageOptions,
     },
 
-    /// Generate a video with Veo. Renders take minutes and bill per second.
+    /// Generate a video with Veo, Runway or Kling. Renders take minutes and
+    /// bill per second.
     Video {
         /// What to film
         prompt: String,
@@ -291,7 +292,8 @@ enum Command {
         count: usize,
     },
 
-    /// List the image models a provider can reach, and what it can be asked for
+    /// List the models a provider can reach, and what it can be asked for.
+    /// Answers for the video providers too, including remaining credits
     Models {
         /// Which provider to interrogate: google, comfyui, bfl, stability or openai
         #[arg(short, long, default_value = "google")]
@@ -1898,6 +1900,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every `](#anchor)` in the README points at a heading that exists.
+    ///
+    /// The table of contents is a hand-maintained index of a document that gets
+    /// edited, which is the shape every stale thing in this repository has had.
+    /// A broken anchor is silent on GitHub — the link simply does nothing — so
+    /// nothing but a check would report it.
+    ///
+    /// Implements GitHub's slug rule: lowercase, drop everything that is not
+    /// alphanumeric, space or hyphen, then spaces to hyphens. Headings written
+    /// as raw `<h3 id="…">` supply their own, which is why the two ambiguous
+    /// ones ("Configuration" appears twice) are spelled that way.
+    #[test]
+    fn every_readme_link_points_at_a_heading_that_exists() {
+        let readme =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+                .expect("README.md must exist");
+
+        let slug = |heading: &str| -> String {
+            let mut text = heading.to_string();
+            // Inline code and links contribute their text, not their markup.
+            text = text.replace('`', "");
+            while let (Some(open), Some(close)) = (text.find("]("), text.find(')')) {
+                if open < close {
+                    text.replace_range(open..=close, "");
+                } else {
+                    break;
+                }
+            }
+            text.replace('[', "")
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                .collect::<String>()
+                .trim()
+                .replace(' ', "-")
+        };
+
+        let mut anchors: Vec<String> = Vec::new();
+        for line in readme.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix('#') {
+                let heading = rest.trim_start_matches('#').trim();
+                if !heading.is_empty() {
+                    anchors.push(slug(heading));
+                }
+            }
+            // An explicit id wins, and is how a duplicate heading name is made
+            // linkable at all.
+            if let Some(at) = line.find("<h")
+                && let Some(start) = line[at..].find("id=\"")
+            {
+                let rest = &line[at + start + 4..];
+                anchors.push(rest[..rest.find('"').unwrap()].to_string());
+            }
+        }
+
+        let mut links = 0;
+        for (offset, _) in readme.match_indices("](#") {
+            let rest = &readme[offset + 3..];
+            let target = &rest[..rest.find(')').expect("an unterminated link")];
+            links += 1;
+
+            assert!(
+                anchors.contains(&target.to_string()),
+                "README links to #{target}, which is not a heading in it.\n\
+                 headings are: {anchors:?}"
+            );
+        }
+
+        // The scan has to have found the links, or an empty README would pass.
+        assert!(links > 10, "only {links} internal links found — the scan broke");
     }
 
     /// The property that matters — an interrupted write leaving the previous
