@@ -31,6 +31,21 @@ current state of the project.
   `gh repo edit`, and nothing will remind you.
 * **Provenance:** hosted-provider output carries SynthID and/or C2PA marks; local ComfyUI is
   the only unmarked lane.
+* **Coverage is per-credential, not global** (owner, 2026-08-09). The point of many providers
+  is not one entry per model family — it is that someone holding a *subset* of these
+  subscriptions can use the **full width of what they pay for**. So "that model is reachable
+  another way" is never on its own a reason to leave a lane unexposed: it is a fact about
+  whichever keyring the decision was made on, and a user with only a Runway or only a fal
+  subscription has a different one. This overturns the argument used on 2026-08-09 to restrict
+  Runway to its own `gen4` models and to decline fal — an argument that reasoned from a
+  machine holding every direct key.
+
+  What it does **not** overturn is why aggregated lanes are harder: capabilities are not
+  knowable per model, provenance passthrough is undocumented, and pricing carries a margin.
+  The answer to those is honest labelling rather than exclusion, and the vocabulary already
+  exists — `Provenance::Unverified` says nobody has checked, `Price::Unverified` says the rate
+  is not confirmed. An aggregated model may ship carrying weaker claims, provided the claims
+  it carries are true.
 * **Verification trio:** `cargo test`, `cargo clippy --all-targets` (kept warning-free so
   the next warning is visible), and `scripts/smoke.sh` — all three green before tagging a
   release. A release ships three platform assets with checksums (macOS universal, Linux

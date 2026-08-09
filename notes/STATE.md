@@ -69,7 +69,14 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   and video now has **three providers**: Veo, Runway (its own gen4 models only) and Kling
   (direct — all eight versions, three quality tiers). `--duration` answers the ROADMAP's open
   question: 8 s is **not** a hard limit, Veo does 4, 6 and 8. 220 tests.
-- **Aggregators remain declined, twice reaffirmed.** Runway's fronted catalogue (Kling, Veo,
+- **The aggregator decisions below are SUPERSEDED in principle** (owner, 2026-08-09, after
+  they were made): coverage is per-credential, not global — see AGENTS.md. A user holding only
+  a Runway or only a fal subscription should be able to use its full width, so "reachable
+  another way" is not a reason to exclude a lane. Restricting Runway to `gen4` and declining
+  fal both rest on an argument that reasoned from a keyring holding every direct key. **Not
+  yet acted on** — owner 2026-08-09: no further providers for the time being — but the next
+  session should treat the exclusions as open questions rather than settled ones.
+- **Aggregators are declined as built, for now.** Runway's fronted catalogue (Kling, Veo,
   Seedance, Hailuo, Grok, Gemini) was excluded by the owner on 2026-08-09; fal.ai was probed
   and declined the same day, because the models it fronts that we want — Kling, Veo, FLUX —
   are all now reached *directly*, so it would only add a worse second path to lanes we own.
