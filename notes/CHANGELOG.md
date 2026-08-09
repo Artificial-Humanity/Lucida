@@ -20,7 +20,67 @@ for Lucida.
 
 ## Working section — unreleased
 
-_No entries yet. The next cycle opens with the first code commit after v0.10.0._
+### 2026-08-09 — Phase 3: video becomes a substitution
+
+The product review's expansion axis #1, and the first work since v0.10.0. Video went from one
+hardcoded lane to three providers behind a trait. 220 tests, up from 201 at v0.10.0.
+
+#### Added
+
+- **`VideoProvider`, `VideoBackend`, `VideoCapabilities`, `DurationSupport`** (`294ddcd`) —
+  the video twin of the image abstraction: `start`/`poll`, `VideoBackend::ALL`,
+  `video_capabilities_for`, and a `check` that refuses before a client exists.
+  `VideoCapabilities` is deliberately *not* a reuse of `Capabilities` — no mask, no steps, no
+  guidance, and a duration images have no concept of, so sharing one struct would mean half
+  the fields being meaningless per request.
+- **`src/runway.rs` — Gen-4 video** (`294ddcd`) — Runway's own `gen4_turbo`/`gen4`/`gen4.5`
+  **only**. Its endpoint also fronts Kling, Veo, Seedance, Hailuo, Grok and Gemini, which
+  would make Lucida an aggregator front-end; `veo3.1` there is a second, worse path to a lane
+  already reached directly. Owner's call 2026-08-09, pinned by a test.
+- **`src/kling.rs` — Kling, direct** (`d37737c`) — all eight model versions and three quality
+  tiers, measured rather than assumed (8 models × 5 ratios × 3 tiers, uniform). Reached on
+  Kling's own API, deliberately not through Runway's passthrough.
+- **`--duration`, `--seed`, `--mode`, `--provider` on `video` and `check`** (`294ddcd`,
+  `d37737c`) — `--duration` answers the ROADMAP's open "is 8 s a hard limit?" with a no: Veo
+  does 4, 6 and 8. `mode` is a quality tier, a concept only Kling has.
+- **`lucida models --provider <video>`** (`294ddcd`, `d37737c`) — live credit balances for
+  Runway and Kling, and the capability table whether or not a key is present.
+
+#### Changed
+
+- **The MCP video schema is generated from `VideoBackend::ALL`** (`294ddcd`) — it said
+  "Google only" and "output carries a SynthID watermark and a C2PA manifest", both false the
+  instant a second provider landed.
+- **The blocking wait loop moves out of Veo into one shared helper** (`294ddcd`) — waiting is
+  a front-end decision, not a provider one, so both lanes get the same backoff, deadline and
+  cancellation check rather than each reinventing them.
+- **Per-second pricing multiplies by clip length** (`294ddcd`) — a rate without a duration is
+  not a price, and a 2-second test is not a 10-second render.
+- **`RUNWAYML_API_SECRET` → `RUNWAY_API_KEY`** (`d37737c`) — owner's call: every other
+  credential is `<PROVIDER>_API_KEY`, and house consistency across seven keys beats matching
+  one vendor's spelling. No retirement entry owed; Runway never appeared in a release.
+
+#### Fixed
+
+- **`--provider <video>` with no model sent Veo's model id to the other provider**
+  (`d37737c`) — a clap `default_value` made "unspecified" indistinguishable from "explicitly
+  the Veo default". `ImageOptions::into_request` had already solved this for images and says
+  so in a comment; video repeated the mistake anyway. Two tests pin it.
+- **Kling answers 200 with a non-zero `code` for some refusals** (`d37737c`) — checking
+  `is_success()` alone read a refusal as a submission and returned a task id that did not
+  exist.
+- **`lucida models` marked the default model per-provider** (`ef9fb14`, carried from v0.10.0
+  work) — now generated for video providers too.
+
+#### Deliberately not built
+
+- **fal.ai.** Probed and declined 2026-08-09. It is the aggregator the product review named,
+  and it fronts Kling, Veo and FLUX — all three of which Lucida now reaches *directly*, so it
+  would add a worse second path to lanes we already own. Two operational facts recorded for
+  whoever revisits this: fal authenticates with `Authorization: Key`, not `Bearer`; and it
+  accepts a request into its queue **without validating**, failing at execution instead — so
+  AGENTS.md §2's free-validation-error probe, which is how every provider here was
+  characterised safely, does not work against it.
 
 ---
 
