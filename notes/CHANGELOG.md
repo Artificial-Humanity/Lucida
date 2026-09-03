@@ -20,6 +20,15 @@ for Lucida.
 
 ## Working section — unreleased
 
+#### Changed
+- **`.github/workflows/claude-review.yml`, `claude-fix.yml` — Janis and Quincy run Fable 5.1 at
+  high** (`5b86336`). Both agents move from `claude-opus-5` to `claude-fable-5-1`, and `--effort
+  high` is passed explicitly (owner, 2026-09-02), matching the reviewer's setting in the Sonora
+  lane. The action forwards `claude_args` to the CLI unchanged and the CLI accepts `--effort`,
+  but the action's own docs do not list it; the workflow comment names that line as the
+  suspect if a run ever fails on an unknown flag.
+
+
 #### Added
 - **`.github/workflows/claude-fix.yml` — the review loop is closed** (`11574ca`). The reviewer only
   ever commented; nothing acted on those comments. Adding the `claude-fix` label to a PR now runs
