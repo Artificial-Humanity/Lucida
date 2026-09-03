@@ -21,6 +21,10 @@ for Lucida.
 ## Working section — unreleased
 
 #### Changed
+- **`claude-review.yml` — Janis runs at medium effort** (`93b61b0`). Lowered from high (owner,
+  2026-09-03) after a sibling deployment measured token usage at high as too costly for a
+  one-shot review. The fixer stays at high, and its comment no longer claims to match the
+  reviewer.
 - **`.github/workflows/claude-review.yml`, `claude-fix.yml` — Janis and Quincy run Fable 5.1 at
   high** (`5b86336`). Both agents move from `claude-opus-5` to `claude-fable-5-1`, and `--effort
   high` is passed explicitly (owner, 2026-09-02), matching the reviewer's setting in the Sonora
