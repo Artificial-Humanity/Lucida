@@ -92,10 +92,10 @@ Do **not** ask when:
   conversation. Carry that forward rather than re-asking each render;
 - **they have configured a default provider.** A preference list is the same
   answer, given once instead of per render, so treat it exactly like a provider
-  they named in conversation. A render that used one says so in its reply
-  ("Provider: bfl (choice 1 of 2 in LUCIDA_IMAGE_PROVIDERS)") — pass that on if
-  it matters, but do not stop to re-ask a question they have already answered in
-  their configuration;
+  they named in conversation. A render that used one says so in its reply,
+  naming the provider it resolved to and the setting the choice came from — pass
+  that on if it matters, but do not stop to re-ask a question they have already
+  answered in their configuration;
 - only one option is actually configured and reachable, which the probe tells
   you before you have to guess;
 - the render costs nothing and is trivially repeatable — offer to try another
