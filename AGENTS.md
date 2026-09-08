@@ -114,40 +114,11 @@ case-insensitive macOS/Windows.
 
 ## System Operational Mandates
 
-### 1. Commit Hygiene
-
-* **`main` is PR-only. Do not push to it directly** (owner, 2026-08-10). Branch, push the
-  branch, open a PR, and let it merge. This applies to agent sessions exactly as it applies to
-  the owner — an agent that "just needs one small fix on `main`" is the case the rule exists
-  for. Two reasons it is a rule and not a preference:
-  * **The Mac and `ai-lab-0` (and their agent sessions) commit concurrently.** Direct pushes to
-    a shared `main` are how two sessions silently interleave half-finished work; a branch is a
-    place for work to be incomplete without being everyone's problem.
-  * **Nothing reviews a direct push.** Review happens on a change that has been *proposed*.
-    Work that skips the PR skips review entirely, because a commit that was never proposed
-    is not something any reviewer — human or agent — is ever shown.
-* **Branch naming**: `<type>/<short-slug>` matching the commit type — `fix/`, `feat/`,
-  `docs/`, `chore/`.
-* **Work on the branch, commit and push liberally, open the PR only when the work is done**
-  (owner, 2026-08-10). Pushing to your own branch is free and is the entire point of having
-  one: commit early, commit often, push whenever, and let the branch hold work that is not
-  yet finished. What is deliberate is the *timing of the PR*, not the timing of the commits.
-  * **When completion is defined, completion opens the PR.** If a `/goal` has been set,
-    achieving that goal IS the completion point — open the PR then, without being asked again.
-  * **Otherwise the owner calls it.** With no goal set, work, push, and wait: the owner
-    acknowledges the completion point and the PR follows from that.
-* **Pull before push, every time.** Run `git pull --rebase` as the first step of any
-  commit-and-push sequence on your branch, and rebase on `main` before opening the PR. If the
-  tree holds the owner's uncommitted local edits, fetch and check ahead/behind instead of
-  forcing a rebase.
-* **The exception is the owner's, not yours.** If the owner explicitly directs a direct push to
-  `main`, that is their call and does not need re-litigating — state the rule once, then do as
-  asked. An agent never grants itself the exception.
-* ⚠ **A rule in this file is not an enforcement mechanism.** The authority is the branch
-  protection on `main`; this section only explains it. If a direct push to `main` ever
-  *succeeds*, the protection is missing or was bypassed — report that rather than treating it
-  as permission.
-
+⚠ **There is no prescribed workflow here** (owner, 2026-09-08). The commit-hygiene
+section that stood at §1 is gone, and nothing replaces it. The number below is left at
+**2** deliberately: `docs/ROADMAP.md`, `docs/STATE.md` and the internal review documents
+all cite "AGENTS.md §2", so the number is an identifier those citations depend on rather
+than a position in a list. Renumbering it would silently falsify every one of them.
 
 ### 2. Paid-API Spend Discipline
 
