@@ -1,10 +1,11 @@
 # Project State — Lucida
 
-_Last updated: 2026-08-09._
+_State below last reviewed 2026-08-09. Document moved into `docs/` and its pointers
+rewritten 2026-09-08; no state claim was changed._
 
 The current-state snapshot. Behavioral rules and the stack manifest live in
 [AGENTS.md](../AGENTS.md); the release plan and its stated limits live in
-[ROADMAP.md](../ROADMAP.md).
+[ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -29,7 +30,7 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   **Publishing needs the owner's token** (`cargo login`) and is not something an agent should
   hold.
 - **v0.10.0 (2026-08-09)** — *dependable unattended use*, the second
-  tranche of the [2026-08-09 product review](product-review-20260809.md). **All three of the
+  tranche of the 2026-08-09 product review, an internal document. **All three of the
   review's structural findings are now closed.** The MCP server dispatches tool calls on a
   pool of four and answers `ping`/`tools/list` from the reading thread, so a long render no
   longer makes it deaf; `notifications/cancelled` is honoured, having been *unreachable*
@@ -46,7 +47,7 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   image writes, self-dating shutdown notices, and a description that matches the tool.
 - **v0.9.1 (2026-08-07)** was the 2026-08-06 code review, closed, and nothing else: no new
   capability, one structural change (mask semantics became a value) and a set of fixes. It is
-  the first release the changelog covers.
+  the first release the changelog covered, before that document was retired.
 - **v0.9.0 (2026-08-03) closed the v0.6.0 → v0.9.0 run** (17 commits, through `f5ecf17`):
   self-update, one-line install on all three platforms, `lucida setup` wiring itself into
   Claude, the binary carrying its own skill, a **binding** mask on the local lane,
@@ -59,8 +60,8 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   and they are the history the deleted release notes used to carry. CI is unaffected: its
   pinned-version check derives the second-newest non-draft release (`05e9aac`) rather than
   hardcoding one, and now resolves v0.9.0. GitHub destroys a release's download counters with
-  the release, so they were captured first:
-  [release-downloads-at-prune-20260807.md](release-downloads-at-prune-20260807.md).
+  the release, so they were captured first, into an internal document kept outside this
+  repository.
 - **Five image providers + Veo video, all verified live** (google, comfyui, bfl, stability,
   openai). Wire behaviour is pinned by the recorded-response tests; as of 2026-08-09:
   **255 tests** passing (163 at v0.9.2), clippy clean at `-D warnings`, all smoke checks green
@@ -111,11 +112,11 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   which is the trap that cost 6 units. **Sora is a countdown, not coverage:** `sora-2` and
   `sora-2-pro` list live, but the Videos API is **removed 2026-09-24, no successor named**, so
   the owner's leaning is to punt until OpenAI announces something official. Matrix and ordered
-  work list: [ROADMAP.md](../ROADMAP.md) § 5. The pause on new providers does **not** block
+  work list: [ROADMAP.md](ROADMAP.md) § 5. The pause on new providers does **not** block
   this — it meant new *providers*, not new endpoints.
 - **Open question, parked deliberately (owner, 2026-08-09):** *defaults*. Can the experience
   be streamlined by mapping them — from a simple default provider up to per-medium,
-  per-provider, per-model? [ROADMAP.md](../ROADMAP.md) § 6 frames it rather than answering it.
+  per-provider, per-model? [ROADMAP.md](ROADMAP.md) § 6 frames it rather than answering it.
   The load-bearing point: **defaults already exist, they are just not the user's** (google is
   the fall-through in `infer_backend`, and each provider has a hardcoded `default_model`), so
   the question is whose defaults and where they are stated. Two constraints any design must
@@ -137,7 +138,7 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   Seedance, Hailuo, Grok, Gemini) was excluded by the owner on 2026-08-09; fal.ai was probed
   and declined the same day, because the models it fronts that we want — Kling, Veo, FLUX —
   are all now reached *directly*, so it would only add a worse second path to lanes we own.
-  Two facts about fal are in the changelog for whoever revisits it: it authenticates with
+  Two facts about fal are worth keeping for whoever revisits it: it authenticates with
   `Authorization: Key` rather than `Bearer`, and it queues a request **without validating**,
   so AGENTS.md §2's free-validation-error probe — how every provider here was characterised
   safely — does not work against it.
@@ -151,19 +152,15 @@ The current-state snapshot. Behavioral rules and the stack manifest live in
   A **boundary, not a rejection**: the likely home is a separate tool, because the coverage
   principle applied to audio means ElevenLabs and its peers — a provider portfolio the size of
   Lucida's, wanting a vocabulary of voices and takes rather than aspect ratios and masks.
-  Reasoning in [ROADMAP.md](../ROADMAP.md) § "Audio — out of scope"; reopen as its own
+  Reasoning in [ROADMAP.md](ROADMAP.md) § "Audio — out of scope"; reopen as its own
   project, not as a Lucida phase.
 
 ## Pointers
 
-- Change history — [CHANGELOG.md](CHANGELOG.md) (maintained per AGENTS.md §3 since
-  2026-08-06; v0.9.1 is the first version it covers). History before that is **`git log` and
-  the thirteen tags** — the release notes below v0.9.0 were destroyed by the 2026-08-07 prune,
-  so the tags are now the only pointer into that range.
-- Download counts destroyed by the prune —
-  [release-downloads-at-prune-20260807.md](release-downloads-at-prune-20260807.md)
-- Latest code review — [code-review-20260806-151318.md](code-review-20260806-151318.md)
-  (records the evaluated range; the next review resumes at its end SHA per AGENTS.md §4)
-- Latest product review — [product-review-20260809.md](product-review-20260809.md). Not part
-  of the §4 cycle and it moves no pointer; it is the plan of record for v0.9.2 onward, and
-  each finding it lists is closed by its own commit.
+- Change history is **`git log` and the thirteen tags**. The maintained changelog and the
+  changelog-and-review cycle that produced it were both retired on 2026-09-08; the file
+  itself remains in this repository's git history. Below v0.9.0 the release notes were
+  destroyed by the 2026-08-07 prune, so for that range the tags are the only pointer.
+- The 2026-08-06 code review, the 2026-08-09 product review and the download counts
+  captured before the prune are **internal working documents**. They are kept outside this
+  public repository and so are deliberately not linked from here.

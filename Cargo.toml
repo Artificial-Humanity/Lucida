@@ -30,14 +30,13 @@ categories = ["command-line-utilities", "multimedia::images", "multimedia::video
 #
 # `video.mp4` is a 4.9 MB test render committed by accident in `d37737c` — it has
 # nothing to do with building Lucida, and a tenth of the package would have been
-# a video of fog. The notes are this project's internal working documents:
-# CHANGELOG earns its place in a package, a product review does not.
+# a video of fog.
+#
+# Four `notes/` patterns stood here until 2026-09-08. They went when `notes/` left
+# the repository for a private one: a pattern that cannot match anything reads as a
+# rule still doing work. `docs/` is the public documentation surface and ships.
 exclude = [
     "video.mp4",
-    "notes/product-review-*.md",
-    "notes/code-review-*.md",
-    "notes/release-downloads-*.md",
-    "notes/STATE.md",
 ]
 
 [dependencies]
