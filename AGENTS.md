@@ -2,9 +2,10 @@
 
 This is the entry point for any agent or developer working on Lucida (media generation —
 images and video — as a CLI and as an MCP server). This is an independent GitHub repo.
-Public documentation — the current state and the roadmap — lives in [docs/](docs/).
-Before starting work, read [docs/STATE.md](docs/STATE.md) for the current state of the
-project.
+Public documentation lives in [docs/](docs/), which holds the roadmap. The current-state
+snapshot is `STATE.md` in this project's **private** working notes, reachable in a checkout
+of the umbrella workspace at `notes/STATE.md` (a gitignored symlink) and deliberately not
+published — so it is named here rather than linked. Read it before starting work.
 
 ---
 
@@ -105,7 +106,7 @@ Names must be predictable so links resolve on case-sensitive systems (Linux/CI) 
 case-insensitive macOS/Windows.
 
 * **Canonical root marker files → `UPPERCASE`** (`SCREAMING_SNAKE_CASE` if multi-word): `README.md`, `LICENSE`, `CONTRIBUTING.md`, `AGENTS.md`. Keep this set small and curated.
-* **Anchor docs in `docs/` → `UPPERCASE`, single word preferred:** `ROADMAP.md`, `STATE.md`, `ARCHITECTURE.md`.
+* **Anchor docs in `docs/` → `UPPERCASE`, single word preferred:** `ROADMAP.md`, `ARCHITECTURE.md`.
 * **All other documents → `lowercase-kebab-case.md`:** e.g. `open-decisions.md`. This is the rule for anything in `docs/` that is not one of the anchors above.
 * **Source code → the language's own convention:** Rust `snake_case.rs`, Swift `PascalCase.swift`, Kotlin `PascalCase.kt`.
 * **Never** let case be the only difference between two paths, and always reference files with their exact case.
@@ -116,9 +117,11 @@ case-insensitive macOS/Windows.
 
 ⚠ **There is no prescribed workflow here** (owner, 2026-09-08). The commit-hygiene
 section that stood at §1 is gone, and nothing replaces it. The number below is left at
-**2** deliberately: `docs/ROADMAP.md`, `docs/STATE.md` and the internal review documents
-all cite "AGENTS.md §2", so the number is an identifier those citations depend on rather
-than a position in a list. Renumbering it would silently falsify every one of them.
+**2** deliberately: `docs/ROADMAP.md` and three internal documents — the state snapshot,
+the code review and the product review — all cite "AGENTS.md §2", so the number is an
+identifier those citations depend on rather than a position in a list. Renumbering it
+would silently falsify every one of them, including the ones outside this repo where
+nothing here can check them.
 
 ### 2. Paid-API Spend Discipline
 
