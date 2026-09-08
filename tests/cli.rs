@@ -746,3 +746,130 @@ fn the_smoke_script_delegates_here_rather_than_asserting_twice() {
         "smoke.sh runs the tests without pointing them at the artifact it was given"
     );
 }
+
+// --- default provider preference -------------------------------------------
+//
+// These are process tests rather than unit tests because the thing under test
+// is a *process* fact: a setting resolved from the environment or a config
+// file, on a run that named neither provider nor model. `env_clear` and a
+// private HOME are exactly the conditions that make the question meaningful —
+// a stray key on the developer's machine would otherwise decide the answer.
+
+#[test]
+fn a_preference_picks_the_first_provider_you_hold_a_key_for() {
+    let sandbox = Sandbox::new("pref-first");
+    let out = run(lucida(&sandbox)
+        .env("BFL_API_KEY", "k")
+        .env("LUCIDA_IMAGE_PROVIDERS", "bfl,google")
+        .args(["generate", "x", "--dry-run", "--json"]));
+
+    out.exits(0)
+        .says("\"provider\":\"bfl\"")
+        .says("\"provider_source\":\"LUCIDA_IMAGE_PROVIDERS\"");
+}
+
+#[test]
+fn a_preference_skips_the_providers_you_have_no_key_for() {
+    let sandbox = Sandbox::new("pref-skip");
+    let out = run(lucida(&sandbox)
+        .env("BFL_API_KEY", "k")
+        .env("LUCIDA_IMAGE_PROVIDERS", "openai,stability,bfl")
+        .args(["generate", "x", "--dry-run", "--json"]));
+
+    // Third in the list, and it says so: the position is the evidence that the
+    // first two were considered and passed over rather than never read.
+    out.exits(0)
+        .says("\"provider\":\"bfl\"")
+        .says("choice 3 of 3");
+}
+
+/// The rule the whole design turns on, pinned so it cannot be relaxed quietly.
+///
+/// Every provider the user listed is unusable, and they *do* hold a google key.
+/// A fallback chain would render at google. This must refuse instead: google is
+/// not on their list, and spending money at a provider nobody named is the
+/// outcome the preference order exists to avoid (ROADMAP § 6, constraint 2).
+#[test]
+fn a_preference_refuses_rather_than_falling_back_to_an_unlisted_provider() {
+    let sandbox = Sandbox::new("pref-nofallback");
+    let out = run(lucida(&sandbox)
+        .env("GEMINI_API_KEY", "g")
+        .env("LUCIDA_IMAGE_PROVIDERS", "openai,stability")
+        .args(["generate", "x", "--dry-run", "--json"]));
+
+    out.says("no provider in LUCIDA_IMAGE_PROVIDERS has a credential")
+        .says("openai needs OPENAI_API_KEY")
+        // Names what they *can* reach, so the refusal is one move from fixed.
+        .says("You do have credentials for google")
+        // and did not quietly render there.
+        .never_says("\"provider\":\"google\"");
+    assert_ne!(out.code, 0, "an unusable preference must not exit 0");
+}
+
+#[test]
+fn an_unknown_name_in_the_preference_refuses_rather_than_being_skipped() {
+    let sandbox = Sandbox::new("pref-typo");
+    let out = run(lucida(&sandbox)
+        .env("BFL_API_KEY", "k")
+        .env("LUCIDA_IMAGE_PROVIDERS", "bflx,bfl")
+        .args(["generate", "x", "--dry-run"]));
+
+    // Skipping a typo would hand the render to whatever came next — which here
+    // is a real provider, so it would have looked like it worked.
+    out.says("LUCIDA_IMAGE_PROVIDERS lists `bflx`")
+        .says("not a provider")
+        .never_says("\"provider\":\"bfl\"");
+    assert_ne!(out.code, 0, "an unparseable preference must not exit 0");
+}
+
+#[test]
+fn naming_a_provider_beats_the_preference_and_announces_nothing() {
+    let sandbox = Sandbox::new("pref-explicit");
+    let out = run(lucida(&sandbox)
+        .env("STABILITY_API_KEY", "s")
+        .env("LUCIDA_IMAGE_PROVIDERS", "bfl")
+        .args([
+            "generate",
+            "x",
+            "--provider",
+            "stability",
+            "--dry-run",
+            "--json",
+        ]));
+
+    // Nothing was defaulted, so there is nothing to report. Narrating a choice
+    // back to the person who just made it is noise, and `provider_source` being
+    // null is how a caller tells "I chose this" from "it was chosen for me".
+    out.exits(0)
+        .says("\"provider\":\"stability\"")
+        .says("\"provider_source\":null")
+        .never_says("Provider: ");
+}
+
+#[test]
+fn no_preference_leaves_the_built_in_default_exactly_as_it_was() {
+    let sandbox = Sandbox::new("pref-none");
+    let out = run(lucida(&sandbox)
+        .env("GEMINI_API_KEY", "g")
+        .args(["generate", "x", "--dry-run", "--json"]));
+
+    out.exits(0)
+        .says("\"provider\":\"google\"")
+        .says("\"provider_source\":\"built-in\"");
+}
+
+#[test]
+fn video_has_its_own_preference_list() {
+    let sandbox = Sandbox::new("pref-video");
+    let out = run(lucida(&sandbox)
+        .env("RUNWAY_API_KEY", "r")
+        .env("LUCIDA_VIDEO_PROVIDERS", "google,runway")
+        .args(["video", "x", "--dry-run", "--json"]));
+
+    // Also pins the restructure this needed: the video path used to bake in a
+    // default *model* before choosing a provider, so a preference could never
+    // have been consulted. Landing on runway proves the order was reversed.
+    out.exits(0)
+        .says("\"provider\":\"runway\"")
+        .says("\"provider_source\":\"LUCIDA_VIDEO_PROVIDERS\"");
+}

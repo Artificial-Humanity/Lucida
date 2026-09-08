@@ -58,7 +58,11 @@ decides the answer:
    Providers differ, and Lucida reports what each render carried.
 
 `--provider` picks one explicitly; otherwise it is inferred from the model id,
-and naming a provider without a model gets that provider's own default.
+and naming a provider without a model gets that provider's own default. Naming
+neither consults the user's ordered preference, if they set one, and takes the
+first provider they hold a credential for — **a preference, never a fallback**:
+if that provider then refuses a parameter, the answer is the refusal, not a
+quiet hop to the next name on the list.
 
 ## Ask the user which one, when the choice is theirs to make
 
@@ -86,6 +90,12 @@ Do **not** ask when:
 
 - they already named a provider, model or tier — including earlier in the
   conversation. Carry that forward rather than re-asking each render;
+- **they have configured a default provider.** A preference list is the same
+  answer, given once instead of per render, so treat it exactly like a provider
+  they named in conversation. A render that used one says so in its reply
+  ("Provider: bfl (choice 1 of 2 in LUCIDA_IMAGE_PROVIDERS)") — pass that on if
+  it matters, but do not stop to re-ask a question they have already answered in
+  their configuration;
 - only one option is actually configured and reachable, which the probe tells
   you before you have to guess;
 - the render costs nothing and is trivially repeatable — offer to try another
