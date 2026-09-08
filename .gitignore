@@ -18,3 +18,13 @@
 # ...and the batch forms, `--count N` writing image-1.png, image-2.png, ...
 /image-*.png
 /video-*.mp4
+
+# Working notes.
+#
+# `notes/` is a symlink to the workspace-level private Notes repo
+# (`../Notes/Lucida`), so the internal working documents — changelog, state
+# snapshot, review documents — resolve for anyone working in the checkout
+# without being published from this public repo. The link itself is not the
+# repo's to track: it points outside the repo, and its target only exists on
+# a machine that has the umbrella workspace checked out.
+/notes
