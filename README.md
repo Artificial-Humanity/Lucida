@@ -616,7 +616,7 @@ the only report you get, since a name nothing reads cannot fail any other way.
 
 ## Roadmap
 
-[ROADMAP.md](ROADMAP.md) records what is built, what is next, and the decisions
+[ROADMAP.md](docs/ROADMAP.md) records what is built, what is next, and the decisions
 behind both — including which providers were ruled out and why.
 
 ## Licence
