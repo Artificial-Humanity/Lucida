@@ -916,3 +916,30 @@ fn an_unsatisfiable_preference_still_lists_the_tools() {
         .says("- google: Highest quality")
         .never_says("- google (default): Highest quality");
 }
+
+/// A typed-out retired video id warns before the render is attempted.
+///
+/// The image list annotates a retired id where it is displayed. Video has no
+/// such list — every alias points at a current model — so a retired id can only
+/// arrive by being typed, and nothing was telling the person who typed it.
+#[test]
+fn a_retired_video_model_says_so_before_it_is_sent() {
+    let sandbox = Sandbox::new("veo-retired");
+    let out = run(lucida(&sandbox).args([
+        "video",
+        "x",
+        "--model",
+        "veo-3.0-generate-001",
+        "--dry-run",
+    ]));
+
+    out.says("retired 2026-06-30").says("expect this to fail");
+}
+
+#[test]
+fn a_current_video_model_carries_no_such_warning() {
+    let sandbox = Sandbox::new("veo-current");
+    let out = run(lucida(&sandbox).args(["video", "x", "--model", "veo-fast", "--dry-run"]));
+
+    out.never_says("retired").never_says("expect this to fail");
+}

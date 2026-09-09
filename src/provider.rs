@@ -671,6 +671,28 @@ pub struct Retirement {
 pub const RETIREMENTS: &[Retirement] = &[
     // Replaced by gemini-3.1-flash-image, which is already the default.
     Retirement { prefix: "imagen", date: "2026-08-17" },
+    // The Gemini image PREVIEW ids. Google announced these 2026-05-28 for
+    // shutdown on 2026-06-25, and the GA ids that replace them are already our
+    // default and our `pro` alias.
+    //
+    // ⚠ Verified 2026-09-09 and worth knowing: Google's own ListModels STILL
+    // RETURNS both of these, months after the announced date, so `lucida models`
+    // lists them live. That is the reason to annotate rather than to filter them
+    // out — the list stays whatever the provider says it is, and the note says
+    // what the provider announced about it. Do not "fix" this by hiding them:
+    // the disagreement is the provider's, and hiding it would hide it from the
+    // person who has to decide whether to trust the id.
+    //
+    // Longest prefix first: `find` returns the first match, and the GA ids must
+    // not be caught by these.
+    Retirement { prefix: "gemini-3.1-flash-image-preview", date: "2026-06-25" },
+    Retirement { prefix: "gemini-3-pro-image-preview", date: "2026-06-25" },
+    // Veo. Announced 2026-06-15 for shutdown on 2026-06-30 — already past.
+    // Every VIDEO_ALIASES entry points into the 3.1 family, so these only fire
+    // when someone types a raw id, which is exactly when a 404 needs explaining.
+    // `veo-3.0` and not `veo-3`, or it would swallow the 3.1 models we default to.
+    Retirement { prefix: "veo-2.0", date: "2026-06-30" },
+    Retirement { prefix: "veo-3.0", date: "2026-06-30" },
     // Announced alongside gpt-image-2, which is already the default.
     Retirement { prefix: "gpt-image-1.5", date: "2026-12-01" },
     Retirement { prefix: "gpt-image-1-mini", date: "2026-12-01" },
@@ -1508,6 +1530,34 @@ mod tests {
             );
         }
         assert_eq!(retirement_note("gpt-image-1"), None);
+
+        // Video defaults too. `veo-3.0` is a retirement prefix and the default
+        // is `veo-3.1-...`, so a prefix shortened to `veo-3` would swallow the
+        // model we ship — the same trap `gpt-image-1` documents above.
+        for backend in VideoBackend::ALL {
+            let model = backend.default_model();
+            assert_eq!(
+                retirement_note(model),
+                None,
+                "`{model}` is a video default and is marked as retiring"
+            );
+        }
+
+        // The GA Gemini image ids, whose PREVIEW twins are retired. These are
+        // safe only because the retirement prefixes carry the `-preview` suffix;
+        // trimming either to the GA name would mark the live model dead and send
+        // people off the thing they should be using.
+        for ga in ["gemini-3.1-flash-image", "gemini-3-pro-image"] {
+            assert_eq!(
+                retirement_note(ga),
+                None,
+                "`{ga}` is current and its preview twin's prefix has caught it"
+            );
+            assert!(
+                retirement_note(&format!("{ga}-preview")).is_some(),
+                "`{ga}-preview` is retired and carries no note"
+            );
+        }
     }
 
     /// Every announced date has to be reachable from a model id someone can

@@ -561,6 +561,25 @@ fn run(cli: Cli) -> Result<i32> {
             announce_default(&default_source, backend.name());
             let model = model.unwrap_or_else(|| backend.default_model().to_string());
 
+            // The image list annotates a retired id where it is *displayed*;
+            // video has no such list — every alias points at a current model, so
+            // a retired id can only arrive by being typed. Warn rather than
+            // refuse: `gemini-*-image-preview` is the standing proof that an
+            // announced shutdown and a provider's actual behaviour can disagree
+            // for months, and refusing on the announcement would make Lucida
+            // wrong in the direction that costs the user a render they could
+            // have had.
+            if let Some(note) = provider::retirement_note(&model) {
+                eprintln!(
+                    "⚠ {model} {note} — expect this to fail. Current ids: {}.",
+                    video::VIDEO_ALIASES
+                        .iter()
+                        .map(|(alias, _)| *alias)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
             let request = VideoRequest {
                 prompt,
                 model,
