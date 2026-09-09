@@ -34,7 +34,7 @@ use crate::bfl;
 use crate::comfy;
 use crate::openai;
 use crate::stability;
-use crate::genai::{self, DEFAULT_MODEL};
+use crate::genai;
 use crate::provider::{
     Aspect, AspectSupport, Backend, ImageProvider, ImageRequest, Size, capabilities_for,
     infer_backend,
@@ -96,7 +96,17 @@ struct Job {
 /// depend on a worker being free — and hands `tools/call` to a small pool.
 /// Responses are matched by id, which JSON-RPC allows to come back in any order.
 pub fn serve() -> Result<()> {
-    eprintln!("lucida MCP server ready (default image model: {DEFAULT_MODEL})");
+    // Resolved, not assumed: a preference list moves both the provider and
+    // therefore the model, and this banner is the operator's first look at
+    // which one the session will actually use.
+    let (default_provider, default_model) = match crate::provider::resolve_default::<Backend>() {
+        Ok((backend, _)) => (backend.name().to_string(), backend.default_model().to_string()),
+        // A preference nothing satisfies is reported by the first render, in
+        // full. Saying so here too, briefly, beats naming a default that the
+        // very next call is going to refuse.
+        Err(_) => ("none".to_string(), "unresolved — see LUCIDA_IMAGE_PROVIDERS".to_string()),
+    };
+    eprintln!("lucida MCP server ready (default image provider: {default_provider}, model: {default_model})");
     let stdin = std::io::stdin();
     let out = Arc::new(Mutex::new(std::io::stdout()));
     run(stdin.lock(), out, call_tool)
@@ -303,6 +313,10 @@ fn dispatch(method: &str, params: &Value) -> Result<Value> {
 /// agent reads a schema and believes it, so a claim nobody can forget to update
 /// is worth more than a better-phrased one that rots.
 fn provider_summary() -> String {
+    let default_image = crate::provider::resolve_default::<Backend>()
+        .ok()
+        .map(|(backend, _)| backend);
+
     Backend::ALL
         .iter()
         .map(|backend| {
@@ -335,7 +349,7 @@ fn provider_summary() -> String {
             format!(
                 "- {}{}: {} [{}] Output carries: {}.",
                 backend.name(),
-                if *backend == Backend::Google { " (default)" } else { "" },
+                if Some(*backend) == default_image { " (default)" } else { "" },
                 caps.tagline,
                 notes.join(", "),
                 caps.provenance.describe()
@@ -537,6 +551,10 @@ fn providers_schema() -> Value {
 /// second video provider landed. Runway's provenance is unverified and its
 /// durations are a range rather than three fixed lengths.
 fn video_provider_summary() -> String {
+    let default_video = crate::provider::resolve_default::<VideoBackend>()
+        .ok()
+        .map(|(backend, _)| backend);
+
     VideoBackend::ALL
         .iter()
         .map(|backend| {
@@ -554,7 +572,7 @@ fn video_provider_summary() -> String {
             format!(
                 "- {}{}: {} [{}] Output carries: {}.",
                 backend.name(),
-                if *backend == VideoBackend::Google { " (default)" } else { "" },
+                if Some(*backend) == default_video { " (default)" } else { "" },
                 caps.tagline,
                 notes.join(", "),
                 caps.provenance.describe()

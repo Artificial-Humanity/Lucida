@@ -873,3 +873,46 @@ fn video_has_its_own_preference_list() {
         .says("\"provider\":\"runway\"")
         .says("\"provider_source\":\"LUCIDA_VIDEO_PROVIDERS\"");
 }
+
+/// The `(default)` marker in the tool description follows the actual default.
+///
+/// It was a literal comparison against one provider, which was true for as long
+/// as the default could not move. A preference list moves it, and this text is
+/// the thing an agent reasons from when it decides whether to name a provider at
+/// all — so a stale marker here does not merely misinform, it tells the agent
+/// the render is going somewhere it is not.
+#[test]
+fn the_default_marker_follows_the_preference() {
+    let sandbox = Sandbox::new("mcp-default-marker");
+    let out = run_with_stdin(
+        lucida(&sandbox)
+            .arg("mcp")
+            .env("BFL_API_KEY", "k")
+            .env("LUCIDA_IMAGE_PROVIDERS", "bfl,google"),
+        &format!("{TOOLS_LIST}\n"),
+    );
+
+    out.says("- bfl (default)")
+        // and google, in the same image list, is no longer marked.
+        .says("- google: Highest quality");
+}
+
+/// A preference nothing can satisfy must not stop the server answering.
+///
+/// Resolution refuses in that state, and `tools/list` runs it to place the
+/// marker. Propagating that refusal would take the whole listing down over a
+/// setting — so nothing is marked, which is also the honest answer: until the
+/// list is fixed, no provider is the default.
+#[test]
+fn an_unsatisfiable_preference_still_lists_the_tools() {
+    let sandbox = Sandbox::new("mcp-default-none");
+    let out = run_with_stdin(
+        lucida(&sandbox).arg("mcp").env("LUCIDA_IMAGE_PROVIDERS", "openai"),
+        &format!("{TOOLS_LIST}\n"),
+    );
+
+    out.says("generate_image")
+        // No image provider is marked, because none resolves.
+        .says("- google: Highest quality")
+        .never_says("- google (default): Highest quality");
+}
