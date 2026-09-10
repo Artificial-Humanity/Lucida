@@ -1,0 +1,33 @@
+# config.yaml — the FerroStep agent roster for this repo: the ONE place Lucida's agent
+# identities are set.
+#
+# The rule is FerroStep's, inherited deliberately (owner, 2026-08-20 there): a configurable
+# value is SET here and prose POINTS here — a document that writes a value out is a second
+# copy waiting to drift. That covers the agent TITLES as much as the names, so if you find
+# one spelled out in this repo's documents, that is drift and this file wins.
+#
+# Read by `ferrostep agent-env [--agent <title>]`, which emits AGENT_TITLE / AGENT_NAME /
+# AGENT_EMAIL / AGENT_PERSONA for eval into a shell.
+#
+# ⚠ This file layers UNDER the workspace roster at `../../config.yaml`. That one declares
+# `agents_reach: here` and names no agents at all, so nothing is inherited from it today —
+# it is the reason a repo with no roster of its own resolves nobody rather than resolving
+# as somebody else.
+
+# The entry an unmarked session adopts.
+default_agent: developer
+
+# Every agent that works this repo, keyed by title.
+#
+# ⚠⚠ IDENTITY HERE IS A CO-AUTHOR LINE, NOT AN AUTHOR LINE (owner, 2026-09-10). This is the
+# OPPOSITE of FerroStep's and FerroTrack's convention, where the agent authors and a
+# co-author trailer is forbidden as misattribution. Here the OWNER authors and the entry
+# below names who is credited in a `Co-Authored-By:` trailer. The fields are the same
+# fields; what the persona does with them is not. The procedure, the after-commit check,
+# and why the difference is dangerous to carry across a repo boundary are in the persona's
+# §1 — read it before your first commit.
+agents:
+  developer:
+    name: Sting
+    email: sting@artificialhumanity.io
+    persona: personas/DEVELOPER.md
