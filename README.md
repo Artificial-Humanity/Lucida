@@ -192,6 +192,8 @@ provider's own dashboard.
 | `LUCIDA_COMFYUI_AUTH` | `user:password`, a complete `Bearer …` / `Basic …` header, or a bare token | ComfyUI credentials, if it is fenced. Sent on every request including the image download |
 | `LUCIDA_COMFYUI_CA` | path to a PEM file | Trust a private CA. Only needed for a genuinely private certificate — see [Troubleshooting](#troubleshooting) |
 | `LUCIDA_NO_UPDATE_CHECK` | any non-empty value | Silences the daily "a newer release exists" notice |
+| `LUCIDA_IMAGE_PROVIDERS` | ordered names, e.g. `bfl,google` | Which image provider to default to when a render names neither provider nor model. The first one you hold a credential for wins, and the render says which it picked and why. **A preference, not a fallback:** a provider that refuses still refuses, rather than passing the job to the next name |
+| `LUCIDA_VIDEO_PROVIDERS` | ordered names, e.g. `runway,google` | The same, for video |
 | `LUCIDA_NO_LEDGER` | any non-empty value | Stops recording renders. The ledger stores your prompts; `lucida config` says where it lives either way |
 | `LUCIDA_BUDGET` | dollars, e.g. `25` | Estimated spend allowed in a rolling 24 hours. A render that would exceed it is refused before anything is sent |
 

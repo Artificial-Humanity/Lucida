@@ -534,6 +534,26 @@ impl VideoBackend {
     pub const ALL: &'static [VideoBackend] =
         &[VideoBackend::Google, VideoBackend::Runway, VideoBackend::Kling];
 
+    /// The setting that has to be present before this provider can be chosen
+    /// for a user. Every video lane is hosted, so every one of them has one.
+    /// See `Backend::credential` for why this asks about the account and not
+    /// about whether the provider would work.
+    pub fn credential(self) -> Option<&'static str> {
+        match self {
+            Self::Google => Some("GEMINI_API_KEY"),
+            Self::Runway => Some("RUNWAY_API_KEY"),
+            Self::Kling => Some("KLINGAI_API_KEY"),
+        }
+    }
+
+    /// Whether this provider is one the user has credentials for.
+    pub fn is_available(self) -> bool {
+        match self.credential() {
+            None => true,
+            Some(key) => crate::config::var(key).is_some(),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Google => "google",
@@ -651,6 +671,28 @@ pub struct Retirement {
 pub const RETIREMENTS: &[Retirement] = &[
     // Replaced by gemini-3.1-flash-image, which is already the default.
     Retirement { prefix: "imagen", date: "2026-08-17" },
+    // The Gemini image PREVIEW ids. Google announced these 2026-05-28 for
+    // shutdown on 2026-06-25, and the GA ids that replace them are already our
+    // default and our `pro` alias.
+    //
+    // ⚠ Verified 2026-09-09 and worth knowing: Google's own ListModels STILL
+    // RETURNS both of these, months after the announced date, so `lucida models`
+    // lists them live. That is the reason to annotate rather than to filter them
+    // out — the list stays whatever the provider says it is, and the note says
+    // what the provider announced about it. Do not "fix" this by hiding them:
+    // the disagreement is the provider's, and hiding it would hide it from the
+    // person who has to decide whether to trust the id.
+    //
+    // Longest prefix first: `find` returns the first match, and the GA ids must
+    // not be caught by these.
+    Retirement { prefix: "gemini-3.1-flash-image-preview", date: "2026-06-25" },
+    Retirement { prefix: "gemini-3-pro-image-preview", date: "2026-06-25" },
+    // Veo. Announced 2026-06-15 for shutdown on 2026-06-30 — already past.
+    // Every VIDEO_ALIASES entry points into the 3.1 family, so these only fire
+    // when someone types a raw id, which is exactly when a 404 needs explaining.
+    // `veo-3.0` and not `veo-3`, or it would swallow the 3.1 models we default to.
+    Retirement { prefix: "veo-2.0", date: "2026-06-30" },
+    Retirement { prefix: "veo-3.0", date: "2026-06-30" },
     // Announced alongside gpt-image-2, which is already the default.
     Retirement { prefix: "gpt-image-1.5", date: "2026-12-01" },
     Retirement { prefix: "gpt-image-1-mini", date: "2026-12-01" },
@@ -1031,6 +1073,31 @@ impl Backend {
         Backend::Stability,
         Backend::OpenAi,
     ];
+
+    /// The setting that has to be present before this provider can be *chosen
+    /// for* a user, or `None` for a provider that needs no credential.
+    ///
+    /// This is deliberately not "can this provider work". It is "did the user
+    /// tell us they have an account here", which is the only question a default
+    /// may answer on its own. ComfyUI is the `None`: it runs locally and falls
+    /// back to a built-in localhost URL, so listing it is itself the decision.
+    pub fn credential(self) -> Option<&'static str> {
+        match self {
+            Self::Google => Some("GEMINI_API_KEY"),
+            Self::ComfyUi => None,
+            Self::Bfl => Some("BFL_API_KEY"),
+            Self::Stability => Some("STABILITY_API_KEY"),
+            Self::OpenAi => Some("OPENAI_API_KEY"),
+        }
+    }
+
+    /// Whether this provider is one the user has credentials for.
+    pub fn is_available(self) -> bool {
+        match self.credential() {
+            None => true,
+            Some(key) => crate::config::var(key).is_some(),
+        }
+    }
 }
 
 /// Guesses the backend from a model id, so `--provider` stays optional.
@@ -1075,9 +1142,272 @@ pub fn infer_backend(model: &str) -> Backend {
     Backend::Google
 }
 
+// ---------------------------------------------------------------------------
+// Default provider preference
+// ---------------------------------------------------------------------------
+
+/// Where a defaulted provider came from.
+///
+/// Exists because a default that does not say so is the silent substitution
+/// this tool refuses everywhere else. A render that was not told which provider
+/// to use must be able to report which one it picked *and why*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultSource {
+    /// The first entry in the user's ordered list that they hold a credential
+    /// for. `position` is 1-based, so it reads the way a person counts.
+    Preference {
+        setting: &'static str,
+        position: usize,
+        of: usize,
+    },
+    /// No preference configured, so the built-in fall-through applies. This is
+    /// what every invocation did before preferences existed.
+    BuiltIn,
+}
+
+impl DefaultSource {
+    /// One line naming the resolved provider and where the choice came from.
+    pub fn describe(&self, chosen: &str) -> String {
+        match self {
+            Self::Preference {
+                setting,
+                position,
+                of,
+            } => format!("{chosen} (choice {position} of {of} in {setting})"),
+            Self::BuiltIn => format!("{chosen} (built-in default; no preference set)"),
+        }
+    }
+
+    /// The short tag that goes in `--json` output.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Preference { setting, .. } => setting,
+            Self::BuiltIn => "built-in",
+        }
+    }
+}
+
+/// A provider set that a user can express an ordered preference over.
+///
+/// One trait rather than two copies of the walk below: the image and video
+/// ladders differ only in their members, and a second copy is a second place
+/// for the "never a fallback" rule to be got wrong.
+pub trait Preferred: Copy + Sized + 'static {
+    /// The setting holding the ordered list.
+    const SETTING: &'static str;
+    /// Where resolution lands when no preference is configured.
+    const BUILT_IN: Self;
+
+    fn parse_name(text: &str) -> Result<Self>;
+    fn provider_name(self) -> &'static str;
+    fn credential_setting(self) -> Option<&'static str>;
+    fn available(self) -> bool;
+    fn every() -> &'static [Self];
+}
+
+impl Preferred for Backend {
+    const SETTING: &'static str = "LUCIDA_IMAGE_PROVIDERS";
+    const BUILT_IN: Self = Backend::Google;
+
+    fn parse_name(text: &str) -> Result<Self> {
+        Self::parse(text)
+    }
+    fn provider_name(self) -> &'static str {
+        self.name()
+    }
+    fn credential_setting(self) -> Option<&'static str> {
+        self.credential()
+    }
+    fn available(self) -> bool {
+        self.is_available()
+    }
+    fn every() -> &'static [Self] {
+        Self::ALL
+    }
+}
+
+impl Preferred for VideoBackend {
+    const SETTING: &'static str = "LUCIDA_VIDEO_PROVIDERS";
+    const BUILT_IN: Self = VideoBackend::Google;
+
+    fn parse_name(text: &str) -> Result<Self> {
+        Self::parse(text)
+    }
+    fn provider_name(self) -> &'static str {
+        self.name()
+    }
+    fn credential_setting(self) -> Option<&'static str> {
+        self.credential()
+    }
+    fn available(self) -> bool {
+        self.is_available()
+    }
+    fn every() -> &'static [Self] {
+        Self::ALL
+    }
+}
+
+/// The ordered preference list as written, or `None` if the setting is unset.
+///
+/// Empty entries are skipped so a trailing comma is not an error worth
+/// stopping for, but an unrecognised name is: a typo that silently dropped an
+/// entry would move the render to the next provider, which is precisely the
+/// substitution this design exists to avoid.
+fn preference_list<T: Preferred>() -> Result<Option<Vec<T>>> {
+    let Some(raw) = crate::config::var(T::SETTING) else {
+        return Ok(None);
+    };
+
+    let mut chain = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let parsed = T::parse_name(entry).map_err(|e| {
+            anyhow::anyhow!(
+                "{setting} lists `{entry}`, which is not a provider.\n\n{e}\n\n\
+                 Fix the list rather than leaving it: a name nothing recognises \
+                 would otherwise hand the render to whichever provider came \
+                 next, which is not what you wrote down.",
+                setting = T::SETTING,
+            )
+        })?;
+        chain.push(parsed);
+    }
+
+    if chain.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(chain))
+}
+
+/// Resolves the provider to use when the user named neither provider nor model.
+///
+/// ⚠ **This is a preference order, not a fallback chain, and the difference is
+/// the whole design** (owner, 2026-08-09, reaffirmed 2026-09-08). The walk below
+/// happens once, before any client exists and before anything is sent, and it
+/// asks only "does the user hold a credential here". It never runs again. If the
+/// provider it lands on then refuses a parameter, or the render fails, that is
+/// the answer — moving to the next entry would spend money at a provider the
+/// user never chose, and would undo the guarantee the capability system exists
+/// to make.
+pub fn resolve_default<T: Preferred>() -> Result<(T, DefaultSource)> {
+    let Some(chain) = preference_list::<T>()? else {
+        return Ok((T::BUILT_IN, DefaultSource::BuiltIn));
+    };
+
+    let of = chain.len();
+    for (index, candidate) in chain.iter().copied().enumerate() {
+        if candidate.available() {
+            return Ok((
+                candidate,
+                DefaultSource::Preference {
+                    setting: T::SETTING,
+                    position: index + 1,
+                    of,
+                },
+            ));
+        }
+    }
+
+    // Every entry named, none usable. Falling through to the built-in here
+    // would route to a provider the user deliberately left off their list, so
+    // this refuses and says exactly which credential would settle it.
+    let missing = chain
+        .iter()
+        .map(|c| match c.credential_setting() {
+            Some(key) => format!("  {} needs {key}", c.provider_name()),
+            None => format!("  {} needs no credential", c.provider_name()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // What the user *could* reach but did not list. Naming it turns a refusal
+    // into one move rather than a hunt through the docs for which key is which.
+    let elsewhere = T::every()
+        .iter()
+        .copied()
+        .filter(|c| c.available() && !chain.iter().any(|listed| listed.provider_name() == c.provider_name()))
+        .map(|c| c.provider_name())
+        .collect::<Vec<_>>();
+
+    let aside = if elsewhere.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nYou do have credentials for {}, which {setting} does not list.",
+            join_and(&elsewhere),
+            setting = T::SETTING,
+        )
+    };
+
+    bail!(
+        "no provider in {setting} has a credential configured.\n\n{missing}{aside}\n\n\
+         Set one of those keys, name a provider explicitly, or clear {setting} to \
+         return to the built-in default ({built_in}).",
+        setting = T::SETTING,
+        built_in = T::BUILT_IN.provider_name(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every provider's credential names a setting Lucida actually reads.
+    ///
+    /// A provider declaring a key that is not in `KNOWN_KEYS` fails *closed and
+    /// silently*: `is_available` would be false on every machine, so a
+    /// preference listing it could never select it, and `lucida config` would
+    /// never show the user the key they were missing. This repo has already paid
+    /// for the neighbouring version of that bug — `LUCIDA_BUDGET` was enforced
+    /// while `lucida config` reported it as "ignored — check the spelling".
+    #[test]
+    fn every_provider_credential_is_a_setting_lucida_knows() {
+        let known: Vec<&str> = crate::config::KNOWN_KEYS.iter().map(|(k, _)| *k).collect();
+
+        for backend in Backend::ALL {
+            if let Some(key) = backend.credential() {
+                assert!(
+                    known.contains(&key),
+                    "image provider {} wants {key}, which is not in KNOWN_KEYS — \
+                     it can never be available and `lucida config` will never name it",
+                    backend.name()
+                );
+            }
+        }
+        for backend in VideoBackend::ALL {
+            if let Some(key) = backend.credential() {
+                assert!(
+                    known.contains(&key),
+                    "video provider {} wants {key}, which is not in KNOWN_KEYS",
+                    backend.name()
+                );
+            }
+        }
+    }
+
+    /// The preference settings are themselves configurable settings.
+    ///
+    /// Held because the failure is invisible from the code that reads them:
+    /// `config::var` answers for any string, so a preference absent from
+    /// `KNOWN_KEYS` would work perfectly while `lucida config` filed it under
+    /// "not recognised" — telling the user their list was being ignored at the
+    /// moment it was deciding their renders.
+    #[test]
+    fn both_preference_settings_are_known_settings() {
+        let known: Vec<&str> = crate::config::KNOWN_KEYS.iter().map(|(k, _)| *k).collect();
+        for setting in [
+            <Backend as Preferred>::SETTING,
+            <VideoBackend as Preferred>::SETTING,
+        ] {
+            assert!(
+                known.contains(&setting),
+                "{setting} decides which provider a render uses and is not in KNOWN_KEYS"
+            );
+        }
+    }
 
     /// Naming a video provider must supply that provider's model, not another's.
     ///
@@ -1200,6 +1530,34 @@ mod tests {
             );
         }
         assert_eq!(retirement_note("gpt-image-1"), None);
+
+        // Video defaults too. `veo-3.0` is a retirement prefix and the default
+        // is `veo-3.1-...`, so a prefix shortened to `veo-3` would swallow the
+        // model we ship — the same trap `gpt-image-1` documents above.
+        for backend in VideoBackend::ALL {
+            let model = backend.default_model();
+            assert_eq!(
+                retirement_note(model),
+                None,
+                "`{model}` is a video default and is marked as retiring"
+            );
+        }
+
+        // The GA Gemini image ids, whose PREVIEW twins are retired. These are
+        // safe only because the retirement prefixes carry the `-preview` suffix;
+        // trimming either to the GA name would mark the live model dead and send
+        // people off the thing they should be using.
+        for ga in ["gemini-3.1-flash-image", "gemini-3-pro-image"] {
+            assert_eq!(
+                retirement_note(ga),
+                None,
+                "`{ga}` is current and its preview twin's prefix has caught it"
+            );
+            assert!(
+                retirement_note(&format!("{ga}-preview")).is_some(),
+                "`{ga}-preview` is retired and carries no note"
+            );
+        }
     }
 
     /// Every announced date has to be reachable from a model id someone can

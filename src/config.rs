@@ -54,6 +54,20 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("LUCIDA_COMFYUI_URL", "Where ComfyUI is listening"),
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),
     ("LUCIDA_COMFYUI_CA", "PEM certificate for a private CA"),
+    // Ordered preference, consulted only when a render names neither provider
+    // nor model. ⚠ A preference is not a fallback: the list is walked once,
+    // before anything is sent, and the first entry whose credential is present
+    // wins outright. A provider that then refuses a parameter still refuses —
+    // it does not hand the render to the next name. See
+    // `provider::resolve_default`, which is where that guarantee lives.
+    (
+        "LUCIDA_IMAGE_PROVIDERS",
+        "Ordered image providers to default to, comma-separated (e.g. bfl,google)",
+    ),
+    (
+        "LUCIDA_VIDEO_PROVIDERS",
+        "Ordered video providers to default to, comma-separated (e.g. runway,google)",
+    ),
     (
         "LUCIDA_NO_UPDATE_CHECK",
         "Set to silence the daily \"a newer release exists\" notice",

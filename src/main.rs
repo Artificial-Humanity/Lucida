@@ -452,8 +452,8 @@ fn run(cli: Cli) -> Result<i32> {
             opts,
         } => {
             let (count, dry_run) = (opts.count, opts.dry_run);
-            let (request, backend) = opts.into_request(prompt, reference)?;
-            execute(request, backend, out, count, dry_run).map(|()| out::OK)
+            let (request, backend, source) = opts.into_request(prompt, reference)?;
+            execute(request, backend, out, count, dry_run, source).map(|()| out::OK)
         }
 
         Command::Edit {
@@ -470,8 +470,8 @@ fn run(cli: Cli) -> Result<i32> {
 
             let destination = out.unwrap_or_else(|| PathBuf::from(&image));
             let (count, dry_run) = (opts.count, opts.dry_run);
-            let (request, backend) = opts.into_request(prompt, references)?;
-            execute(request, backend, destination, count, dry_run).map(|()| out::OK)
+            let (request, backend, source) = opts.into_request(prompt, references)?;
+            execute(request, backend, destination, count, dry_run, source).map(|()| out::OK)
         }
 
         Command::Check {
@@ -547,14 +547,38 @@ fn run(cli: Cli) -> Result<i32> {
             // Explicit provider wins and supplies the model default; otherwise
             // the model names the provider. Either way the pair is consistent,
             // which is the whole point.
-            let backend = match &provider {
-                Some(name) => provider::VideoBackend::parse(name)?,
+            let (backend, default_source) = match &provider {
+                Some(name) => (provider::VideoBackend::parse(name)?, None),
                 None => match &model {
-                    Some(model) => provider::infer_video_backend(model),
-                    None => provider::VideoBackend::Google,
+                    Some(model) => (provider::infer_video_backend(model), None),
+                    None => {
+                        let (backend, source) =
+                            provider::resolve_default::<provider::VideoBackend>()?;
+                        (backend, Some(source))
+                    }
                 },
             };
+            announce_default(&default_source, backend.name());
             let model = model.unwrap_or_else(|| backend.default_model().to_string());
+
+            // The image list annotates a retired id where it is *displayed*;
+            // video has no such list — every alias points at a current model, so
+            // a retired id can only arrive by being typed. Warn rather than
+            // refuse: `gemini-*-image-preview` is the standing proof that an
+            // announced shutdown and a provider's actual behaviour can disagree
+            // for months, and refusing on the announcement would make Lucida
+            // wrong in the direction that costs the user a render they could
+            // have had.
+            if let Some(note) = provider::retirement_note(&model) {
+                eprintln!(
+                    "⚠ {model} {note} — expect this to fail. Current ids: {}.",
+                    video::VIDEO_ALIASES
+                        .iter()
+                        .map(|(alias, _)| *alias)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
 
             let request = VideoRequest {
                 prompt,
@@ -589,6 +613,7 @@ fn run(cli: Cli) -> Result<i32> {
                     "ok": true,
                     "status": "dry-run",
                     "provider": backend.name(),
+                    "provider_source": default_source.as_ref().map(|s| s.tag()),
                     "model": resolved,
                     "prompt": request.prompt,
                     "aspect": request.aspect.map(|a| a.to_string()),
@@ -798,7 +823,7 @@ impl ImageOptions {
         self,
         prompt: String,
         references: Vec<String>,
-    ) -> Result<(ImageRequest, Backend)> {
+    ) -> Result<(ImageRequest, Backend, Option<provider::DefaultSource>)> {
         // A supplied workflow names its own checkpoints, so an explicit model
         // has nowhere to go — the same reasoning that refuses `--ref` with a
         // workflow. Caught here rather than in the provider because only the
@@ -812,11 +837,18 @@ impl ImageOptions {
             );
         }
 
-        let backend = match (&self.provider, &self.model) {
-            (Some(name), _) => Backend::parse(name)?,
-            (None, Some(model)) => infer_backend(model),
-            (None, None) => Backend::Google,
+        // Nothing named: this is the only branch a preference may answer, and
+        // it resolves once, here, before any client exists. See
+        // `provider::resolve_default` for why it can never become a fallback.
+        let (backend, default_source) = match (&self.provider, &self.model) {
+            (Some(name), _) => (Backend::parse(name)?, None),
+            (None, Some(model)) => (infer_backend(model), None),
+            (None, None) => {
+                let (backend, source) = provider::resolve_default::<Backend>()?;
+                (backend, Some(source))
+            }
         };
+        announce_default(&default_source, backend.name());
 
         let model = self.model.unwrap_or_else(|| backend.default_model().to_string());
 
@@ -834,7 +866,7 @@ impl ImageOptions {
             guidance: self.guidance,
         };
 
-        Ok((request, backend))
+        Ok((request, backend, default_source))
     }
 }
 
@@ -1434,6 +1466,24 @@ fn describe_aspect(support: provider::AspectSupport) -> String {
     }
 }
 
+/// Says which provider a default landed on, and where the default came from.
+///
+/// ⚠ **This is the half of the feature that makes it acceptable at all.** A
+/// default that routes a render somewhere the user did not name is the same
+/// class of event as a silently dropped parameter — unless it announces itself.
+/// So this is not optional polish; it is the condition the preference order was
+/// allowed to exist under (ROADMAP § 6, constraint 1).
+///
+/// stderr rather than stdout, because `--json` must stay a single document on
+/// stdout and a test holds that. Nothing is printed when the user named the
+/// provider or the model: they already know, and narrating a choice back to the
+/// person who just made it is noise.
+fn announce_default(source: &Option<provider::DefaultSource>, chosen: &str) {
+    if let Some(source) = source {
+        eprintln!("Provider: {}", source.describe(chosen));
+    }
+}
+
 /// Renders `count` images, and prints whatever the caller asked to see.
 ///
 /// The batch is checked and budgeted as a *whole* before the first render, so
@@ -1456,6 +1506,7 @@ fn execute(
     out: PathBuf,
     count: usize,
     dry_run: bool,
+    default_source: Option<provider::DefaultSource>,
 ) -> Result<()> {
     let caps = provider::capabilities_for(backend, &request.model);
     caps.check(&request)?;
@@ -1488,6 +1539,7 @@ fn execute(
             "ok": true,
             "status": "dry-run",
             "provider": caps.provider,
+            "provider_source": default_source.as_ref().map(|s| s.tag()),
             "model": request.model,
             "prompt": request.prompt,
             "count": count,

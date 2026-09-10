@@ -788,7 +788,35 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 
 ---
 
-## 6. Defaults — an open question, not a plan
+## 6. Defaults — answered 2026-09-08
+
+**Settled (owner, 2026-09-08).** Two settings now exist, each an ordered list of
+providers consulted only when a render names neither provider nor model:
+`LUCIDA_IMAGE_PROVIDERS` and `LUCIDA_VIDEO_PROVIDERS`. The first entry whose
+credential is configured wins, the choice is reported on stderr and as
+`provider_source` in `--json`, and an explicit `--provider` or model still beats
+it and reports nothing.
+
+It is **the smallest version the closing question below asked for**: one ordered
+list per medium, two new `KNOWN_KEYS` entries, one resolution site per medium.
+No per-model defaults and no profiles.
+
+The three constraints below were kept rather than traded away, and two of them
+shaped the behaviour in ways worth knowing:
+
+- **Constraint 2 held, and it decides the interesting case.** When every listed
+  provider is unusable, Lucida *refuses* — it does not fall through to the
+  built-in default, because that would route the render to a provider the user
+  deliberately left off their list. The refusal names which credential would
+  settle it and which providers they can already reach. An unrecognised name in
+  the list is likewise a refusal, not a skip: skipping a typo would hand the
+  render to whichever name came next.
+- **Constraint 3 resolved as predicted.** The shipped skill now says a
+  configured default counts as the user having already answered.
+
+The original framing follows, because it is why the answer took this shape.
+
+---
 
 **Owner, 2026-08-09**, recorded to be answered later rather than now: can the
 experience be streamlined by mapping defaults? The range runs from *a default
