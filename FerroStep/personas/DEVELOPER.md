@@ -91,17 +91,48 @@ deliberately does not reinstate a workflow around it. Work is owner-directed.
 
 ---
 
-## 3. What FerroStep is doing in this repo, and what it is not
+## 3. What FerroStep is doing in this repo
 
-`../config.yaml` is a FerroStep **roster**. It answers *who works this repo and under what
-identity*, and as of **2026-09-10** that is the only question it answers.
+`../config.yaml` is the **roster** — who works here and under what identity.
+`../workflow/lucida-lane.json` is the **lane** — the states, roles, counters and moves
+your work is refereed by. `../workflow/issues.map.json` says which columns of the refereed
+collection hold them.
 
-⚠ **No ledger, no workflow definition and no referee are installed here.** FerroStep's
-engine referees a state machine over records in a store; this repo has no such store and no
-definition for one, so nothing is being refereed and no `ferrostep` subcommand beyond
-`agent-env` has a target to act on.
+**Lucida is refereed on the lab board's shared `issues` collection**, scoped
+`repo=Artificial-Humanity/Lucida`. That collection is multi-repo by design and already
+carries other repos' records; the scope label is what separates them, and every query that
+finds work filters on it.
 
-⚠⚠ **If you are told the referee is installed, verify it rather than believing this
-line.** This paragraph is prose about a running system, it names the date it was true, and
-a document is not evidence about what is deployed now. That is FerroStep's own standing
-rule about generated artifacts, turned on the file describing them.
+⚠ **Nothing was installed into the store to make this work, and that is the point.** The
+board already carried the referee. Lucida added a definition, not an installation.
+
+⚠⚠ **Do not hand-edit the installed hook.** `pb_hooks/` on the board is a **deploy target**
+— it carries a `.deployed.json` naming the repo and commit it was deployed from, so a file
+placed there by hand is silently overwritten at the next deploy. Changing store-side
+behaviour is a change to *that* repo, through its own resident, and it is not yours to make
+from here.
+
+⚠ **The store does not enforce the moves — the engine does.** The installed hook guards the
+refereed columns against direct writes, binds the acting role to the authenticated
+principal, and implements the release out of `escalated`. It does **not** validate
+transitions. Those come from whatever `--workflow` you pass, which means **the definition
+file is the authority and editing it silently changes what is permitted**. Treat a change
+there as a change to the rules, not to a config.
+
+⚠ **Role binding is inert today.** The actor collection carries no accounts and unbound
+principals are allowed, so any caller can currently claim any role. Until that changes, the
+role you pass is an assertion rather than a credential.
+
+⚠ **Filing is not the engine's** — `explain` says so: `filing: nobody, through this engine`.
+Records enter the collection by its own procedure, and Lucida has no filing script of its
+own yet. That is a real gap, not an oversight to route around by writing refereed columns
+directly — a direct write to one is refused by name.
+
+**Verified against the live board on 2026-09-11**: `ferrostep doctor` reported 13 agreed,
+0 faults and **0 unchecked** — the last number being the one that matters, since a question
+the tool cannot answer is reported as unchecked and fails rather than passing quietly.
+
+⚠⚠ **Verify rather than believe this section.** It is prose about a running system and it
+names the date it was checked. FerroStep's own standing rule is that a generated artifact
+states what it can do and an adapter asks rather than assuming — the same applies to a
+document describing a deployment. `ferrostep doctor` is how you ask.
