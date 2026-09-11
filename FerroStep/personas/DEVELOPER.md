@@ -30,6 +30,13 @@ So: **do not set `-c user.name` / `-c user.email` here.** This repo's configured
 identity is already the owner's, which is the author line you want. Your entry supplies the
 trailer and nothing else.
 
+⚠⚠ **If you are COVERING this seat rather than holding it, credit yourself — not the entry.**
+The roster names the agent this seat belongs to. A stand-in resolves the entry to learn the
+*convention* and then signs its **own** name, because crediting the entry would attribute work
+to an agent that did not do it. That is the same misattribution the rule above exists to
+prevent, reached from the other direction, and it is the easier one to walk into: the reader
+is following the instruction exactly when it happens.
+
 ```bash
 env="$(ferrostep agent-env)" || exit 1   # AGENT_TITLE, NAME, EMAIL, PERSONA
 eval "$env"
