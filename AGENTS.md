@@ -117,7 +117,9 @@ case-insensitive macOS/Windows.
 
 ⚠ **How work gets done — [WORKFLOW.md](WORKFLOW.md).** Branching, review, and landing on
 `main` are there; read it before your first commit. The commit-hygiene section that stood at
-§1 is gone, moved there on 2026-09-16. The number below is left at **2** deliberately:
+§1 is gone (2026-09-08) and stays gone; a new, simpler policy was authored in `WORKFLOW.md` on
+2026-09-16 — it is not a restoration of what was there before. The number below is left at
+**2** deliberately:
 `docs/ROADMAP.md` and three internal documents — the state snapshot, the code review and the
 product review — all cite "AGENTS.md §2", so the number is an identifier those citations
 depend on rather than a position in a list. Renumbering it would silently falsify every one of
