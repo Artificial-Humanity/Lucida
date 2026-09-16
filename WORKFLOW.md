@@ -1,18 +1,23 @@
-# Workflow — Lucida
+# Workflow — Project Lucida
 
-**This file holds how work gets done in this repo: branching, review, and landing on `main`.**
-[AGENTS.md](AGENTS.md) points here. Your identity and remit are [PERSONA.md](PERSONA.md).
-
----
+Follow [AGENTS.md](AGENTS.md) for repository rules and git configuration.
 
 ## Branch, review, merge
 
-**Standing across every project repo in this workspace** (owner, 2026-09-16):
+1. Branch off local `main`. All work happens on a branch.
+2. When the work is complete, use `superpowers:requesting-code-review` to dispatch
+   a review.
+3. Use `superpowers:receiving-code-review` to evaluate the findings. Address them,
+   then commit the fixes.
+4. Merge to `main` after the review cycle. A direct push to `main` is allowed;
+   a pull request is not required.
 
-1. **Branch off `main`.** All work happens on a branch.
-2. **When the work is complete, call for a review.** Use the `superpowers:requesting-code-review`
-   skill to dispatch it.
-3. **Receive the review with the `superpowers:receiving-code-review` skill.** Address what it
-   finds, then commit the fixes.
-4. **Merge to `main`.** Once this review cycle has been followed, a direct push to `main` is
-   allowed — a pull request is not required.
+## Commit identity and safeguards
+
+* Keep the owner's configured git author identity. Use [PERSONA.md](PERSONA.md)
+  for the agent's co-author identity.
+* Follow the review cycle even without mechanical enforcement. `main` has no branch
+  protection or pre-push gate; CI runs after a push. Observe the git safeguards in
+  `AGENTS.md`.
+* Use the workflow stated here. Do not reconstruct additional rules from retired
+  workflows or git history; changes to the workflow belong to the owner.
