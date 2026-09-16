@@ -115,13 +115,13 @@ case-insensitive macOS/Windows.
 
 ## System Operational Mandates
 
-⚠ **There is no prescribed workflow here** (owner, 2026-09-08). The commit-hygiene
-section that stood at §1 is gone, and nothing replaces it. The number below is left at
-**2** deliberately: `docs/ROADMAP.md` and three internal documents — the state snapshot,
-the code review and the product review — all cite "AGENTS.md §2", so the number is an
-identifier those citations depend on rather than a position in a list. Renumbering it
-would silently falsify every one of them, including the ones outside this repo where
-nothing here can check them.
+⚠ **How work gets done — [WORKFLOW.md](WORKFLOW.md).** Branching, review, and landing on
+`main` are there; read it before your first commit. The commit-hygiene section that stood at
+§1 is gone, moved there on 2026-09-16. The number below is left at **2** deliberately:
+`docs/ROADMAP.md` and three internal documents — the state snapshot, the code review and the
+product review — all cite "AGENTS.md §2", so the number is an identifier those citations
+depend on rather than a position in a list. Renumbering it would silently falsify every one of
+them, including the ones outside this repo where nothing here can check them.
 
 ### 2. Paid-API Spend Discipline
 
