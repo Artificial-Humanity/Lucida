@@ -52,6 +52,30 @@ jobs:
   # nothing else in this repository would ever mention it.
   audit:
     runs-on: ubuntu-latest
+
+    # `checks: write` because the action reports through the check-runs API, and
+    # this repository's default workflow permissions are read-only. Without the
+    # grant the action throws on its first call — before it has looked at a
+    # single advisory — so the job is red for a reason that says nothing about
+    # the dependencies.
+    #
+    # It ran green in August on this same file and the same action SHA
+    # (69366f3), then failed on every push to `main` from 2026-09-03. Neither
+    # side of the pin moved, so what changed is the repository's default token
+    # permissions, outside this repository and unversioned. The grant is the fix
+    # either way: a job that states the scope it needs does not depend on the
+    # default.
+    #
+    # ⚠ A token failure and a real advisory produce the SAME red X, and both
+    # finding counts ("1 vulnerabilities found!") are attached at warning level,
+    # which cannot fail a job. So this being red is not evidence about the
+    # lockfile: read the failure-level annotation first. Diagnosing it the other
+    # way round cost a fortnight — the red was read as a four-day-old advisory,
+    # which was the one thing it demonstrably was not.
+    permissions:
+      contents: read
+      checks: write
+
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
