@@ -10,6 +10,26 @@ on:
       tag:
         description: "Existing tag to build and attach binaries to"
         required: true
+      # For exercising the signing path end to end without touching anything a
+      # user can see. A draft release is invisible to `install.sh`, to users, and
+      # to `ci.yml`'s pinned-version test — which derives its pin from the
+      # second-newest NON-DRAFT release, so a pre-release here would silently
+      # move what that job asserts.
+      #
+      # ⚠ Two things about testing this way, both learned the hard way while it
+      # was being written:
+      #
+      # Use a tag that does NOT begin with `v`. Pushing one that does fires the
+      # trigger above and publishes a real release before anyone dispatches
+      # anything. `signing-test.1` matches nothing and can only be dispatched.
+      #
+      # ⚠ Never dispatch this against a tag that already has a published
+      # release. `action-gh-release` updates the release it finds, and that
+      # includes flipping a published one to draft.
+      draft:
+        description: "Publish to a DRAFT release (signing-path test only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -69,6 +89,144 @@ jobs:
           lipo -info "$ASSET" | grep -q arm64 || { echo "no arm64 slice"; exit 1; }
           lipo -info "$ASSET" | grep -q x86_64 || { echo "no x86_64 slice"; exit 1; }
 
+      # Everything from here to the cleanup step signs the asset. It all sits
+      # AFTER the fuse above, because `lipo` strips signatures — and BEFORE the
+      # smoke test and the checksum below, because signing rewrites the file. A
+      # checksum taken ahead of it would be the hash of something nobody
+      # downloads. That ordering is the whole design; do not reorder these.
+      - name: Import the Developer ID certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$CERT_P12_BASE64" ] || { echo "APPLE_CERT_P12_BASE64 is empty or unset"; exit 1; }
+          [ -n "$CERT_PASSWORD" ] || { echo "APPLE_CERT_PASSWORD is empty or unset"; exit 1; }
+
+          # A keychain of its own, with a password generated here and never
+          # stored. The login keychain is untouched and the key lives for one job.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Long timeout and no lock-on-sleep: a notarization wait must not end
+          # with the keychain locked underneath it.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          # -x imports the key as non-extractable: it can sign here and it cannot
+          # be exported back out of this keychain.
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign -x
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Without this, codesign blocks on a UI prompt no runner can answer.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+
+          # Add to the search list, keeping what was already there.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+
+          # The identity is READ from the keychain rather than held as a secret.
+          # A re-issued certificate then needs one secret replaced instead of two
+          # kept in step, and this cannot sign with an identity that is not
+          # actually present.
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/Developer ID Application/ { print $2; exit }')
+          [ -n "$IDENTITY" ] || {
+            echo "no Developer ID Application identity in the imported certificate:"
+            security find-identity -v -p codesigning "$KEYCHAIN"
+            exit 1
+          }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "imported $IDENTITY"
+
+      - name: Sign
+        run: |
+          set -euo pipefail
+          # Both flags are required for notarization to accept the submission. No
+          # entitlements: a static Rust binary with rustls asks for nothing the
+          # hardened runtime withholds.
+          codesign --force --timestamp --options runtime \
+            --keychain "$KEYCHAIN" --sign "$IDENTITY" "$ASSET"
+
+          codesign --verify --strict --verbose=2 "$ASSET"
+
+          info=$(codesign -dv --verbose=4 "$ASSET" 2>&1)
+          echo "$info"
+          # Asserting the hardened-runtime flag here names the cause. Letting
+          # Apple reject the upload instead reports it as a notarization failure.
+          case "$info" in
+            *runtime*) echo "  hardened runtime flag present" ;;
+            *) echo "the hardened runtime flag is missing"; exit 1 ;;
+          esac
+
+      - name: Notarize
+        env:
+          API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "$API_KEY_P8_BASE64" ] || { echo "APPLE_API_KEY_P8_BASE64 is empty or unset"; exit 1; }
+          [ -n "$API_KEY_ID" ] || { echo "APPLE_API_KEY_ID is empty or unset"; exit 1; }
+          [ -n "$API_ISSUER_ID" ] || { echo "APPLE_API_ISSUER_ID is empty or unset"; exit 1; }
+
+          KEY="$RUNNER_TEMP/notary.p8"
+          echo "$API_KEY_P8_BASE64" | base64 --decode > "$KEY"
+
+          # notarytool takes an archive, not a bare Mach-O.
+          ditto -c -k --keepParent "$ASSET" "$RUNNER_TEMP/submit.zip"
+
+          # --wait blocks until Apple answers, so nothing is published ahead of
+          # its verdict.
+          set +e
+          out=$(xcrun notarytool submit "$RUNNER_TEMP/submit.zip" \
+            --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
+            --wait --output-format json)
+          rc=$?
+          set -e
+          echo "$out"
+
+          # ⚠ The exit code is NOT the postcondition: `submit` can exit 0 having
+          # returned Invalid. Read the status field. python3 ships on the runner.
+          status=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')
+          id=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+
+          if [ "$status" != "Accepted" ]; then
+            echo "notarization returned \"$status\" (notarytool exit $rc)"
+            # The log is the only document that says WHY Apple refused, which is
+            # why the key is deleted in the cleanup step rather than this one.
+            [ -n "$id" ] && xcrun notarytool log "$id" \
+              --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+            exit 1
+          fi
+          echo "  notarization Accepted, submission $id"
+
+      - name: Gatekeeper's own verdict
+        run: |
+          set -euo pipefail
+          # A notarized bare executable carries no stapled ticket — `stapler`
+          # takes only a .app, .pkg or .dmg — so this is an ONLINE check by
+          # design, and it is the judgement a user's machine makes.
+          out=$(spctl -a -t exec -vvv "$ASSET" 2>&1) || true
+          echo "$out"
+          case "$out" in
+            *"source=Notarized Developer ID"*) echo "  accepted as notarized" ;;
+            *) echo "Gatekeeper did not report a notarized Developer ID source"; exit 1 ;;
+          esac
+
+      - name: Remove the keychain and the notary key
+        if: always()
+        run: |
+          security delete-keychain "${KEYCHAIN:-}" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/submit.zip"
+
+      # The smoke test below now runs against the SIGNED binary, which is the
+      # point: signing rewrote the file, and this is what proves it still runs.
       - name: Smoke test
         run: ./scripts/smoke.sh "./$ASSET"
 
@@ -77,6 +235,11 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # All three jobs carry this, not just macos. The action CREATES the
+          # release when none exists, so a draft flag on one job alone would let
+          # the other two race it and publish a public release for a test tag.
+          # Absent on a tag push, so the comparison is false and nothing changes.
+          draft: ${{ github.event.inputs.draft == 'true' }}
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
@@ -126,6 +289,11 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # All three jobs carry this, not just macos. The action CREATES the
+          # release when none exists, so a draft flag on one job alone would let
+          # the other two race it and publish a public release for a test tag.
+          # Absent on a tag push, so the comparison is false and nothing changes.
+          draft: ${{ github.event.inputs.draft == 'true' }}
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
@@ -159,6 +327,11 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # All three jobs carry this, not just macos. The action CREATES the
+          # release when none exists, so a draft flag on one job alone would let
+          # the other two race it and publish a public release for a test tag.
+          # Absent on a tag push, so the comparison is false and nothing changes.
+          draft: ${{ github.event.inputs.draft == 'true' }}
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
