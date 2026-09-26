@@ -37,8 +37,12 @@ on:
         type: boolean
         default: false
 
+# Read by default. Only `publish` writes a release, and it grants itself
+# `contents: write` there — so the jobs that handle the Developer ID certificate
+# and the notary key hold a token that cannot publish anything. Narrowing this
+# only became possible when the three build jobs stopped publishing.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Nothing ships until the suite has run against the exact commit being tagged.
@@ -323,9 +327,11 @@ jobs:
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
-          # An empty upload would otherwise be a silent success here and a
-          # missing asset three jobs later.
+          # Fails fast and names the job, rather than leaving `publish` to report
+          # it as a count that is four instead of six.
           if-no-files-found: error
+          # Consumed minutes later by `publish` and useless after that.
+          retention-days: 1
 
   linux:
     needs: verify
@@ -376,7 +382,11 @@ jobs:
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+          # Fails fast and names the job, rather than leaving `publish` to report
+          # it as a count that is four instead of six.
           if-no-files-found: error
+          # Consumed minutes later by `publish` and useless after that.
+          retention-days: 1
 
   windows:
     needs: verify
@@ -411,7 +421,11 @@ jobs:
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+          # Fails fast and names the job, rather than leaving `publish` to report
+          # it as a count that is four instead of six.
           if-no-files-found: error
+          # Consumed minutes later by `publish` and useless after that.
+          retention-days: 1
 
   # ONE release call, after all three builds, and the only job that publishes.
   #
@@ -432,6 +446,13 @@ jobs:
   publish:
     needs: [macos, linux, windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # For `download-artifact` when a run is RE-RUN rather than run: listing
+      # another attempt's artifacts goes through the Actions API, and without
+      # this a retry can answer "workflow run not found". The likely path to a
+      # re-run here is a notarization timeout.
+      actions: read
     steps:
       # `digest-mismatch` defaults to `error`, so a corrupted artifact fails here
       # rather than reaching the releases page.
@@ -441,31 +462,50 @@ jobs:
           merge-multiple: true
           path: assets
 
-      - name: Six assets, and the checksums match the bytes
+      - name: Every platform is here, and each binary is covered by its own checksum
         run: |
           set -euo pipefail
           ls -l assets
 
-          # Enumerate rather than eyeball. An empty or short download would
-          # otherwise publish a release that is missing a platform.
-          n=$(find assets -type f | wc -l | tr -d ' ')
-          [ "$n" -eq 6 ] || { echo "expected 6 files, found $n"; exit 1; }
+          # ONE list of platforms, with the expected count derived from it. Two
+          # statements of one fact drift: a fourth platform added to the list
+          # without the count fires a misleading "expected 6", and a count bumped
+          # without the list leaves the new platform counted but never named.
+          set -- macos-universal x86_64-linux-musl x86_64-windows.exe
+          expected=$(( $# * 2 ))
 
-          for p in macos-universal x86_64-linux-musl x86_64-windows.exe; do
+          n=$(find assets -type f | wc -l | tr -d ' ')
+          [ "$n" -eq "$expected" ] || { echo "expected $expected files, found $n"; exit 1; }
+
+          for p in "$@"; do
             ls assets/*"$p" > /dev/null || { echo "missing the $p binary"; exit 1; }
             ls assets/*"$p".sha256 > /dev/null || { echo "missing the $p checksum"; exit 1; }
           done
 
-          # The checksums are what a user runs to decide whether to trust the
-          # download, so they are checked against the bytes being published
-          # rather than assumed to have travelled together. Both `shasum -a 256`
-          # on macOS and `sha256sum` elsewhere write the same format.
+          # The checksums are what a user runs to decide whether to trust a
+          # download, so each is checked against the bytes being published.
+          # `shasum -a 256` on macOS and `sha256sum` elsewhere write one format.
+          #
+          # ⚠ `sha256sum -c` alone does NOT establish this. It verifies whatever
+          # path is written INSIDE the file and never that the file's own name
+          # and its content refer to the same binary. Measured: with the macOS
+          # `.sha256` made to name the Linux binary, `-c` exits 0 having hashed
+          # Linux twice and the tampered macOS binary not at all. Today's
+          # generation cannot produce that, so this is a guard against a future
+          # edit to a build job — which is exactly when nobody would be looking.
           cd assets
           for f in *.sha256; do
+            [ "$(wc -l < "$f")" -eq 1 ] || { echo "$f is not a single-line checksum file"; exit 1; }
+            named=$(awk '{ print $2 }' "$f")
+            [ "$named" = "${f%.sha256}" ] || { echo "$f names \"$named\", not \"${f%.sha256}\""; exit 1; }
             sha256sum -c "$f"
           done
 
-      - uses: softprops/action-gh-release@v3
+      # Pinned to the SHA `@v3` resolved on 2026-09-26, which is the SHA the
+      # `draft` reading at the top of this file is based on — so that reading is
+      # now a property of what runs rather than of what ran once. This is also
+      # the only third-party action here holding `contents: write`.
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: ${{ github.event.inputs.draft == 'true' }}
