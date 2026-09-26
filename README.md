@@ -57,7 +57,7 @@ macOS marks quarantine from browsers, not from `curl`.
 From [crates.io](https://crates.io/crates/lucida):
 
 ```console
-cargo install lucida
+cargo install lucida --locked
 ```
 
 From the repository, which builds whatever `main` is:

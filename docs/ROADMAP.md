@@ -691,10 +691,12 @@ Three things worth keeping from that:
   needs a different certificate from a different vendor. Signing fixes exactly
   one route: a download from the releases page **in a browser**.
 - **crates.io — DONE, v1.1.0 published 2026-09-26**, from a checkout of the
-  `v1.1.0` tag, so the crate and the tag are the same tree. Owner decision to
+  `v1.1.0` tag, so the crate is built from the tag's commit — its
+  `.cargo_vcs_info.json` records it. Owner decision to
   publish, 2026-08-09, after a brief gate on the Apple signing certificate was
-  lifted: the two are independent. ⚠ This entry read "publishing at v1.0.1",
-  and later that day "still not published", until the publish on 2026-09-26.
+  lifted: the two are independent. ⚠ This entry read "publishing at v1.0.1"
+  until 2026-09-26, then "still not published" until the publish later that
+  day.
   **A published crate ships no binary** — `cargo install lucida`
   compiles from source on the user's machine, so nothing there is ever
   Gatekeeper-evaluated and no certificate would change that path. Signing affects
@@ -706,15 +708,14 @@ Three things worth keeping from that:
   crate whose `Cargo.toml` does not match the tag it claims to be is a
   discrepancy worth one patch release to avoid.
 
-  **What is still owed.** Each later version is published by hand today, and
-  it has to be cut from its tag, not from `main`. The fix is crates.io trusted
+  **What is still owed.** Until then, each later version has to be published
+  by hand, from a checkout of its tag, not from `main`. The fix is crates.io trusted
   publishing from the `publish` job in `release.yml`, which would make a tag
   push publish the crate from the same commit as the binaries, with no stored
   token. crates.io only accepts that configuration for a crate that already
   exists, which is why the first release went out on a token. ⚠ This
-  paragraph said the registry token "is not an agent's to hold" until
-  2026-09-26, when the owner placed it at machine level on the build machine,
-  where agents may use it.
+  paragraph said the registry token "is not an agent's to hold" until the
+  owner reversed that on 2026-09-26.
 - **Video beyond Veo — DONE at v1.0.0.** Runway and Kling shipped behind
   `VideoProvider`. What remains is the *other* axis: providers that are present
   for one medium and absent for the other. See § 5.
