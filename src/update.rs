@@ -2,12 +2,13 @@
 //!
 //! # Why this is not "just download and overwrite"
 //!
-//! Lucida arrives three ways — `cargo install --git`, a prebuilt release binary,
-//! or a local `cargo build` — and **the update for one is wrong for another**.
-//! Overwriting a `cargo install` binary with a downloaded release leaves cargo
-//! believing it manages a file it no longer built, so the next
-//! `cargo install --git` silently reverts the update. So the install source is
-//! detected and each gets its own answer.
+//! Lucida arrives four ways — `cargo install` from crates.io, `cargo install
+//! --git`, a prebuilt release binary, or a local `cargo build` — and **the update
+//! for one is wrong for another**. Overwriting a `cargo install` binary with a
+//! downloaded release leaves cargo believing it manages a file it no longer
+//! built, so the next `cargo install` silently reverts the update. So the install
+//! source is detected and each gets its own answer — and a cargo-managed copy is
+//! rebuilt from the source cargo recorded for it, crates.io or git.
 //!
 //! The detection is deliberately conservative: a binary living in a cargo bin
 //! directory came from cargo, and anything else is treated as a plain download.
@@ -404,19 +405,61 @@ fn record_check(path: &Path) {
     let _ = std::fs::write(path, now.as_secs().to_string());
 }
 
-/// The `cargo install` arguments for a given release tag.
+/// The `cargo install` arguments for a given release tag, from the source the
+/// copy was installed from.
 ///
-/// **`--tag` rather than the default branch, which is the part worth getting
-/// right.** `cargo install --git <url>` builds whatever `main` happens to be,
-/// so an update that had just announced "0.7.0 is available" would install
-/// something else — main with whatever has landed since — and then report a
-/// version the release page has never heard of. The tag installs the release
-/// that was actually offered.
-fn cargo_args(tag: &str) -> Vec<String> {
-    ["install", "--git", REPO, "--tag", tag, "--force"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+/// **Pinned to the release that was offered, either way, which is the part
+/// worth getting right.** `cargo install --git <url>` builds whatever `main`
+/// happens to be, so an update that had just announced "0.7.0 is available"
+/// would install something else — main with whatever has landed since — and
+/// then report a version the release page has never heard of. `--tag` fixes
+/// that for git, and an exact `--version` does the same on crates.io, where
+/// `--locked` also builds against the lockfile the crate ships.
+fn cargo_args(source: &CargoSource, tag: &str) -> Vec<String> {
+    let version = tag.trim_start_matches('v');
+    let args: &[&str] = match source {
+        CargoSource::Registry => {
+            &["install", "lucida", "--version", version, "--locked", "--force"]
+        }
+        CargoSource::Git => &["install", "--git", REPO, "--tag", tag, "--force"],
+    };
+    args.iter().map(|s| s.to_string()).collect()
+}
+
+/// Where cargo got the copy it installed.
+#[derive(Debug, PartialEq, Eq)]
+enum CargoSource {
+    /// crates.io, since v1.1.0.
+    Registry,
+    /// The repository — and anything cargo's record does not settle.
+    Git,
+}
+
+/// Reads cargo's own install record, `.crates2.json` in the install root, for
+/// the source of the `lucida` it installed.
+///
+/// Updating a crates.io install from git works, and quietly turns it into a git
+/// install the user never chose — one the next `cargo install lucida` swaps
+/// back. The record is where cargo keeps the answer, keyed as
+/// `"lucida 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)"`, so
+/// it is read rather than guessed.
+///
+/// Anything short of a registry entry for this crate answers `Git`, which is
+/// what every cargo-managed copy got before the record was read: an unreadable
+/// or missing record changes nothing.
+fn cargo_source(root: &Path) -> CargoSource {
+    let Ok(text) = std::fs::read_to_string(root.join(".crates2.json")) else {
+        return CargoSource::Git;
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return CargoSource::Git;
+    };
+    let from_registry = record["installs"].as_object().is_some_and(|installs| {
+        installs.keys().any(|key| {
+            key.starts_with("lucida ") && (key.contains("(registry+") || key.contains("(sparse+"))
+        })
+    });
+    if from_registry { CargoSource::Registry } else { CargoSource::Git }
 }
 
 /// Rebuilds a cargo-installed copy, by running cargo.
@@ -432,7 +475,11 @@ fn cargo_args(tag: &str) -> Vec<String> {
 /// Falling back to printing when cargo cannot be found is still right, and is
 /// the only case where a command is handed over rather than run.
 fn reinstall_with_cargo(exe: &Path, tag: &str) -> Result<()> {
-    let args = cargo_args(tag);
+    // The install root is the parent of the `bin` directory holding the copy,
+    // which is where cargo keeps its record — whatever CARGO_HOME or
+    // CARGO_INSTALL_ROOT was when it was installed.
+    let source = exe.parent().and_then(Path::parent).map_or(CargoSource::Git, cargo_source);
+    let args = cargo_args(&source, tag);
     let printable = format!("cargo {}", args.join(" "));
 
     // Respects CARGO, which is set when this is itself invoked from cargo, and
@@ -709,7 +756,7 @@ mod tests {
 
     #[test]
     fn the_cargo_reinstall_is_pinned_to_the_release_tag() {
-        let args = cargo_args("v0.7.0");
+        let args = cargo_args(&CargoSource::Git, "v0.7.0");
         assert_eq!(
             args,
             vec!["install", "--git", REPO, "--tag", "v0.7.0", "--force"]
@@ -720,6 +767,51 @@ mod tests {
         // version the release page has never heard of.
         assert!(args.contains(&"--tag".to_string()));
         assert!(args.contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn a_crates_io_install_is_updated_from_crates_io() {
+        // Reinstalling it from git would work, and would quietly turn a registry
+        // install into a git one — which the user never chose, and which the next
+        // `cargo install lucida` reverses.
+        assert_eq!(
+            cargo_args(&CargoSource::Registry, "v1.2.0"),
+            vec!["install", "lucida", "--version", "1.2.0", "--locked", "--force"]
+        );
+    }
+
+    #[test]
+    fn cargos_own_record_says_where_the_install_came_from() {
+        let root = std::env::temp_dir().join(format!("lucida-crates2-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let record = |key: &str| {
+            let json = format!(r#"{{"installs":{{"{key}":{{"bins":["lucida"]}}}}}}"#);
+            std::fs::write(root.join(".crates2.json"), json).unwrap();
+            cargo_source(&root)
+        };
+
+        // The key format is cargo's, copied from a real `.crates2.json`: crates.io
+        // is still spelled as the git index URL under the sparse protocol.
+        assert_eq!(
+            record("lucida 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)"),
+            CargoSource::Registry
+        );
+        assert_eq!(record("lucida 1.1.0 (sparse+https://index.crates.io/)"), CargoSource::Registry);
+        assert_eq!(
+            record("lucida 1.1.0 (git+https://github.com/Artificial-Humanity/Lucida?tag=v1.1.0#11d4c38)"),
+            CargoSource::Git
+        );
+        // Another crate's registry entry says nothing about this one.
+        assert_eq!(
+            record("lucida-extra 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)"),
+            CargoSource::Git
+        );
+
+        // No record at all keeps what this did before it read one.
+        std::fs::remove_file(root.join(".crates2.json")).unwrap();
+        assert_eq!(cargo_source(&root), CargoSource::Git);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
