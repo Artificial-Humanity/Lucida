@@ -497,6 +497,14 @@ jobs:
           for f in *.sha256; do
             [ "$(wc -l < "$f")" -eq 1 ] || { echo "$f is not a single-line checksum file"; exit 1; }
             named=$(awk '{ print $2 }' "$f")
+            # ⚠ The Windows file names `*lucida-...exe`, with coreutils' binary-mode
+            # marker, because `sha256sum` on that runner defaults to binary mode.
+            # The published checksums have always carried it and both installers
+            # read field 1, the hash, so the artifact format is left alone and the
+            # comparison tolerates the marker. Found by this very check on run
+            # 36211365813 — the platform difference had gone unnoticed because
+            # `sha256sum -c` accepts either form.
+            named=${named#\*}
             [ "$named" = "${f%.sha256}" ] || { echo "$f names \"$named\", not \"${f%.sha256}\""; exit 1; }
             sha256sum -c "$f"
           done
