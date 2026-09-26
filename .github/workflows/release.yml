@@ -206,18 +206,44 @@ jobs:
           fi
           echo "  notarization Accepted, submission $id"
 
-      - name: Gatekeeper's own verdict
+      - name: The ticket is reachable for this binary
         run: |
           set -euo pipefail
-          # A notarized bare executable carries no stapled ticket — `stapler`
-          # takes only a .app, .pkg or .dmg — so this is an ONLINE check by
-          # design, and it is the judgement a user's machine makes.
-          out=$(spctl -a -t exec -vvv "$ASSET" 2>&1) || true
-          echo "$out"
-          case "$out" in
-            *"source=Notarized Developer ID"*) echo "  accepted as notarized" ;;
-            *) echo "Gatekeeper did not report a notarized Developer ID source"; exit 1 ;;
-          esac
+          # ⚠ `spctl -a -t exec` stood here first and CANNOT answer this. It
+          # rejects a bare Mach-O on the kind of artifact rather than on trust:
+          # "the code is valid but does not seem to be an app" (run 36202951518,
+          # 2026-09-26, with notarization already Accepted). It assesses app
+          # bundles. Do not put it back.
+          #
+          # `codesign --check-notarization` is the documented instrument — "force
+          # an online notarization check to see if a notarization ticket is
+          # available" — and it carries no such restriction. A bare executable
+          # takes no stapled ticket, so consulting Apple is the only way to ask.
+
+          # The control comes FIRST, because an assertion nobody has watched fail
+          # is not evidence. If the check below passed an unsigned file, then it
+          # is advisory and "it passed" would mean nothing.
+          probe="$RUNNER_TEMP/unsigned-probe"
+          cp "$ASSET" "$probe"
+          codesign --remove-signature "$probe"
+          if codesign --verify --strict --check-notarization "$probe" 2> /dev/null; then
+            echo "the notarization check passed an UNSIGNED binary, so it asserts nothing"
+            exit 1
+          fi
+          echo "  control held: the check rejects an unsigned copy"
+          rm -f "$probe"
+
+          # Now the real one.
+          codesign --verify --strict --verbose=2 --check-notarization "$ASSET"
+          echo "  a notarization ticket is available for this binary"
+
+          # What this pair does and does not establish: the control proves the
+          # check is not a no-op, and the check proves Apple serves a ticket for
+          # these bytes. It does not isolate the notarization dimension from the
+          # signature — a signed-but-unnotarized control would, and re-signing an
+          # identical file can reproduce the same cdhash, which would make such a
+          # control silently find the ticket it was built to miss. The
+          # notarization verdict itself is notarytool's `Accepted` above.
 
       - name: Remove the keychain and the notary key
         if: always()
