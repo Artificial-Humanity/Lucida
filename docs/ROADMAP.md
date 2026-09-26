@@ -690,13 +690,12 @@ Three things worth keeping from that:
   and reaches no signed artifact at all. Windows SmartScreen is untouched and
   needs a different certificate from a different vendor. Signing fixes exactly
   one route: a download from the releases page **in a browser**.
-- **crates.io — still not published, and the version to publish is now v1.1.0.**
-  Owner decision to publish, 2026-08-09, after a brief gate on the Apple signing
-  certificate was lifted: the two are independent. ⚠ This entry read "publishing
-  at v1.0.1" until 2026-09-26, which by then named a shipped release and so read
-  as done. It is not done: it waits on the owner's registry token, and the
-  version to cut it from is whichever tag is current — see the sequencing
-  warning below, which is the whole reason v1.0.1 exists. **A published crate ships no binary** — `cargo install lucida`
+- **crates.io — DONE, v1.1.0 published 2026-09-26**, from a checkout of the
+  `v1.1.0` tag, so the crate and the tag are the same tree. Owner decision to
+  publish, 2026-08-09, after a brief gate on the Apple signing certificate was
+  lifted: the two are independent. ⚠ This entry read "publishing at v1.0.1",
+  and later that day "still not published", until the publish on 2026-09-26.
+  **A published crate ships no binary** — `cargo install lucida`
   compiles from source on the user's machine, so nothing there is ever
   Gatekeeper-evaluated and no certificate would change that path. Signing affects
   exactly one route, a binary downloaded from the releases page **in a browser**
@@ -707,9 +706,15 @@ Three things worth keeping from that:
   crate whose `Cargo.toml` does not match the tag it claims to be is a
   discrepancy worth one patch release to avoid.
 
-  **Publishing requires the owner's registry token and is not an agent's to
-  hold.** Everything else is prepared: metadata, `exclude`, and a package
-  verified to compile from its own contents.
+  **What is still owed.** Each later version is published by hand today, and
+  it has to be cut from its tag, not from `main`. The fix is crates.io trusted
+  publishing from the `publish` job in `release.yml`, which would make a tag
+  push publish the crate from the same commit as the binaries, with no stored
+  token. crates.io only accepts that configuration for a crate that already
+  exists, which is why the first release went out on a token. ⚠ This
+  paragraph said the registry token "is not an agent's to hold" until
+  2026-09-26, when the owner placed it at machine level on the build machine,
+  where agents may use it.
 - **Video beyond Veo — DONE at v1.0.0.** Runway and Kling shipped behind
   `VideoProvider`. What remains is the *other* axis: providers that are present
   for one medium and absent for the other. See § 5.

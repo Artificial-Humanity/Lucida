@@ -54,6 +54,14 @@ macOS marks quarantine from browsers, not from `curl`.
 
 ### Building from source
 
+From [crates.io](https://crates.io/crates/lucida):
+
+```console
+cargo install lucida
+```
+
+From the repository, which builds whatever `main` is:
+
 ```console
 cargo install --git https://github.com/Artificial-Humanity/Lucida
 ```
