@@ -16,16 +16,22 @@ on:
       # second-newest NON-DRAFT release, so a pre-release here would silently
       # move what that job asserts.
       #
-      # ⚠ Two things about testing this way, both learned the hard way while it
-      # was being written:
-      #
-      # Use a tag that does NOT begin with `v`. Pushing one that does fires the
-      # trigger above and publishes a real release before anyone dispatches
+      # ⚠ Use a tag that does NOT begin with `v`. Pushing one that does fires
+      # the trigger above and publishes a real release before anyone dispatches
       # anything. `signing-test.1` matches nothing and can only be dispatched.
+      # The first step of each job enforces this rather than trusting the note.
       #
-      # ⚠ Never dispatch this against a tag that already has a published
-      # release. `action-gh-release` updates the release it finds, and that
-      # includes flipping a published one to draft.
+      # ⚠ The hazard is the box UNTICKED, not ticked, and it is the default.
+      # Read at `softprops/action-gh-release` efb3536, the SHA `@v3` resolved on
+      # 2026-09-26: a non-prerelease is always CREATED as a draft
+      # (`github.ts:1058`) and un-drafted after upload by `finalizeRelease`,
+      # which early-returns only when the input is true (`github.ts:762`). So
+      # dispatching with this off, against a tag whose release is currently a
+      # draft, PUBLISHES that draft. The update path passes
+      # `draft: existingRelease.draft` (`github.ts:710`), so the reverse — a
+      # ticked box demoting a published release — is what an earlier version of
+      # this comment warned about and does not happen. `@v3` floats, so this is
+      # a reading of one SHA rather than a guarantee.
       draft:
         description: "Publish to a DRAFT release (signing-path test only)"
         type: boolean
@@ -46,6 +52,26 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # One enforcement point for the `draft` input's one legitimate use, here
+      # rather than in the three upload jobs, because every one of them needs
+      # this job — so a refusal here stops all three and cannot be bypassed.
+      # A prose warning is what this replaces; prose does not refuse.
+      - name: A draft dispatch is only for a throwaway tag
+        if: github.event.inputs.draft == 'true'
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v*)
+              echo "refusing: \"$TAG\" is a release tag, and this input exists only"
+              echo "for a throwaway tag. Against a real tag it would rewrite the"
+              echo "release for a version users already have."
+              exit 1
+              ;;
+            *) echo "ok: \"$TAG\" is not a release tag" ;;
+          esac
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -110,9 +136,11 @@ jobs:
           echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          # Long timeout and no lock-on-sleep: a notarization wait must not end
-          # with the keychain locked underneath it.
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          # A six-hour timeout and NO lock-on-sleep, because a notarization wait
+          # must not end with the keychain locked underneath it. `-lut 21600`
+          # stood here and is `-l -u -t`, where `-l` is "lock keychain when the
+          # system sleeps" — the opposite of what this comment claimed.
+          security set-keychain-settings -u -t 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
           echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
@@ -126,7 +154,12 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
 
-          # Add to the search list, keeping what was already there.
+          # Add to the search list, keeping what was already there. `codesign`
+          # and `find-identity` are both given the keychain path explicitly, so
+          # this is not what lets them find the key. It is here for chain
+          # building: the Developer ID intermediate is resolved through the
+          # search list. Removing it is not a free simplification — it cannot be
+          # retested without spending another notarization round.
           security list-keychains -d user -s "$KEYCHAIN" \
             $(security list-keychains -d user | tr -d '"')
 
@@ -150,7 +183,17 @@ jobs:
           # Both flags are required for notarization to accept the submission. No
           # entitlements: a static Rust binary with rustls asks for nothing the
           # hardened runtime withholds.
+          #
+          # ⚠ `--identifier` is not optional here even though codesign will
+          # invent one. Absent it, the identifier is derived from the FILENAME —
+          # which carries the version — so `Identifier=lucida-1.0.2-...` would
+          # differ on every release. The identifier is part of the Designated
+          # Requirement, so anything pinning the DR breaks at each release, and
+          # `install.sh` renames the file to `lucida` anyway, leaving a version
+          # string in the identity of a file that no longer has one in its name.
+          # Changing it later changes the DR for everyone holding a signed copy.
           codesign --force --timestamp --options runtime \
+            --identifier io.artificialhumanity.lucida \
             --keychain "$KEYCHAIN" --sign "$IDENTITY" "$ASSET"
 
           codesign --verify --strict --verbose=2 "$ASSET"
@@ -171,6 +214,7 @@ jobs:
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           set -euo pipefail
+          umask 077
           [ -n "$API_KEY_P8_BASE64" ] || { echo "APPLE_API_KEY_P8_BASE64 is empty or unset"; exit 1; }
           [ -n "$API_KEY_ID" ] || { echo "APPLE_API_KEY_ID is empty or unset"; exit 1; }
           [ -n "$API_ISSUER_ID" ] || { echo "APPLE_API_ISSUER_ID is empty or unset"; exit 1; }
@@ -182,11 +226,13 @@ jobs:
           ditto -c -k --keepParent "$ASSET" "$RUNNER_TEMP/submit.zip"
 
           # --wait blocks until Apple answers, so nothing is published ahead of
-          # its verdict.
+          # its verdict. --timeout bounds that wait: measured 19 s and 42 m 49 s
+          # on two runs of the same file, so the spread is Apple's and the only
+          # ceiling otherwise is the 6 h job limit.
           set +e
           out=$(xcrun notarytool submit "$RUNNER_TEMP/submit.zip" \
             --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
-            --wait --output-format json)
+            --wait --timeout 45m --output-format json)
           rc=$?
           set -e
           echo "$out"
@@ -206,50 +252,61 @@ jobs:
           fi
           echo "  notarization Accepted, submission $id"
 
-      - name: The ticket is reachable for this binary
+      - name: The signature is still valid after notarization
         run: |
           set -euo pipefail
-          # ⚠ `spctl -a -t exec` stood here first and CANNOT answer this. It
-          # rejects a bare Mach-O on the kind of artifact rather than on trust:
-          # "the code is valid but does not seem to be an app" (run 36202951518,
-          # 2026-09-26, with notarization already Accepted). It assesses app
-          # bundles. Do not put it back.
+          # ⚠⚠ READ THIS BEFORE STRENGTHENING THIS STEP. Two instruments have
+          # already been tried here and neither asserts what the step name would
+          # most like to say, which is "Apple holds a ticket for these bytes".
           #
-          # `codesign --check-notarization` is the documented instrument — "force
-          # an online notarization check to see if a notarization ticket is
-          # available" — and it carries no such restriction. A bare executable
-          # takes no stapled ticket, so consulting Apple is the only way to ask.
+          # `spctl -a -t exec` was first and CANNOT answer it: it rejects a bare
+          # Mach-O on the KIND of artifact, not on trust — "the code is valid but
+          # does not seem to be an app" (run 36202951518, with notarization
+          # already Accepted). It assesses app bundles. Do not put it back.
+          #
+          # `--check-notarization` is documented — "force an online notarization
+          # check to see if a notarization ticket is available" — and carries no
+          # such restriction, so it is kept. But its output is INDISTINGUISHABLE
+          # from a plain `--verify`: in run 36206138279 the two printed
+          # byte-identical lines 19 s apart. So it cannot be seen to do anything,
+          # and this step asserts only what it can show — that the signature is
+          # valid and satisfies its Designated Requirement after notarization.
+          #
+          # ⚠ THE NOTARIZATION EVIDENCE IS THE STEP ABOVE: notarytool's
+          # `Accepted`, which is Apple's own verdict and fails the job closed.
+          # `-R="=notarized"` is the folklore alternative and is deliberately not
+          # used — the codesign manual documents `-R` and no such requirement
+          # string, and an assertion resting on folklore is worse than a narrow
+          # one that is true.
 
-          # The control comes FIRST, because an assertion nobody has watched fail
-          # is not evidence. If the check below passed an unsigned file, then it
-          # is advisory and "it passed" would mean nothing.
+          # The control comes first. It proves `--verify --strict` refuses a file
+          # it should refuse, and it names the reason it expects — a check that
+          # "holds" because of an unrecognised option would otherwise print a
+          # reassuring line. It does NOT establish anything about the
+          # notarization dimension: --verify alone fails an unsigned file.
           probe="$RUNNER_TEMP/unsigned-probe"
           cp "$ASSET" "$probe"
           codesign --remove-signature "$probe"
-          if codesign --verify --strict --check-notarization "$probe" 2> /dev/null; then
-            echo "the notarization check passed an UNSIGNED binary, so it asserts nothing"
+          if err=$(codesign --verify --strict --check-notarization "$probe" 2>&1); then
+            echo "the check passed an UNSIGNED binary, so it asserts nothing"
             exit 1
           fi
-          echo "  control held: the check rejects an unsigned copy"
+          echo "$err"
+          case "$err" in
+            *"not signed at all"*) echo "  control held, for the expected reason" ;;
+            *) echo "the control failed for an unexpected reason, so it proves nothing"; exit 1 ;;
+          esac
           rm -f "$probe"
 
-          # Now the real one.
           codesign --verify --strict --verbose=2 --check-notarization "$ASSET"
-          echo "  a notarization ticket is available for this binary"
-
-          # What this pair does and does not establish: the control proves the
-          # check is not a no-op, and the check proves Apple serves a ticket for
-          # these bytes. It does not isolate the notarization dimension from the
-          # signature — a signed-but-unnotarized control would, and re-signing an
-          # identical file can reproduce the same cdhash, which would make such a
-          # control silently find the ticket it was built to miss. The
-          # notarization verdict itself is notarytool's `Accepted` above.
+          echo "  signature valid, and the online notarization check was attempted"
 
       - name: Remove the keychain and the notary key
         if: always()
         run: |
           security delete-keychain "${KEYCHAIN:-}" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/submit.zip"
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12" \
+            "$RUNNER_TEMP/submit.zip" "$RUNNER_TEMP/unsigned-probe"
 
       # The smoke test below now runs against the SIGNED binary, which is the
       # point: signing rewrote the file, and this is what proves it still runs.
