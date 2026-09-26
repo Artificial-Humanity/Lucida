@@ -53,9 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # One enforcement point for the `draft` input's one legitimate use, here
-      # rather than in the three upload jobs, because every one of them needs
-      # this job — so a refusal here stops all three and cannot be bypassed.
-      # A prose warning is what this replaces; prose does not refuse.
+      # rather than in `publish`, because every other job needs this one — so a
+      # refusal stops the builds too rather than only the release call, and
+      # nothing is left half-run. A prose warning is what this replaces; prose
+      # does not refuse.
       - name: A draft dispatch is only for a throwaway tag
         if: github.event.inputs.draft == 'true'
         env:
@@ -315,17 +316,16 @@ jobs:
 
       - run: shasum -a 256 "$ASSET" > "$ASSET.sha256"
 
-      - uses: softprops/action-gh-release@v3
+      # This job does not publish. See the `publish` job for why.
+      - uses: actions/upload-artifact@v7
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          # All three jobs carry this, not just macos. The action CREATES the
-          # release when none exists, so a draft flag on one job alone would let
-          # the other two race it and publish a public release for a test tag.
-          # Absent on a tag push, so the comparison is false and nothing changes.
-          draft: ${{ github.event.inputs.draft == 'true' }}
-          files: |
+          name: release-macos
+          path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+          # An empty upload would otherwise be a silent success here and a
+          # missing asset three jobs later.
+          if-no-files-found: error
 
   linux:
     needs: verify
@@ -369,17 +369,14 @@ jobs:
 
       - run: sha256sum "$ASSET" > "$ASSET.sha256"
 
-      - uses: softprops/action-gh-release@v3
+      # This job does not publish. See the `publish` job for why.
+      - uses: actions/upload-artifact@v7
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          # All three jobs carry this, not just macos. The action CREATES the
-          # release when none exists, so a draft flag on one job alone would let
-          # the other two race it and publish a public release for a test tag.
-          # Absent on a tag push, so the comparison is false and nothing changes.
-          draft: ${{ github.event.inputs.draft == 'true' }}
-          files: |
+          name: release-linux
+          path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+          if-no-files-found: error
 
   windows:
     needs: verify
@@ -407,14 +404,69 @@ jobs:
 
       - run: sha256sum "$ASSET" > "$ASSET.sha256"
 
+      # This job does not publish. See the `publish` job for why.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          if-no-files-found: error
+
+  # ONE release call, after all three builds, and the only job that publishes.
+  #
+  # ⚠ Each build job used to call `action-gh-release` itself, and that is a race
+  # rather than three independent uploads. The action creates a release as a
+  # draft and un-drafts it once THAT job's files are up, so the first job home
+  # published a release carrying only its own assets. Notarization turned a
+  # seconds-long window into tens of minutes — measured 19 s and 42 m 49 s on the
+  # same file — during which the releases page offered a published version whose
+  # macOS asset did not exist yet, and `install.sh` on a Mac answered a 404.
+  #
+  # The failure mode is better now, not just narrower: if any build fails this
+  # job does not run, so NOTHING is published. A release missing an asset was the
+  # v0.5.0 failure; no release at all is the loud version of it.
+  #
+  # It also means the `draft` input has ONE consumer instead of three, so the
+  # hazard of a flag reaching one racer and not the others cannot arise.
+  publish:
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      # `digest-mismatch` defaults to `error`, so a corrupted artifact fails here
+      # rather than reaching the releases page.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+
+      - name: Six assets, and the checksums match the bytes
+        run: |
+          set -euo pipefail
+          ls -l assets
+
+          # Enumerate rather than eyeball. An empty or short download would
+          # otherwise publish a release that is missing a platform.
+          n=$(find assets -type f | wc -l | tr -d ' ')
+          [ "$n" -eq 6 ] || { echo "expected 6 files, found $n"; exit 1; }
+
+          for p in macos-universal x86_64-linux-musl x86_64-windows.exe; do
+            ls assets/*"$p" > /dev/null || { echo "missing the $p binary"; exit 1; }
+            ls assets/*"$p".sha256 > /dev/null || { echo "missing the $p checksum"; exit 1; }
+          done
+
+          # The checksums are what a user runs to decide whether to trust the
+          # download, so they are checked against the bytes being published
+          # rather than assumed to have travelled together. Both `shasum -a 256`
+          # on macOS and `sha256sum` elsewhere write the same format.
+          cd assets
+          for f in *.sha256; do
+            sha256sum -c "$f"
+          done
+
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          # All three jobs carry this, not just macos. The action CREATES the
-          # release when none exists, so a draft flag on one job alone would let
-          # the other two race it and publish a public release for a test tag.
-          # Absent on a tag push, so the comparison is false and nothing changes.
           draft: ${{ github.event.inputs.draft == 'true' }}
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+          files: assets/*
