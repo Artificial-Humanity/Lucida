@@ -231,13 +231,17 @@ jobs:
           ditto -c -k --keepParent "$ASSET" "$RUNNER_TEMP/submit.zip"
 
           # --wait blocks until Apple answers, so nothing is published ahead of
-          # its verdict. --timeout bounds that wait: measured 19 s and 42 m 49 s
-          # on two runs of the same file, so the spread is Apple's and the only
-          # ceiling otherwise is the 6 h job limit.
+          # its verdict. --timeout bounds that wait, and the bound is deliberately
+          # loose: measured 19 s, 20 s, 20 s and 42 m 49 s on the same file, so
+          # the spread is entirely Apple's. 45m stood here and sat about two
+          # minutes above our own worst case — close enough that a slow notary day
+          # would fail a release for no defect, and the retry costs another real
+          # submission. Waiting longer publishes nothing early, because --wait
+          # holds the job rather than the release.
           set +e
           out=$(xcrun notarytool submit "$RUNNER_TEMP/submit.zip" \
             --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
-            --wait --timeout 45m --output-format json)
+            --wait --timeout 2h --output-format json)
           rc=$?
           set -e
           echo "$out"
