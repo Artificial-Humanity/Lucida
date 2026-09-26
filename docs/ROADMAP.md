@@ -711,9 +711,11 @@ Three things worth keeping from that:
   **Later versions publish from the release workflow — wired, not yet proven.**
   The `crate` job in `release.yml` runs after the GitHub release and publishes
   through crates.io trusted publishing, so a tag push publishes the crate from
-  the same commit as the binaries, with no stored token. It refuses a tag that
-  disagrees with `Cargo.toml`'s version, and skips a version already on
-  crates.io. crates.io only accepts a trusted publisher for a crate that already
+  the same commit as the binaries, with no stored token. It runs on a tag push
+  only — a dispatch against an older tag would otherwise publish that old
+  version — and skips a version already on crates.io. A tag that disagrees with
+  `Cargo.toml`'s version is refused in `verify`, before anything ships.
+  crates.io only accepts a trusted publisher for a crate that already
   exists, which is why the first release went out on a token. Nothing proves the
   job until the first tag runs it; if it fails, publish that version by hand
   from a checkout of the tag, not from `main`. ⚠ This

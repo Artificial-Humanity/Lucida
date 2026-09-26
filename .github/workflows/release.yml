@@ -83,6 +83,27 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+      # The asset names are built from the tag and the crate's version from
+      # `Cargo.toml`, and nothing else held the two together: a tag cut before the
+      # version bump would publish binaries named for one version that report
+      # another, and a crate claiming the second. Here, before anything ships,
+      # so the refusal stops the release as well as the crate. A throwaway draft
+      # tag cannot match a version, so a draft dispatch skips it.
+      - name: The tag names the version in Cargo.toml
+        if: github.event.inputs.draft != 'true'
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "lucida"))')
+          [ "${TAG#v}" = "$version" ] || { echo "tag $TAG does not match Cargo.toml version $version"; exit 1; }
+
+      # Packages the crate and builds it from its own contents, as `cargo publish`
+      # will — so a file the crate needs but `exclude` drops fails here, before the
+      # release is public, rather than in `crate` after it.
+      - run: cargo package --locked
+
   macos:
     needs: verify
     # A universal binary rather than two downloads. Apple Silicon runners carry
@@ -538,41 +559,41 @@ jobs:
   # `contents: read` and never beside the token that can write a release.
   crate:
     needs: publish
-    # A draft dispatch is a signing-path test against a throwaway tag, and a crate
-    # version is permanent — so it never reaches this job.
-    if: github.event.inputs.draft != 'true'
+    # A tag push only. A dispatch builds an EXISTING tag, and crates.io holds only
+    # the versions published since 2026-09-26 — so a dispatch against any older
+    # tag would find its version missing and publish it, permanently. That
+    # includes a draft dispatch, which is a signing test on a throwaway tag. A
+    # tag run that fails here is recovered by re-running the failed job, which
+    # keeps the push event, or by hand from a checkout of the tag.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
+      # The commit the run started on, not the tag re-resolved. The build jobs
+      # re-resolve it too, but this is the step that cannot be taken back, and a
+      # tag moved during a notarization wait would otherwise publish a crate from
+      # a different commit than the binaries.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.sha }}
 
-      # The asset names are built from the tag and the crate's version from
-      # `Cargo.toml`, and nothing else in this workflow holds the two together.
-      # A tag cut before the version bump would publish binaries named for one
-      # version and a crate claiming another.
-      #
-      # It also decides whether there is anything to do. A dispatch re-attaching
-      # binaries to an already-published version is legitimate, and the crate for
-      # it already exists; `cargo publish` would fail on that, so it is asked
-      # rather than attempted.
-      - name: The tag and the crate agree, and this version is not published yet
+      # `verify` has already held the tag to Cargo.toml's version. This decides
+      # whether there is anything to do: a re-run after `cargo publish` succeeded
+      # but the job failed afterwards must skip rather than fail on a version that
+      # now exists.
+      - name: This version is not on crates.io yet
         id: check
-        env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 --locked \
-            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "lucida"))')
-          [ "${TAG#v}" = "$version" ] || { echo "tag $TAG does not match Cargo.toml version $version"; exit 1; }
+          version=${GITHUB_REF_NAME#v}
 
-          # crates.io refuses requests without a User-Agent. 200 means the version
-          # exists; 404 means it does not; anything else is not an answer, so it
-          # fails rather than guessing in either direction.
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+          # crates.io refuses requests without a User-Agent (403, measured). 200
+          # means the version exists; 404 means it does not; anything else is not
+          # an answer, so it fails rather than guessing in either direction.
+          # `--retry` covers 408, 429 and 5xx.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 \
             -A "lucida-release (github.com/${{ github.repository }})" \
             "https://crates.io/api/v1/crates/lucida/$version")
           case "$code" in
