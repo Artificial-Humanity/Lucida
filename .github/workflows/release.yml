@@ -32,6 +32,11 @@ on:
       # ticked box demoting a published release — is what an earlier version of
       # this comment warned about and does not happen. `@v3` floats, so this is
       # a reading of one SHA rather than a guarantee.
+      #
+      # Partly guarded since 2026-09-26: an unticked dispatch against a throwaway
+      # tag now stops in `verify`, because a tag like `signing-test.1` does not
+      # name the version in Cargo.toml. A throwaway tag spelled like a version
+      # would still get through.
       draft:
         description: "Publish to a DRAFT release (signing-path test only)"
         type: boolean
