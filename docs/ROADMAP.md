@@ -789,18 +789,23 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
    **What would change the answer:** OpenAI naming a successor endpoint, moving
    the date, or the date passing with `sora-2` still reachable — in which case
    the withdrawal notice was about something narrower than it read. Worth
-   re-checking around 2026-09-24 rather than acting before it. `RETIREMENTS` in
-   `provider.rs` is where the date belongs either way, and `scripts/canary.sh`
-   is what would notice the models disappearing from `/v1/models`.
+   re-checking around 2026-09-24 rather than acting before it — done on
+   2026-09-26, recorded below. `RETIREMENTS` in `provider.rs` is where the date
+   belongs either way. ⚠ Until 2026-09-26 this also said `scripts/canary.sh`
+   would notice the models disappearing from `/v1/models`. It would not: the
+   canary checks only that each provider's *default* model is still listed, and
+   nothing in it names `sora-2`. The re-check below shows the model list is the
+   wrong signal here anyway.
 
    **Do not treat the live model list as evidence to the contrary.** `sora-2` and
    `sora-2-pro` list today and will very likely list on 2026-09-23. Models are
    catalogue entries; the Videos API is the thing being removed.
 
-   **Re-checked 2026-09-26, two days after the date.** The prediction held:
-   `sora-2` and `sora-2-pro` still list in `/v1/models`, and every `/v1/videos`
-   route now answers `404` with an empty body — the same answer as a path that
-   never existed — while the same key answers `200` on `/v1/files` and
+   **Re-checked 2026-09-26, two days after the date.** The model-list prediction
+   held: `sora-2` and `sora-2-pro` still list in `/v1/models`. The three
+   `/v1/videos` routes probed — list, retrieve, and create with an invalid
+   model — each answer `404` with an empty body, the same answer as a path that
+   never existed, while the same key answers `200` on `/v1/files` and
    `/v1/batches`. That is consistent with the removal having happened, not proof
    of it, since no probe of the endpoint from before the date is on record. No
    successor was looked for in the same check. So the answer is unchanged:
