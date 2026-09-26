@@ -573,11 +573,13 @@ jobs:
     if: github.event_name == 'push'
     # GitHub admits a job to this environment only from a `v*` tag (set in the
     # repository's environment settings, 2026-09-26), and the OIDC token carries
-    # the environment's name. Once crates.io's trusted publisher names it too, a
-    # token is minted only for a run from a release tag — not for an edited copy
-    # of this file dispatched from a branch. ⚠ The order matters: this line has
-    # to be on `main` BEFORE crates.io requires the environment, or the next
-    # publish is refused.
+    # the environment's name. crates.io's trusted publisher names it too, so
+    # crates.io exchanges a token only for a run from a `v*` tag — not for an
+    # edited copy of this file dispatched from a branch. Anyone who can push a
+    # `v*` tag still passes. ⚠ This line has to be in the commit every published
+    # tag points at: a tag cut from a commit without it, or a re-run of such a
+    # tag's run, is refused. ⚠ The name match does not prove the tag rule still
+    # exists — a deleted environment is recreated by the next run with no rule.
     environment: crates-io
     runs-on: ubuntu-latest
     permissions:
