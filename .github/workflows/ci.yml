@@ -122,8 +122,11 @@ jobs:
       # failed for a reason that had nothing to do with the installer. That was
       # not hypothetical: on 2026-08-07 everything below v0.9.0 was pruned,
       # v0.7.0 included. The second-newest release is by definition not the
-      # latest, which is the whole property under test — and with two releases
-      # left, this now resolves v0.9.0. Below two, the step exits 0 saying so.
+      # latest, which is the whole property under test. Below two releases, the
+      # step exits 0 saying so. ⚠ This comment named the version it resolved to,
+      # and that went stale twice: it said v0.9.0 when there were two releases,
+      # and read that way while the answer was v1.0.0 and then v1.0.1. The
+      # resolved version belongs in the run log, which prints it, and not here.
       - name: A pinned version installs that version, not the latest
         if: matrix.os != 'windows-latest'
         env:

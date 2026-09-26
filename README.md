@@ -45,6 +45,13 @@ The script installs a static binary to `~/.local/bin` (or `%LOCALAPPDATA%\Progra
 
 Prebuilt binaries with SHA256 checksums are also available on [Releases](https://github.com/Artificial-Humanity/Lucida/releases/latest).
 
+From v1.1.0 the macOS binary is signed with an Apple Developer ID and notarized, so a
+download from that page opens without a Gatekeeper warning. Because a standalone
+executable cannot carry a stapled notarization ticket, macOS checks it with Apple
+**online** on first run — silent with a network, and a machine with none can still
+refuse it. Binaries installed by the script above were never subject to that check:
+macOS marks quarantine from browsers, not from `curl`.
+
 ### Building from source
 
 ```console

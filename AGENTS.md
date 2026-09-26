@@ -30,9 +30,15 @@ published — so it is named here rather than linked. Read it before starting wo
   `VideoBackend::ALL` now, and `tests/cli.rs` holds the surviving hand-written list (the
   `--provider` clap doc comment) against the generated set over the wire.
   Add to that list the **GitHub repository description and topics**,
-  which live outside the repo entirely and so cannot be tested from it: they read
-  "Generate and edit images with Google's Gemini models" for four providers and all of
-  video. The description is kept in step with `Cargo.toml`'s, and a test
+  which live outside the repo entirely and so cannot be tested from it. ⚠ This
+  paragraph asserted in the present tense that they read "Generate and edit images with
+  Google's Gemini models" for four providers and all of video. That was fixed on the
+  GitHub side and the sentence was not: as of 2026-09-26 the live description names
+  Gemini, Veo, Runway, Kling, ComfyUI, FLUX, Stability AI and OpenAI, and the topics
+  carry `runway`, `kling`, `veo`, `openai`, `stability-ai` and `video-generation`. So
+  the surface this paragraph calls untestable went stale in the paragraph itself — check
+  `gh repo view --json description,repositoryTopics` rather than believing this
+  sentence. The description is kept in step with `Cargo.toml`'s, and a test
   (`the_shopfront_names_every_provider_and_video`) holds that one and the `--help`
   banner against `Backend::ALL` — but the GitHub copy is updated by hand, with
   `gh repo edit`, and nothing will remind you.

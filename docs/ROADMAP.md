@@ -650,9 +650,11 @@ Three things worth keeping from that:
 
 ## 4. Independent of providers
 
-- **Code signing — LANDED 2026-09-26, and unreleased until the next tag.** The
-  macOS asset is signed with the Artificial Humanity LLC Developer ID and
-  notarized by Apple, in the `macos` job of `release.yml`. The wait recorded
+- **Code signing — SHIPPED in v1.1.0 (2026-09-26).** The macOS asset is signed
+  with the Artificial Humanity LLC Developer ID and notarized by Apple, in the
+  `macos` job of `release.yml`. The first signed asset is
+  `lucida-1.1.0-macos-universal`, under the identifier
+  `io.artificialhumanity.lucida` and team `6Z2JR39R77`. The wait recorded
   here was for the organization account: a Developer ID certificate is issued to
   the team that creates it and **cannot be transferred between an individual and
   an organization account**, so signing under a personal one would have meant
@@ -688,9 +690,13 @@ Three things worth keeping from that:
   and reaches no signed artifact at all. Windows SmartScreen is untouched and
   needs a different certificate from a different vendor. Signing fixes exactly
   one route: a download from the releases page **in a browser**.
-- **crates.io — publishing at v1.0.1.** Owner decision, 2026-08-09, after a
-  brief gate on the Apple signing certificate was lifted: the two are
-  independent. **A published crate ships no binary** — `cargo install lucida`
+- **crates.io — still not published, and the version to publish is now v1.1.0.**
+  Owner decision to publish, 2026-08-09, after a brief gate on the Apple signing
+  certificate was lifted: the two are independent. ⚠ This entry read "publishing
+  at v1.0.1" until 2026-09-26, which by then named a shipped release and so read
+  as done. It is not done: it waits on the owner's registry token, and the
+  version to cut it from is whichever tag is current — see the sequencing
+  warning below, which is the whole reason v1.0.1 exists. **A published crate ships no binary** — `cargo install lucida`
   compiles from source on the user's machine, so nothing there is ever
   Gatekeeper-evaluated and no certificate would change that path. Signing affects
   exactly one route, a binary downloaded from the releases page **in a browser**
