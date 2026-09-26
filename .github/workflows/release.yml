@@ -571,6 +571,14 @@ jobs:
     # tag run that fails here is recovered by re-running the failed job, which
     # keeps the push event, or by hand from a checkout of the tag.
     if: github.event_name == 'push'
+    # GitHub admits a job to this environment only from a `v*` tag (set in the
+    # repository's environment settings, 2026-09-26), and the OIDC token carries
+    # the environment's name. Once crates.io's trusted publisher names it too, a
+    # token is minted only for a run from a release tag — not for an edited copy
+    # of this file dispatched from a branch. ⚠ The order matters: this line has
+    # to be on `main` BEFORE crates.io requires the environment, or the next
+    # publish is refused.
+    environment: crates-io
     runs-on: ubuntu-latest
     permissions:
       contents: read

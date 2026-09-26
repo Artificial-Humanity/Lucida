@@ -714,7 +714,8 @@ Three things worth keeping from that:
   the same commit as the binaries, with no stored token. It runs on a tag push
   only — a dispatch against an older tag would otherwise publish that old
   version — and skips a version already on crates.io. A tag that disagrees with
-  `Cargo.toml`'s version is refused in `verify`, before anything ships.
+  `Cargo.toml`'s version is refused in `verify`, before anything ships. The
+  job runs in a `crates-io` GitHub environment that admits only `v*` tags.
   crates.io only accepts a trusted publisher for a crate that already
   exists, which is why the first release went out on a token. Nothing proves the
   job until the first tag runs it; if it fails, publish that version by hand
