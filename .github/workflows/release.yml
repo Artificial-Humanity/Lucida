@@ -522,3 +522,74 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: ${{ github.event.inputs.draft == 'true' }}
           files: assets/*
+
+  # The crate, published to crates.io from the same commit as the binaries, with
+  # no stored token: crates.io trusted publishing trades this job's GitHub OIDC
+  # identity for a short-lived token, which the action revokes when the job ends.
+  # The trusted publisher on crates.io names THIS file, so renaming it breaks
+  # publishing until the crates.io setting is changed to match.
+  #
+  # After `publish`, not beside it, because this is the one step here that cannot
+  # be taken back: a crate version can be yanked but never deleted or replaced. If
+  # the GitHub release fails, no crate appears; if this fails, the release stands
+  # and the crate can still go out by hand from a checkout of the tag.
+  #
+  # Its own job rather than a step in `publish`, so `id-token: write` sits beside
+  # `contents: read` and never beside the token that can write a release.
+  crate:
+    needs: publish
+    # A draft dispatch is a signing-path test against a throwaway tag, and a crate
+    # version is permanent — so it never reaches this job.
+    if: github.event.inputs.draft != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The asset names are built from the tag and the crate's version from
+      # `Cargo.toml`, and nothing else in this workflow holds the two together.
+      # A tag cut before the version bump would publish binaries named for one
+      # version and a crate claiming another.
+      #
+      # It also decides whether there is anything to do. A dispatch re-attaching
+      # binaries to an already-published version is legitimate, and the crate for
+      # it already exists; `cargo publish` would fail on that, so it is asked
+      # rather than attempted.
+      - name: The tag and the crate agree, and this version is not published yet
+        id: check
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "lucida"))')
+          [ "${TAG#v}" = "$version" ] || { echo "tag $TAG does not match Cargo.toml version $version"; exit 1; }
+
+          # crates.io refuses requests without a User-Agent. 200 means the version
+          # exists; 404 means it does not; anything else is not an answer, so it
+          # fails rather than guessing in either direction.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "lucida-release (github.com/${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/lucida/$version")
+          case "$code" in
+            200) echo "lucida $version is already on crates.io; nothing to publish"
+                 echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            404) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "crates.io answered $code for lucida $version"; exit 1 ;;
+          esac
+
+      # Pinned to the commit `v1.0.5` resolved to on 2026-09-26. The action's `v1`
+      # is a branch, not a tag, so it moves with every merge — and this is the
+      # step that holds a publishing credential.
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.check.outputs.publish == 'true'
+        id: auth
+
+      - run: cargo publish --locked
+        if: steps.check.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

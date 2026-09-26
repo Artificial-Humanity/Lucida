@@ -74,8 +74,9 @@ published — so it is named here rather than linked. Read it before starting wo
   the next warning is visible), and `scripts/smoke.sh` — all three green before tagging a
   release. A release ships three platform assets with checksums (macOS universal, Linux
   musl-static, Windows); a release missing an asset is the v0.5.0 failure mode. The crate
-  on crates.io is published by hand, from a checkout of the tag rather than `main`, until
-  trusted publishing is wired in — see `docs/ROADMAP.md` § 4.
+  goes to crates.io from the same run, via trusted publishing (`release.yml`'s `crate` job);
+  if that fails, publish by hand from a checkout of the tag, never `main` — see
+  `docs/ROADMAP.md` § 4.
 * **Two test layers, one place each.** Unit tests live in `#[cfg(test)] mod tests` inside the
   file they test and can reach private functions. Anything that only exists once there is a
   *process* — exit codes, `--json` alone on stdout, the config search path, JSON-RPC framing —

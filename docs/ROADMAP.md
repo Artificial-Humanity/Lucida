@@ -708,12 +708,15 @@ Three things worth keeping from that:
   crate whose `Cargo.toml` does not match the tag it claims to be is a
   discrepancy worth one patch release to avoid.
 
-  **What is still owed.** Until then, each later version has to be published
-  by hand, from a checkout of its tag, not from `main`. The fix is crates.io trusted
-  publishing from the `publish` job in `release.yml`, which would make a tag
-  push publish the crate from the same commit as the binaries, with no stored
-  token. crates.io only accepts that configuration for a crate that already
-  exists, which is why the first release went out on a token. ⚠ This
+  **Later versions publish from the release workflow — wired, not yet proven.**
+  The `crate` job in `release.yml` runs after the GitHub release and publishes
+  through crates.io trusted publishing, so a tag push publishes the crate from
+  the same commit as the binaries, with no stored token. It refuses a tag that
+  disagrees with `Cargo.toml`'s version, and skips a version already on
+  crates.io. crates.io only accepts a trusted publisher for a crate that already
+  exists, which is why the first release went out on a token. Nothing proves the
+  job until the first tag runs it; if it fails, publish that version by hand
+  from a checkout of the tag, not from `main`. ⚠ This
   paragraph said the registry token "is not an agent's to hold" until the
   owner reversed that on 2026-09-26.
 - **Video beyond Veo — DONE at v1.0.0.** Runway and Kling shipped behind
