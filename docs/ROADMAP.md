@@ -797,6 +797,15 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
    `sora-2-pro` list today and will very likely list on 2026-09-23. Models are
    catalogue entries; the Videos API is the thing being removed.
 
+   **Re-checked 2026-09-26, two days after the date.** The prediction held:
+   `sora-2` and `sora-2-pro` still list in `/v1/models`, and every `/v1/videos`
+   route now answers `404` with an empty body — the same answer as a path that
+   never existed — while the same key answers `200` on `/v1/files` and
+   `/v1/batches`. That is consistent with the removal having happened, not proof
+   of it, since no probe of the endpoint from before the date is on record. No
+   successor was looked for in the same check. So the answer is unchanged:
+   OpenAI stays image-only here until OpenAI names a successor.
+
 4. **Runway's six fronted image models** (`gemini_*`, `gpt_image_2`,
    `seedream5_*`). The aggregator question, already recorded as open rather than
    settled. The coverage rule argues *for* them — a Runway-only subscriber
