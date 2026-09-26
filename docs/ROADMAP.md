@@ -650,27 +650,44 @@ Three things worth keeping from that:
 
 ## 4. Independent of providers
 
-- **Code signing — deliberately waiting on the organization account.** A
-  Developer ID certificate is issued to the team that creates it and **cannot be
-  transferred between an individual and an organization account**. Signing under
-  a personal account now would mean re-issuing later and shipping a build whose
-  signing identity changes underneath users, which reads exactly like the thing
-  signing exists to rule out. So this waits on the Artificial Humanity org
-  enrollment (D-U-N-S in progress, 2026-08-02). Owner decision.
+- **Code signing — LANDED 2026-09-26, and unreleased until the next tag.** The
+  macOS asset is signed with the Artificial Humanity LLC Developer ID and
+  notarized by Apple, in the `macos` job of `release.yml`. The wait recorded
+  here was for the organization account: a Developer ID certificate is issued to
+  the team that creates it and **cannot be transferred between an individual and
+  an organization account**, so signing under a personal one would have meant
+  re-issuing later and shipping a build whose identity changed underneath
+  users — which reads exactly like the thing signing exists to rule out. That
+  account was created 2026-09-25 and the wait ended with it.
 
-  **The installer lowered the urgency, which is worth recording so the delay is
-  not mistaken for drift.** macOS sets the quarantine attribute from browsers
-  and LaunchServices, not from curl — so a binary arriving through `install.sh`
-  is never evaluated by Gatekeeper and needs no `xattr -d`. Unsigned now costs a
-  warning only on the path where someone downloads from the releases page in a
-  browser, and Windows SmartScreen.
+  **Signing follows `lipo`, and the checksum follows the signing.** Fusing
+  strips signatures, and signing rewrites the file, so a checksum taken ahead of
+  it would be the hash of something nobody downloads. `--timestamp` and
+  `--options runtime` are both required for notarization to accept the
+  submission. No entitlements: a static Rust binary with rustls wants nothing
+  the hardened runtime withholds.
 
-  When it does land, two things about a bare CLI binary that catch people out:
-  `--options runtime` and `--timestamp` are required for notarization, and
-  **`stapler` cannot staple a standalone executable** — only a `.app`, `.pkg` or
-  `.dmg`. A notarized bare binary is checked online instead, so shipping a
-  `.pkg` is the only way to get an offline ticket. Signing also has to happen
-  *after* `lipo`, since fusing strips signatures.
+  ⚠ **`stapler` cannot staple a standalone executable** — only a `.app`, `.pkg`
+  or `.dmg`. So the ticket is not attached to the binary, and a copy downloaded
+  in a browser is checked against Apple **online** on first run. With a network
+  that is silent; without one, Gatekeeper can still refuse. Shipping a `.pkg` is
+  the only route to an offline ticket, and it stays available as an additive
+  second asset rather than a replacement.
+
+  ⚠ **`spctl -a -t exec` cannot check this, and the failure says something
+  else.** It rejects a bare Mach-O on the *kind* of artifact — "the code is
+  valid but does not seem to be an app" — with notarization already accepted. It
+  assesses app bundles. The release job asks
+  `codesign --verify --strict --check-notarization` instead, which forces the
+  online ticket check and carries no such restriction.
+
+  **What this does not cover, which is most of the ways Lucida arrives.** macOS
+  sets the quarantine attribute from browsers and LaunchServices, not from curl,
+  so a binary installed through `install.sh` was never Gatekeeper-evaluated and
+  never needed `xattr -d`. `cargo install lucida` compiles on the user's machine
+  and reaches no signed artifact at all. Windows SmartScreen is untouched and
+  needs a different certificate from a different vendor. Signing fixes exactly
+  one route: a download from the releases page **in a browser**.
 - **crates.io — publishing at v1.0.1.** Owner decision, 2026-08-09, after a
   brief gate on the Apple signing certificate was lifted: the two are
   independent. **A published crate ships no binary** — `cargo install lucida`
