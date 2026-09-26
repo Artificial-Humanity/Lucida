@@ -8,7 +8,8 @@
 //! downloaded release leaves cargo believing it manages a file it no longer
 //! built, so the next `cargo install` silently reverts the update. So the install
 //! source is detected and each gets its own answer — and a cargo-managed copy is
-//! rebuilt from the source cargo recorded for it, crates.io or git.
+//! rebuilt from crates.io when cargo's record says it came from there, and from
+//! git otherwise, `--path` installs included.
 //!
 //! The detection is deliberately conservative: a binary living in a cargo bin
 //! directory came from cargo, and anything else is treated as a plain download.
@@ -23,7 +24,7 @@
 //! replacing itself.
 //!
 //! Both paths end in an installed update rather than in advice. A cargo-managed
-//! copy is rebuilt by running cargo — pinned to the release tag, so what gets
+//! copy is rebuilt by running cargo — pinned to the release, so what gets
 //! installed is the version that was just offered rather than whatever `main`
 //! has become.
 //!
@@ -429,11 +430,16 @@ fn cargo_args(source: &CargoSource, tag: &str) -> Vec<String> {
 /// Where cargo got the copy it installed.
 #[derive(Debug, PartialEq, Eq)]
 enum CargoSource {
-    /// crates.io, since v1.1.0.
+    /// crates.io, since v1.1.0. Only crates.io: the command it produces names no
+    /// other registry.
     Registry,
     /// The repository — and anything cargo's record does not settle.
     Git,
 }
+
+/// How cargo's install record spells crates.io — still the git index URL, under
+/// the sparse protocol too, as a real `cargo install lucida` wrote on 2026-09-26.
+const CRATES_IO_SOURCE: &str = "(registry+https://github.com/rust-lang/crates.io-index)";
 
 /// Reads cargo's own install record, `.crates2.json` in the install root, for
 /// the source of the `lucida` it installed.
@@ -444,9 +450,9 @@ enum CargoSource {
 /// `"lucida 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)"`, so
 /// it is read rather than guessed.
 ///
-/// Anything short of a registry entry for this crate answers `Git`, which is
+/// Anything short of a crates.io entry for this crate answers `Git`, which is
 /// what every cargo-managed copy got before the record was read: an unreadable
-/// or missing record changes nothing.
+/// or missing record, another registry, or a `--path` install changes nothing.
 fn cargo_source(root: &Path) -> CargoSource {
     let Ok(text) = std::fs::read_to_string(root.join(".crates2.json")) else {
         return CargoSource::Git;
@@ -456,10 +462,27 @@ fn cargo_source(root: &Path) -> CargoSource {
     };
     let from_registry = record["installs"].as_object().is_some_and(|installs| {
         installs.keys().any(|key| {
-            key.starts_with("lucida ") && (key.contains("(registry+") || key.contains("(sparse+"))
+            key.starts_with("lucida ") && key.ends_with(CRATES_IO_SOURCE)
         })
     });
     if from_registry { CargoSource::Registry } else { CargoSource::Git }
+}
+
+/// What a failed reinstall adds for its source.
+///
+/// A new version reaches crates.io minutes after its GitHub release — the
+/// release workflow publishes the crate in a later job — and `lucida update`
+/// learns of versions from the release. So for a registry install, cargo
+/// failing to find the version is expected for a while, and the user is told
+/// that rather than left to read it as a broken release.
+fn lag_hint(source: &CargoSource) -> &'static str {
+    match source {
+        CargoSource::Registry => {
+            "\n\nThe crate reaches crates.io a few minutes after the GitHub release. If \
+             cargo could not find this version, try again shortly."
+        }
+        CargoSource::Git => "",
+    }
 }
 
 /// Rebuilds a cargo-installed copy, by running cargo.
@@ -476,8 +499,9 @@ fn cargo_source(root: &Path) -> CargoSource {
 /// the only case where a command is handed over rather than run.
 fn reinstall_with_cargo(exe: &Path, tag: &str) -> Result<()> {
     // The install root is the parent of the `bin` directory holding the copy,
-    // which is where cargo keeps its record — whatever CARGO_HOME or
-    // CARGO_INSTALL_ROOT was when it was installed.
+    // which is where cargo keeps its record. ⚠ That is where the record is READ;
+    // the reinstall passes no `--root`, so it goes wherever cargo installs today,
+    // as it always has.
     let source = exe.parent().and_then(Path::parent).map_or(CargoSource::Git, cargo_source);
     let args = cargo_args(&source, tag);
     let printable = format!("cargo {}", args.join(" "));
@@ -502,7 +526,8 @@ fn reinstall_with_cargo(exe: &Path, tag: &str) -> Result<()> {
         Ok(status) => bail!(
             "`{printable}` exited with {status}, so nothing was replaced — the \
              copy you are running is untouched.\n\n\
-             cargo's own output above says why."
+             cargo's own output above says why.{}",
+            lag_hint(&source)
         ),
         Err(e) => bail!(
             "could not run cargo ({e}), so this copy cannot be rebuilt here.\n\n\
@@ -781,6 +806,15 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_crates_io_reinstall_says_the_crate_can_lag_the_release() {
+        // The release workflow publishes the GitHub release first and the crate
+        // minutes later, and `lucida update` learns of a version from the former —
+        // so "cargo could not find it" is expected for a while, not a broken release.
+        assert!(lag_hint(&CargoSource::Registry).contains("crates.io"));
+        assert_eq!(lag_hint(&CargoSource::Git), "");
+    }
+
+    #[test]
     fn cargos_own_record_says_where_the_install_came_from() {
         let root = std::env::temp_dir().join(format!("lucida-crates2-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -796,7 +830,13 @@ mod tests {
             record("lucida 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)"),
             CargoSource::Registry
         );
-        assert_eq!(record("lucida 1.1.0 (sparse+https://index.crates.io/)"), CargoSource::Registry);
+        // Any other registry is not crates.io, and the registry command names no
+        // other — so it keeps the git path rather than switching registries.
+        assert_eq!(record("lucida 1.1.0 (sparse+https://example.com/index/)"), CargoSource::Git);
+        assert_eq!(
+            record("lucida 1.1.0 (registry+https://example.com/index)"),
+            CargoSource::Git
+        );
         assert_eq!(
             record("lucida 1.1.0 (git+https://github.com/Artificial-Humanity/Lucida?tag=v1.1.0#11d4c38)"),
             CargoSource::Git
