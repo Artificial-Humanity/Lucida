@@ -138,7 +138,9 @@ fn confirm() -> Result<bool> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Install {
     /// Under a cargo bin directory: cargo owns it, so cargo must replace it.
-    Cargo,
+    /// `root` is the install root holding that `bin`, as cargo is configured
+    /// with it — where its record lives and where the reinstall must go.
+    Cargo { root: PathBuf },
     /// A downloaded release binary, or anything else: replaceable in place.
     Standalone,
 }
@@ -198,7 +200,7 @@ impl Updater {
         let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
 
         match install_kind(&exe) {
-            Install::Cargo => reinstall_with_cargo(&exe, &release.tag_name),
+            Install::Cargo { root } => reinstall_with_cargo(&exe, &root, &release.tag_name),
             Install::Standalone => self.replace(&exe, &release, latest),
         }
     }
@@ -416,7 +418,12 @@ fn record_check(path: &Path) {
 /// then report a version the release page has never heard of. `--tag` fixes
 /// that for git, and an exact `--version` does the same on crates.io, where
 /// `--locked` also builds against the lockfile the crate ships.
-fn cargo_args(source: &CargoSource, tag: &str) -> Vec<String> {
+///
+/// **`--root` is the copy's own install root.** Without it cargo installs
+/// wherever it is configured to today — `CARGO_INSTALL_ROOT`, `install.root`,
+/// `CARGO_HOME` — and if that moved since this copy was installed, the update
+/// lands elsewhere, reports success, and the copy on PATH stays old.
+fn cargo_args(source: &CargoSource, tag: &str, root: &Path) -> Vec<String> {
     let version = tag.trim_start_matches('v');
     let args: &[&str] = match source {
         CargoSource::Registry => {
@@ -424,7 +431,9 @@ fn cargo_args(source: &CargoSource, tag: &str) -> Vec<String> {
         }
         CargoSource::Git => &["install", "--git", REPO, "--tag", tag, "--force"],
     };
-    args.iter().map(|s| s.to_string()).collect()
+    let mut args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    args.extend(["--root".to_string(), root.display().to_string()]);
+    args
 }
 
 /// Where cargo got the copy it installed.
@@ -497,13 +506,11 @@ fn lag_hint(source: &CargoSource) -> &'static str {
 ///
 /// Falling back to printing when cargo cannot be found is still right, and is
 /// the only case where a command is handed over rather than run.
-fn reinstall_with_cargo(exe: &Path, tag: &str) -> Result<()> {
-    // The install root is the parent of the `bin` directory holding the copy,
-    // which is where cargo keeps its record. ⚠ That is where the record is READ;
-    // the reinstall passes no `--root`, so it goes wherever cargo installs today,
-    // as it always has.
-    let source = exe.parent().and_then(Path::parent).map_or(CargoSource::Git, cargo_source);
-    let args = cargo_args(&source, tag);
+fn reinstall_with_cargo(exe: &Path, root: &Path, tag: &str) -> Result<()> {
+    // The root holding the copy's `bin` is both where cargo's record is read
+    // and, via `--root`, where the reinstall goes — so the two cannot disagree.
+    let source = cargo_source(root);
+    let args = cargo_args(&source, tag, root);
     let printable = format!("cargo {}", args.join(" "));
 
     // Respects CARGO, which is set when this is itself invoked from cargo, and
@@ -541,14 +548,32 @@ fn reinstall_with_cargo(exe: &Path, tag: &str) -> Result<()> {
 /// `CARGO_HOME` first, since a non-default one is exactly the case a hardcoded
 /// `~/.cargo` would get wrong.
 pub fn install_kind(exe: &Path) -> Install {
-    let cargo_bin = std::env::var_os("CARGO_HOME")
+    let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| home().map(|h| h.join(".cargo")))
-        .map(|home| home.join("bin"));
+        .or_else(|| home().map(|h| h.join(".cargo")));
+    install_kind_under(exe, cargo_home)
+}
 
-    match cargo_bin {
-        Some(bin) if exe.starts_with(&bin) => Install::Cargo,
-        _ => Install::Standalone,
+/// [`install_kind`] with the cargo home given rather than read from the
+/// environment, so it can be tested without setting process-wide variables.
+///
+/// ⚠ **Both sides resolved.** `run` canonicalizes the exe, so the cargo `bin` is
+/// canonicalized too before comparing; otherwise a symlinked `~/.cargo`, or
+/// Windows' `\\?\` prefix on a canonical path, stops the two sharing a prefix and
+/// a cargo-managed copy is written over as though it were a download — the one
+/// outcome this module exists to prevent. The unresolved form is still tried, for
+/// an exe that was never canonicalized. The root returned is the configured one,
+/// link and all, since that is the path cargo itself would be given.
+fn install_kind_under(exe: &Path, cargo_home: Option<PathBuf>) -> Install {
+    let Some(root) = cargo_home else {
+        return Install::Standalone;
+    };
+    let bin = root.join("bin");
+    let resolved = std::fs::canonicalize(&bin).unwrap_or_else(|_| bin.clone());
+    if exe.starts_with(&bin) || exe.starts_with(&resolved) {
+        Install::Cargo { root }
+    } else {
+        Install::Standalone
     }
 }
 
@@ -781,10 +806,10 @@ mod tests {
 
     #[test]
     fn the_cargo_reinstall_is_pinned_to_the_release_tag() {
-        let args = cargo_args(&CargoSource::Git, "v0.7.0");
+        let args = cargo_args(&CargoSource::Git, "v0.7.0", Path::new("/r"));
         assert_eq!(
             args,
-            vec!["install", "--git", REPO, "--tag", "v0.7.0", "--force"]
+            vec!["install", "--git", REPO, "--tag", "v0.7.0", "--force", "--root", "/r"]
         );
 
         // Without --tag, cargo builds the default branch — so an update that
@@ -800,8 +825,8 @@ mod tests {
         // install into a git one — which the user never chose, and which the next
         // `cargo install lucida` reverses.
         assert_eq!(
-            cargo_args(&CargoSource::Registry, "v1.2.0"),
-            vec!["install", "lucida", "--version", "1.2.0", "--locked", "--force"]
+            cargo_args(&CargoSource::Registry, "v1.2.0", Path::new("/r")),
+            vec!["install", "lucida", "--version", "1.2.0", "--locked", "--force", "--root", "/r"]
         );
     }
 
@@ -855,11 +880,50 @@ mod tests {
     }
 
     #[test]
+    fn the_reinstall_goes_back_where_the_copy_lives() {
+        // Without `--root`, cargo installs wherever it is configured to TODAY. If
+        // CARGO_INSTALL_ROOT or `install.root` moved since, the update lands
+        // somewhere else, reports success, and the copy on PATH stays old.
+        for source in [CargoSource::Registry, CargoSource::Git] {
+            let args = cargo_args(&source, "v1.2.0", Path::new("/home/u/.cargo"));
+            assert_eq!(args[args.len() - 2..], ["--root", "/home/u/.cargo"], "{source:?}");
+        }
+    }
+
+    #[test]
+    fn a_cargo_bin_is_recognised_once_both_paths_are_resolved() {
+        // `run` canonicalizes the exe; the cargo bin has to be resolved too, or the
+        // two stop sharing a prefix — and a cargo-managed copy gets written over
+        // as though it were a download. On Windows canonicalizing alone does it
+        // (a `\\?\` prefix); on Unix a symlinked `~/.cargo` does.
+        let base = std::env::temp_dir().join(format!("lucida-cargo-bin-{}", std::process::id()));
+        let home = base.join("real-cargo");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join("lucida"), b"").unwrap();
+        let exe = std::fs::canonicalize(home.join("bin").join("lucida")).unwrap();
+
+        assert_eq!(
+            install_kind_under(&exe, Some(home.clone())),
+            Install::Cargo { root: home.clone() }
+        );
+
+        #[cfg(unix)]
+        {
+            let link = base.join("linked-cargo");
+            std::os::unix::fs::symlink(&home, &link).unwrap();
+            // The root is the one cargo is configured with, link and all.
+            assert_eq!(install_kind_under(&exe, Some(link.clone())), Install::Cargo { root: link });
+        }
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn a_cargo_installed_binary_is_recognised() {
         let home = PathBuf::from("/tmp/cargo-home-fixture");
         unsafe { std::env::set_var("CARGO_HOME", &home) };
 
-        assert_eq!(install_kind(&home.join("bin/lucida")), Install::Cargo);
+        assert_eq!(install_kind(&home.join("bin/lucida")), Install::Cargo { root: home.clone() });
         assert_eq!(
             install_kind(Path::new("/usr/local/bin/lucida")),
             Install::Standalone
