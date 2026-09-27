@@ -13,8 +13,8 @@
 #
 # WHERE THIS RUNS: by hand — owner's call, 2026-09-27 ("manual is fine", no
 # scheduled job), replacing a 2026-08-09 plan for a weekly cron on ai-lab-0 that a
-# search found no trace of. When is not ruled; the resident's suggested habit, not
-# the owner's, is before a release and after changing a provider lane.
+# search found no trace of. Run it before every release and after changing a
+# provider lane — proposed by the resident, approved by the owner, 2026-09-27.
 #
 # ai-lab-0 is the natural place to run it, because of credential geography
 # rather than convenience — the provider keys
