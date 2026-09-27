@@ -140,9 +140,9 @@ fn confirm() -> Result<bool> {
 /// How this copy of Lucida got here, and therefore how it is updated.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Install {
-    /// Under a cargo bin directory: cargo owns it, so cargo must replace it.
-    /// `root` is the cargo home whose `bin` holds the copy — where cargo's record
-    /// lives and where the reinstall is sent.
+    /// Cargo put it there, so cargo must replace it. `root` is the install root
+    /// whose `bin` holds the copy — the cargo home, or any root whose record lists
+    /// it — where cargo's record lives and where the reinstall is sent.
     Cargo { root: PathBuf },
     /// A downloaded release binary, or anything else: replaceable in place.
     Standalone,
@@ -544,12 +544,17 @@ fn reinstall_with_cargo(exe: &Path, root: &Path, tag: &str) -> Result<()> {
         ),
         Err(e) => bail!(
             "could not run cargo ({e}), so this copy cannot be rebuilt here.\n\n\
-             Run it yourself where cargo is available:\n\n  {printable}"
+             Run it yourself where cargo is available:\n\n  {printable}\n\n\
+             Lucida treats this copy as cargo's because {} lists it. If cargo is \
+             gone for good, reinstall with install.sh or install.ps1 from the \
+             releases page instead.",
+            root.join(".crates2.json").display()
         ),
     }
 }
 
-/// Whether `exe` lives under a cargo bin directory.
+/// Whether cargo installed `exe`: it lives in the cargo home's `bin`, or cargo's
+/// record beside the `bin` it sits in lists it.
 ///
 /// `CARGO_HOME` first, since a non-default one is exactly the case a hardcoded
 /// `~/.cargo` would get wrong.
@@ -568,8 +573,12 @@ pub fn install_kind(exe: &Path) -> Install {
 /// Windows' `\\?\` prefix on a canonical path, stops the two sharing a prefix and
 /// a cargo-managed copy is written over as though it were a download — the one
 /// outcome this module exists to prevent. The unresolved form is still tried, for
-/// an exe that was never canonicalized. The root returned is the cargo home as
-/// found, link and all, so cargo is never handed a `\\?\` path.
+/// an exe that was never canonicalized. For that branch the root returned is the
+/// cargo home as found, link and all. A root found through cargo's record comes
+/// from the canonical exe instead — the same physical directory, so the record
+/// read and the `--root` written agree — with a Windows drive prefix stripped.
+/// A `bin` that is itself a symlink is not followed back to its root, so such a
+/// copy stays a download, as it always was.
 fn install_kind_under(exe: &Path, cargo_home: Option<PathBuf>) -> Install {
     if let Some(root) = cargo_home {
         let bin = root.join("bin");
@@ -616,9 +625,13 @@ fn cargo_recorded(root: &Path, exe: &Path) -> bool {
 
 /// A root found through the canonicalized exe carries Windows' `\\?\` prefix,
 /// which a user never typed and cargo was never given. Stripped for a plain
-/// drive path, so `--root` names the folder the way cargo recorded it.
+/// drive path, so `--root` names the folder the way it was given to cargo. A
+/// path that is not valid Unicode is left whole: a lossy one names a directory
+/// that does not exist.
 fn without_verbatim_prefix(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
     match text.strip_prefix(r"\\?\") {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
         _ => path.to_path_buf(),
@@ -1002,9 +1015,36 @@ mod tests {
         record("other 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)", r#""other""#);
         assert_eq!(install_kind_under(&exe, elsewhere.clone()), Install::Standalone);
 
-        // Cargo's record lists this binary: cargo owns it, and its root is here.
-        record("lucida 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)", r#""lucida""#);
-        assert_eq!(install_kind_under(&exe, elsewhere), Install::Cargo { root: root.clone() });
+        // A lucida record that lists some other binary name does not claim this one.
+        record("lucida 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)", r#""other""#);
+        assert_eq!(install_kind_under(&exe, elsewhere.clone()), Install::Standalone);
+
+        // Unparseable: no claim.
+        std::fs::write(root.join(".crates2.json"), "not json").unwrap();
+        assert_eq!(install_kind_under(&exe, elsewhere.clone()), Install::Standalone);
+
+        // Cargo's record lists this binary, so cargo owns it and its root is
+        // here — by exact name, including the `.exe` Windows records, or by stem.
+        for (file, bins) in [
+            ("lucida", r#""lucida""#),
+            ("lucida.exe", r#""lucida.exe""#),
+            ("lucida.exe", r#""lucida""#),
+        ] {
+            let exe = root.join("bin").join(file);
+            std::fs::write(&exe, b"").unwrap();
+            record("lucida 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)", bins);
+            assert_eq!(
+                install_kind_under(&exe, elsewhere.clone()),
+                Install::Cargo { root: root.clone() },
+                "{file} against {bins}"
+            );
+        }
+
+        // The same record beside a directory not named `bin` claims nothing.
+        let other_dir = root.join("tools");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("lucida"), b"").unwrap();
+        assert_eq!(install_kind_under(&other_dir.join("lucida"), elsewhere), Install::Standalone);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1027,8 +1067,10 @@ mod tests {
         unsafe { std::env::set_var("CARGO_HOME", &home) };
 
         assert_eq!(install_kind(&home.join("bin/lucida")), Install::Cargo { root: home.clone() });
+        // Under a directory that cannot exist, so no cargo record on the host
+        // running the test can claim it.
         assert_eq!(
-            install_kind(Path::new("/usr/local/bin/lucida")),
+            install_kind(Path::new("/nonexistent-lucida-test/bin/lucida")),
             Install::Standalone
         );
 
