@@ -7,20 +7,19 @@
 # recording proves Lucida still speaks *yesterday's* protocol, not that the
 # provider still does — so every wire test in the suite passes on the day an API
 # changes, and the first thing that notices is somebody's failed render. This
-# script asks the providers instead — meant to run on a schedule; see WHERE THIS RUNS.
+# script asks the providers instead, whenever it is run; see WHERE THIS RUNS.
 #
 # Usage: canary.sh <path-to-binary>
 #
-# WHERE THIS RUNS: meant to be an ai-lab-0 cron, weekly — ⚠ none is installed
-# (found 2026-09-27), so today it runs only by hand. Owner's call, 2026-08-09, and
-# the reason is credential geography rather than convenience — the provider keys
+# WHERE THIS RUNS: by hand, on ai-lab-0 — owner's call, 2026-09-27 ("manual is
+# fine"), replacing a 2026-08-09 plan for a weekly cron that was never installed.
+# When is not ruled; a suggested habit is before a release and after changing a
+# provider lane. It runs there
+# because of credential geography rather than convenience — the provider keys
 # already live on that machine, and putting a second copy into GitHub Actions
 # secrets would double the number of places they exist for no gain. The workflow
 # in .github/workflows/canary.yml is therefore `workflow_dispatch` only: it can
 # be run by hand when someone has reason to, and it never runs itself.
-#
-#   # crontab on ai-lab-0
-#   17 6 * * 1 /path/to/lucida-repo/scripts/canary.sh /usr/local/bin/lucida
 #
 # WHAT IT COSTS: nothing, and that is a property rather than an aspiration.
 # Every probe is one of two kinds:
