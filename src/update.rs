@@ -11,8 +11,10 @@
 //! rebuilt from crates.io when cargo's record says it came from there, and from
 //! git otherwise, `--path` installs included.
 //!
-//! The detection is deliberately conservative: a binary living in a cargo bin
-//! directory came from cargo, and anything else is treated as a plain download.
+//! The detection is deliberately conservative: a binary living in the cargo home's
+//! `bin` directory, or listed by cargo's own install record beside the `bin` it
+//! sits in (an install under `CARGO_INSTALL_ROOT` or `install.root`), came from
+//! cargo, and anything else is treated as a plain download.
 //! That direction of error is the safe one — a downloaded binary in an unusual
 //! place is still self-replaceable, while a cargo-managed binary must never be
 //! written over.
@@ -569,15 +571,57 @@ pub fn install_kind(exe: &Path) -> Install {
 /// an exe that was never canonicalized. The root returned is the cargo home as
 /// found, link and all, so cargo is never handed a `\\?\` path.
 fn install_kind_under(exe: &Path, cargo_home: Option<PathBuf>) -> Install {
-    let Some(root) = cargo_home else {
-        return Install::Standalone;
+    if let Some(root) = cargo_home {
+        let bin = root.join("bin");
+        let resolved = std::fs::canonicalize(&bin).unwrap_or_else(|_| bin.clone());
+        if exe.starts_with(&bin) || exe.starts_with(&resolved) {
+            return Install::Cargo { root };
+        }
+    }
+
+    // Not under CARGO_HOME — but `CARGO_INSTALL_ROOT` and `install.root` put
+    // cargo installs elsewhere, and looking only at CARGO_HOME classed those as
+    // downloads and wrote over them. Cargo keeps a record in every install
+    // root, beside `bin`; if it lists this binary, cargo put it there.
+    if let Some(root) = exe.parent().filter(|bin| bin.ends_with("bin")).and_then(Path::parent)
+        && cargo_recorded(root, exe)
+    {
+        return Install::Cargo { root: without_verbatim_prefix(root) };
+    }
+
+    Install::Standalone
+}
+
+/// Whether cargo's install record in `root` lists `exe` as a `lucida` binary.
+fn cargo_recorded(root: &Path, exe: &Path) -> bool {
+    let Some(name) = exe.file_name().and_then(|n| n.to_str()) else {
+        return false;
     };
-    let bin = root.join("bin");
-    let resolved = std::fs::canonicalize(&bin).unwrap_or_else(|_| bin.clone());
-    if exe.starts_with(&bin) || exe.starts_with(&resolved) {
-        Install::Cargo { root }
-    } else {
-        Install::Standalone
+    let Ok(text) = std::fs::read_to_string(root.join(".crates2.json")) else {
+        return false;
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    record["installs"].as_object().is_some_and(|installs| {
+        installs.iter().any(|(key, entry)| {
+            key.starts_with("lucida ")
+                && entry["bins"].as_array().is_some_and(|bins| {
+                    bins.iter().any(|b| b.as_str().is_some_and(|b| b == name || b == stem))
+                })
+        })
+    })
+}
+
+/// A root found through the canonicalized exe carries Windows' `\\?\` prefix,
+/// which a user never typed and cargo was never given. Stripped for a plain
+/// drive path, so `--root` names the folder the way cargo recorded it.
+fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -933,6 +977,48 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_copy_under_any_cargo_install_root_is_recognised_by_cargos_record() {
+        // `CARGO_INSTALL_ROOT` or `install.root` puts a cargo install outside
+        // CARGO_HOME, so looking only there classed it as a download — and
+        // overwrote a file cargo manages. Cargo's own record beside the `bin`
+        // is what says who put it there.
+        let root = std::env::temp_dir().join(format!("lucida-any-root-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let exe = root.join("bin").join("lucida");
+        std::fs::write(&exe, b"").unwrap();
+        let elsewhere = Some(PathBuf::from("/nonexistent/cargo-home"));
+
+        // No record: a plain download that happens to sit in a `bin`.
+        assert_eq!(install_kind_under(&exe, elsewhere.clone()), Install::Standalone);
+
+        // Another crate's record says nothing about this file.
+        let record = |key: &str, bins: &str| {
+            let json = format!(r#"{{"installs":{{"{key}":{{"bins":[{bins}]}}}}}}"#);
+            std::fs::write(root.join(".crates2.json"), json).unwrap();
+        };
+        record("other 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)", r#""other""#);
+        assert_eq!(install_kind_under(&exe, elsewhere.clone()), Install::Standalone);
+
+        // Cargo's record lists this binary: cargo owns it, and its root is here.
+        record("lucida 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)", r#""lucida""#);
+        assert_eq!(install_kind_under(&exe, elsewhere), Install::Cargo { root: root.clone() });
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_verbatim_drive_prefix_is_dropped_and_nothing_else_is() {
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\C:\Users\u\tools")),
+            PathBuf::from(r"C:\Users\u\tools")
+        );
+        // A UNC share keeps its prefix; stripping it would change the path.
+        let unc = Path::new(r"\\?\UNC\server\share");
+        assert_eq!(without_verbatim_prefix(unc), unc.to_path_buf());
+        assert_eq!(without_verbatim_prefix(Path::new("/opt/tools")), PathBuf::from("/opt/tools"));
     }
 
     #[test]
