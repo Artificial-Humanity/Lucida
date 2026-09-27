@@ -105,9 +105,12 @@ published — so it is named here rather than linked. Read it before starting wo
   endpoints, plus render requests naming a model that cannot exist — or, for Runway, which
   refuses unknown models locally, a real model with an out-of-range seed *and* an over-long
   prompt: free by measurement rather than by construction, since each rests on a limit
-  Runway validates today). **It runs from a
-  weekly cron on ai-lab-0**, where the provider keys already live; the GitHub workflow is
-  `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
+  Runway validates today). **It is meant to run from a weekly cron on ai-lab-0**, where the
+  provider keys already live (owner, 2026-08-09) — ⚠ **but none has been found.** This
+  paragraph said it ran there until 2026-09-27, when a search of the box found none and the
+  owner confirmed knowing of none. Until one is installed, the canary runs only when someone
+  runs it. The GitHub workflow is `workflow_dispatch` only, deliberately, so the credentials
+  gain no second home. A
   successful render inside the canary is reported as a *failure* — it would mean money was
   spent by a script whose contract is that it spends none.
 

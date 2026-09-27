@@ -2,11 +2,13 @@ name: canary
 
 # Deliberately NOT scheduled here.
 #
-# The canary runs from a weekly cron on ai-lab-0 — owner's call, 2026-08-09, and
-# the reason is credential geography rather than convenience. The provider
+# The canary is meant to run from a weekly cron on ai-lab-0 — owner's call,
+# 2026-08-09, and the reason is credential geography rather than convenience.
+# ⚠ No such cron is installed (found 2026-09-27); until one is, nothing runs it
+# on a schedule. The crontab line below is the intended one, not a record. The provider
 # keys already live on that machine; putting a second copy into GitHub Actions
 # secrets would double the number of places they exist, on infrastructure we do
-# not control, to buy a schedule we already have.
+# not control, to buy a schedule that belongs on ai-lab-0.
 #
 #   # crontab on ai-lab-0
 #   17 6 * * 1 /path/to/Lucida/scripts/canary.sh /usr/local/bin/lucida

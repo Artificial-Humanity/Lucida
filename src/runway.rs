@@ -59,8 +59,9 @@ const API_ROOT: &str = "https://api.dev.runwayml.com/v1";
 ///
 /// Mandatory: without it the API answers 400 rather than assuming a default.
 /// Runway supports a version for four months after its successor ships, so this
-/// is a thing to bump deliberately — and the canary is what will notice when it
-/// stops being accepted, since nothing else would.
+/// is a thing to bump deliberately — and the canary is what would notice when it
+/// stops being accepted, since nothing else would. It notices only when run: it
+/// is not scheduled anywhere yet (see scripts/canary.sh).
 const API_VERSION: &str = "2024-11-06";
 
 /// Runway's own video models. Not the catalogue it fronts — see the module note.
