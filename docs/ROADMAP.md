@@ -1,9 +1,8 @@
 # Roadmap
 
-Lucida speaks to seven providers as of v1.1.1 — **images** from Google Gemini, a
-local ComfyUI, hosted FLUX from Black Forest Labs, Stability AI and OpenAI;
-**video** from Veo, Runway and Kling. Runway's images have landed on `main` since, not yet
-in a release. This records where it goes next and, more
+Lucida speaks to seven providers as of v1.2.0 — **images** from Google Gemini, a
+local ComfyUI, hosted FLUX from Black Forest Labs, Stability AI, OpenAI and Runway;
+**video** from Veo, Runway and Kling. This records where it goes next and, more
 usefully, what has to be true first.
 
 Nothing below the "Done" section is committed work. Items are ordered by what
@@ -749,8 +748,8 @@ sideways. That rule says a lane exists so someone holding *that* subscription
 gets the full width of what they pay for. The width is not only "which
 providers" — it is also "how much of each provider". Someone with a Runway
 subscription and nothing else got **no image generation at all** from Lucida,
-while paying for eight image models (twelve by 2026-09-27). Runway's own two now
-render on `main`; the ten it fronts are item 4. "They could use Gemini instead"
+while paying for eight image models (twelve by 2026-09-27). Runway's own two
+shipped in v1.2.0; the ten it fronts are item 4. "They could use Gemini instead"
 reasons from a keyring that happens to hold every key.
 
 Scope note: this is about **widening providers that already exist**, which the
@@ -768,12 +767,12 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 | `bfl` | shipped | **missing** — FLUX 3 announced video 2026-07-23, gated early access |
 | `openai` | shipped | **missing** — see Sora below |
 | `stability` | shipped | **missing** — `/v2beta/image-to-video` returns 404 today; retired or moved, unverified |
-| `runway` | shipped on `main`, 2026-09-27 — its own two models | shipped |
+| `runway` | shipped in v1.2.0 — its own two models | shipped |
 | `kling` | **missing** — endpoint confirmed, models not enumerable free | shipped |
 
 ### The items, in the order worth doing them
 
-1. **Runway images — DONE on `main`, 2026-09-27, unreleased.** Shipped as
+1. **Runway images — DONE, shipped in v1.2.0 (2026-09-27).** Shipped as
    written below: `gen4_image` and `gen4_image_turbo` behind `ImageProvider`, in
    `runway.rs`. By then the endpoint listed twelve models — the two, plus ten
    it fronts — and only the two are claimed. The one live render read a signed
