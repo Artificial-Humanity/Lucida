@@ -297,6 +297,16 @@ fn a_model_that_needs_a_reference_is_refused_before_the_missing_key() {
 }
 
 #[test]
+fn the_canary_can_find_where_googles_video_half_starts() {
+    // scripts/canary.sh cuts `models --provider google` at this line to check
+    // only the image default. Reworded, the cut finds nothing, the Veo aliases'
+    // own `(default)` stays in, and that check passes whatever is listed.
+    let sandbox = Sandbox::new("google-video-half");
+    run(lucida(&sandbox).args(["models", "--provider", "google"]))
+        .says("Video models available");
+}
+
+#[test]
 fn a_provider_of_both_media_lists_both() {
     // `runway` was a video provider only, and `lucida models --provider runway`
     // listed its video models. Now that it renders images too, the image lane

@@ -3,7 +3,7 @@ name: canary
 # Deliberately NOT scheduled here.
 #
 # The canary runs from a weekly cron on ai-lab-0 — owner's call, 2026-08-09, and
-# the reason is credential geography rather than convenience. The five provider
+# the reason is credential geography rather than convenience. The provider
 # keys already live on that machine; putting a second copy into GitHub Actions
 # secrets would double the number of places they exist, on infrastructure we do
 # not control, to buy a schedule we already have.

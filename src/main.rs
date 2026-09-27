@@ -1409,6 +1409,11 @@ fn list_models(backend: Backend) -> Result<()> {
             if model.starts_with("imagen") {
                 notes.push("Imagen family — a different endpoint, not implemented".into());
             }
+            // Runway's turbo cannot start from text; the video half marks its
+            // equivalent ("needs a still"), so the image half does too.
+            if provider::capabilities_for(backend, model).needs_reference {
+                notes.push("needs a reference image".into());
+            }
             // Generated for every provider, not written for one. The three
             // openai ids that stop working on 2026-12-01 used to be listed here
             // exactly like the ones that will still exist next year.

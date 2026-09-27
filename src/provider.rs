@@ -481,8 +481,9 @@ impl VideoCapabilities {
 
         if let Some(own) = self.foreign_model {
             bail!(
-                "`{me}` renders only its own models here: {}. `{}` is one it fronts \
-                 for another company, which Lucida does not route through it.",
+                "`{me}` renders only its own models here: {}. `{}` is not one of \
+                 them. Its endpoint also fronts other companies' models, which \
+                 Lucida does not route through it.",
                 join_and(own),
                 req.model
             );
@@ -843,9 +844,10 @@ impl Capabilities {
 
         if let Some(own) = self.foreign_model {
             bail!(
-                "`{me}` renders only its own models here: {}. `{}` is one it fronts \
-                 for another company, which Lucida does not route through it — \
-                 that would bill it here and record it as {me}'s own output.",
+                "`{me}` renders only its own models here: {}. `{}` is not one of \
+                 them. Its endpoint also fronts other companies' models, which \
+                 Lucida does not route through it — that would bill them here and \
+                 record them as {me}'s own output.",
                 join_and(own),
                 req.model
             );

@@ -12,7 +12,7 @@
 # Usage: canary.sh <path-to-binary>
 #
 # WHERE THIS RUNS: an ai-lab-0 cron, weekly. Owner's call, 2026-08-09, and the
-# reason is credential geography rather than convenience — the five provider keys
+# reason is credential geography rather than convenience — the provider keys
 # already live on that machine, and putting a second copy into GitHub Actions
 # secrets would double the number of places they exist for no gain. The workflow
 # in .github/workflows/canary.yml is therefore `workflow_dispatch` only: it can
@@ -38,7 +38,7 @@
 # passed over.
 #
 # A provider whose key is absent is SKIPPED, not failed. This is meant to be
-# runnable on a laptop with two keys as well as on the machine that has five.
+# runnable on a laptop with two keys as well as on the machine that has them all.
 
 BIN=${1:?usage: canary.sh <path-to-binary>}
 failures=0
@@ -158,12 +158,15 @@ probe openai    "gpt-image-canary-does-not-exist"
 
 # Runway renders images too, but `probe` cannot reach it: Lucida refuses a model
 # that is not one of Runway's own before anything is sent, because the endpoint
-# fronts other companies' models. So this probe names a real model and a seed
-# one past the endpoint's measured ceiling (4294967295), which Lucida passes on
-# and the endpoint rejects for free. If it ever renders, the ceiling moved and
-# money was spent — reported as the failure it is.
+# fronts other companies' models. So this probe names a real model and carries
+# two violations Lucida passes on and the endpoint rejects for free: a seed one
+# past its measured ceiling (4294967295) and a prompt one past its 1000-character
+# limit. Either alone blocks a render, so both limits would have to move at once
+# for it to spend — unlike the probes above, it is free by measurement rather
+# than by construction. If it ever renders, that is reported as the failure it is.
 if have_key runway; then
-  out=$("$BIN" generate "canary probe, never rendered" \
+  long_prompt=$(printf 'canary probe, never rendered %.0s' $(seq 1 40))
+  out=$("$BIN" generate "$long_prompt" \
           --provider runway --model gen4_image --seed 4294967296 \
           --out /dev/null 2>&1)
   code=$?
