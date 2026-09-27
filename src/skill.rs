@@ -90,7 +90,7 @@ mod tests {
         let lower = SKILL.to_lowercase();
         for name in [
             "google", "comfyui", "bfl", "stability", "openai", "gemini", "flux", "gpt-image",
-            "veo", "banana", "imagen", "black forest",
+            "veo", "banana", "imagen", "black forest", "runway", "kling",
         ] {
             assert!(
                 !lower.contains(name),

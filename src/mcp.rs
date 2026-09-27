@@ -466,15 +466,15 @@ fn image_schema() -> Value {
                 },
                 "size": {
                     "type": "string",
-                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number; openai's gpt-image-2 scales its pixel budget by it. NOT supported by stability or the other openai models, which render fixed sizes — passing it there is an error."
+                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number; openai's gpt-image-2 scales its pixel budget by it. NOT supported by stability, runway (whose pixel-pair aspect ratio is the size) or the other openai models, which render fixed sizes — passing it there is an error."
                 },
                 "negative_prompt": {
                     "type": "string",
-                    "description": "What to keep out of the picture. comfyui and stability only — google's image models and every FLUX endpoint lack the concept, so passing it there is an error rather than a no-op."
+                    "description": "What to keep out of the picture. comfyui and stability only — google's image models, runway and every FLUX endpoint lack the concept, so passing it there is an error rather than a no-op."
                 },
                 "seed": {
                     "type": "integer",
-                    "description": "Renders the same image again. comfyui, bfl and stability; google and openai expose none, so results there cannot be reproduced. comfyui is verified pixel-identical across runs."
+                    "description": "Renders the same image again. comfyui, bfl, stability and runway; google and openai expose none, so results there cannot be reproduced. comfyui is verified pixel-identical across runs."
                 },
                 "steps": {
                     "type": "integer",
@@ -656,8 +656,15 @@ fn start_video_schema() -> Value {
 fn describe_aspect(support: AspectSupport) -> String {
     match support {
         AspectSupport::Named(ratios) => ratios.join(", "),
+        AspectSupport::Pixels(pairs) => pixel_pairs(pairs),
         AspectSupport::Free { multiple_of } => format!("any ratio, rounded to {multiple_of} pixels"),
     }
+}
+
+/// Pixel pairs, with the rule that makes `16:9` reach them — otherwise a reader
+/// of the list would reasonably conclude only the literal pairs are accepted.
+fn pixel_pairs(pairs: &[&str]) -> String {
+    format!("{} (or any W:H with the same shape as one of them)", pairs.join(", "))
 }
 
 fn check_video_schema() -> Value {
@@ -879,6 +886,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::Bfl => Box::new(bfl::Client::from_env()?),
         Backend::Stability => Box::new(stability::Client::from_env()?),
         Backend::OpenAi => Box::new(openai::Client::from_env()?),
+        Backend::Runway => Box::new(crate::runway::Client::from_env()?),
     })
 }
 
@@ -1147,12 +1155,7 @@ fn describe_providers() -> String {
             },
         }
 
-        let aspect = match caps.aspect {
-            AspectSupport::Named(ratios) => ratios.join(", "),
-            AspectSupport::Free { multiple_of } => {
-                format!("any ratio, rounded to {multiple_of} pixels")
-            }
-        };
+        let aspect = describe_aspect(caps.aspect);
         out.push_str(&format!(
             "aspect ratio: {aspect}\n\
              seed: {}  |  negative prompt: {}  |  reference images: {}\n\

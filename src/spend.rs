@@ -120,7 +120,8 @@ pub fn price_for(backend: Backend, model: &str) -> Price {
                 _ => Price::Unverified,
             }
         }
-        Backend::Bfl | Backend::Stability | Backend::OpenAi => Price::Unverified,
+        // Runway bills its own credits, as with its video lane.
+        Backend::Bfl | Backend::Stability | Backend::OpenAi | Backend::Runway => Price::Unverified,
     }
 }
 

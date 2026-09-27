@@ -105,7 +105,7 @@ struct ImageOptions {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Which provider to use: google, comfyui, bfl, stability or openai. Inferred from the model when omitted.
+    /// Which provider to use: google, comfyui, bfl, stability, openai or runway. Inferred from the model when omitted.
     #[arg(short, long)]
     provider: Option<String>,
 
@@ -131,7 +131,7 @@ struct ImageOptions {
     #[arg(long)]
     mask: Option<String>,
 
-    /// Seed, for a reproducible render (comfyui, bfl and stability; google and openai have none)
+    /// Seed, for a reproducible render (comfyui, bfl, stability and runway; google and openai have none)
     #[arg(long)]
     seed: Option<u64>,
 
@@ -295,7 +295,7 @@ enum Command {
     /// List the models a provider can reach, and what it can be asked for.
     /// Answers for the video providers too, including remaining credits
     Models {
-        /// Which provider to interrogate: google, comfyui, bfl, stability or openai
+        /// Which provider to interrogate: google, comfyui, bfl, stability, openai, runway or kling
         #[arg(short, long, default_value = "google")]
         provider: String,
     },
@@ -392,12 +392,23 @@ fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::Mcp => mcp::serve().map(|()| out::OK),
 
-        // Image backends first, then video: `runway` is not an image provider
-        // and `google` is both, so the image answer wins where a name is
-        // ambiguous — which keeps the existing behaviour of every command that
-        // has ever been typed.
+        // Image backends first, then video. A provider of both media — `google`
+        // and, since Runway's image lane, `runway` — lists both: before that lane
+        // `--provider runway` showed its video models, and gaining images must
+        // not hide them. Both halves run even when the first fails, since a
+        // missing key for one lane says nothing about the other's table.
         Command::Models { provider } => match Backend::parse(&provider) {
-            Ok(backend) => list_models(backend).map(|()| out::OK),
+            Ok(backend) => {
+                let images = list_models(backend);
+                match provider::VideoBackend::parse(&provider) {
+                    Ok(video) => {
+                        println!();
+                        let videos = list_video_models(video);
+                        images.and(videos).map(|()| out::OK)
+                    }
+                    Err(_) => images.map(|()| out::OK),
+                }
+            }
             Err(image_error) => match provider::VideoBackend::parse(&provider) {
                 Ok(backend) => list_video_models(backend).map(|()| out::OK),
                 // The image error, not the video one: five of the six providers
@@ -1326,6 +1337,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::Bfl => Box::new(bfl::Client::from_env()?),
         Backend::Stability => Box::new(stability::Client::from_env()?),
         Backend::OpenAi => Box::new(openai::Client::from_env()?),
+        Backend::Runway => Box::new(runway::Client::from_env()?),
     })
 }
 
@@ -1427,6 +1439,7 @@ fn list_models(backend: Backend) -> Result<()> {
         Backend::Bfl => bfl::MODEL_ALIASES,
         Backend::Stability => stability::MODEL_ALIASES,
         Backend::OpenAi => openai::MODEL_ALIASES,
+        Backend::Runway => runway::IMAGE_ALIASES,
     };
     if !aliases.is_empty() {
         println!("\nAliases:");
@@ -1460,6 +1473,9 @@ fn yes_no(supported: bool) -> &'static str {
 fn describe_aspect(support: provider::AspectSupport) -> String {
     match support {
         provider::AspectSupport::Named(ratios) => ratios.join(", "),
+        provider::AspectSupport::Pixels(pairs) => {
+            format!("{} (or any W:H with the same shape)", pairs.join(", "))
+        }
         provider::AspectSupport::Free { multiple_of } => {
             format!("any, rounded to {multiple_of} pixels")
         }

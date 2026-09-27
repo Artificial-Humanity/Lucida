@@ -15,9 +15,10 @@ published — so it is named here rather than linked. Read it before starting wo
   no-new-dependency posture is deliberate and extends to test infrastructure: JSON-RPC is
   hand-rolled in `src/mcp.rs`, and wire behaviour is pinned by the recorded-response test
   server in `src/testserver.rs` (scripted replies transcribed from real provider sessions).
-* **Image providers (five):** Google Gemini (`genai.rs`), local ComfyUI (`comfy.rs`), Black
-  Forest Labs hosted FLUX (`bfl.rs`), Stability AI (`stability.rs`), OpenAI (`openai.rs`).
-  Video is Veo (`video.rs`, sharing genai's client).
+* **Image providers (six):** Google Gemini (`genai.rs`), local ComfyUI (`comfy.rs`), Black
+  Forest Labs hosted FLUX (`bfl.rs`), Stability AI (`stability.rs`), OpenAI (`openai.rs`),
+  Runway (`runway.rs`, beside its video lane). Video is Veo (`video.rs`, sharing genai's
+  client), Runway and Kling (`kling.rs`).
 * **Capability truth lives in code, not prose.** `Backend::ALL` and the capabilities tables
   generate provider lists wherever the shape allows. The 2026-08-02 review's headline
   finding: every generated list stayed true while every hand-written one rotted. When
@@ -48,7 +49,8 @@ published — so it is named here rather than linked. Read it before starting wo
   video generation, and **each provider should be as completely represented as possible across
   both**. A provider present for one medium and absent for the other is a coverage gap, not a
   finished integration: as of v1.1.1, runway and kling are video-only here while both offer
-  image generation, and openai is image-only. The live matrix and the ordered work list are in
+  image generation, and openai is image-only. Runway's image lane has since landed on `main`,
+  unreleased, leaving kling video-only. The live matrix and the ordered work list are in
   `docs/ROADMAP.md` § 5. This widens providers that already exist, which is **not** what the
   2026-08-09 pause on new providers covers — the owner clarified the pause meant new
   *providers*, not new endpoints.

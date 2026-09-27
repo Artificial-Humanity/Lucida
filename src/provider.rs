@@ -203,8 +203,22 @@ fn round_to(value: u32, multiple: u32) -> u32 {
 pub enum AspectSupport {
     /// Only these exact ratios, and nothing between them.
     Named(&'static [&'static str]),
+    /// Only these shapes, spelled as pixel pairs — `1920:1080` — which is how
+    /// Runway names them. A ratio is accepted when an offered pair has exactly
+    /// its shape, so `16:9` means `1920:1080`; one no pair has is refused rather
+    /// than rounded to the nearest, which would be a silent substitution.
+    Pixels(&'static [&'static str]),
     /// Any ratio, subject to rounding to `multiple_of` pixels.
     Free { multiple_of: u32 },
+}
+
+/// Whether an offered pixel pair has exactly the shape asked for.
+pub fn pixel_pair_matches(pairs: &[&str], aspect: Aspect) -> bool {
+    pairs.iter().any(|pair| {
+        Aspect::parse(pair).is_ok_and(|p| {
+            u64::from(p.w) * u64::from(aspect.h) == u64::from(p.h) * u64::from(aspect.w)
+        })
+    })
 }
 
 /// What a provider embeds in its output.
@@ -242,8 +256,9 @@ pub enum Provenance {
     /// provider starts before anyone has rendered anything with it. BFL was the
     /// case in point — it shipped as `Unverified`, one render proved it
     /// [`Self::C2paOnly`], and the guess most people would have made (unmarked,
-    /// like other non-Google generators) was wrong. Runway holds it now, as of
-    /// 2026-08-09, and one paid render is what will retire it.
+    /// like other non-Google generators) was wrong. Runway's video lane holds it
+    /// now, as of 2026-08-09, and one paid render is what will retire it — as
+    /// one did for Runway's images on 2026-09-27, which read [`Self::C2paOnly`].
     Unverified,
 }
 
@@ -508,14 +523,18 @@ impl VideoCapabilities {
             }
         }
 
-        if let Some(aspect) = req.aspect
-            && let AspectSupport::Named(accepted) = self.aspect
-            && !accepted.iter().any(|a| *a == aspect.to_string())
-        {
-            bail!(
-                "`{me}` does not offer {aspect}. It accepts: {}.",
-                accepted.join(", ")
-            );
+        if let Some(aspect) = req.aspect {
+            let offered = match self.aspect {
+                AspectSupport::Named(accepted) => accepted.iter().any(|a| *a == aspect.to_string()),
+                AspectSupport::Pixels(pairs) => pixel_pair_matches(pairs, aspect),
+                AspectSupport::Free { .. } => true,
+            };
+            if !offered {
+                let (AspectSupport::Named(list) | AspectSupport::Pixels(list)) = self.aspect else {
+                    unreachable!("a free aspect accepts everything")
+                };
+                bail!("`{me}` does not offer {aspect}. It accepts: {}.", list.join(", "));
+            }
         }
 
         Ok(())
@@ -909,6 +928,18 @@ impl Capabilities {
             }
         }
 
+        if let (Some(aspect), AspectSupport::Pixels(pairs)) = (req.aspect, self.aspect)
+            && !pixel_pair_matches(pairs, aspect)
+        {
+            bail!(
+                "`{me}` offers only these shapes, as pixel pairs: {}.\n\n\
+                 None of them is {aspect}. A ratio such as `16:9` is accepted \
+                 wherever one of these has that shape. Pick one of them, or use \
+                 the `comfyui` provider, which takes free dimensions.",
+                pairs.join(", ")
+            );
+        }
+
         Ok(())
     }
 
@@ -969,6 +1000,7 @@ pub fn capabilities_for(backend: Backend, model: &str) -> Capabilities {
         Backend::Bfl => crate::bfl::capabilities(model),
         Backend::Stability => crate::stability::capabilities(model),
         Backend::OpenAi => crate::openai::capabilities(model),
+        Backend::Runway => crate::runway::image_capabilities(model),
     }
 }
 
@@ -980,6 +1012,7 @@ pub enum Backend {
     Bfl,
     Stability,
     OpenAi,
+    Runway,
 }
 
 impl Backend {
@@ -990,6 +1023,7 @@ impl Backend {
             "bfl" | "flux" | "blackforestlabs" => Ok(Self::Bfl),
             "stability" | "stabilityai" | "sai" => Ok(Self::Stability),
             "openai" | "oai" | "gpt" => Ok(Self::OpenAi),
+            "runway" | "runwayml" => Ok(Self::Runway),
             other => bail!(
                 "unknown provider `{other}`. Known providers: {}",
                 // Generated, so a sixth provider cannot be missing from it —
@@ -1010,6 +1044,7 @@ impl Backend {
             Self::Bfl => "bfl",
             Self::Stability => "stability",
             Self::OpenAi => "openai",
+            Self::Runway => "runway",
         }
     }
 
@@ -1038,6 +1073,7 @@ impl Backend {
             Self::Bfl => "FLUX",
             Self::Stability => "Stability",
             Self::OpenAi => "OpenAI",
+            Self::Runway => "Runway",
         }
     }
 
@@ -1063,6 +1099,7 @@ impl Backend {
             Self::Bfl => crate::bfl::DEFAULT_MODEL,
             Self::Stability => crate::stability::DEFAULT_MODEL,
             Self::OpenAi => crate::openai::DEFAULT_MODEL,
+            Self::Runway => crate::runway::DEFAULT_IMAGE_MODEL,
         }
     }
 
@@ -1072,6 +1109,7 @@ impl Backend {
         Backend::Bfl,
         Backend::Stability,
         Backend::OpenAi,
+        Backend::Runway,
     ];
 
     /// The setting that has to be present before this provider can be *chosen
@@ -1088,6 +1126,7 @@ impl Backend {
             Self::Bfl => Some("BFL_API_KEY"),
             Self::Stability => Some("STABILITY_API_KEY"),
             Self::OpenAi => Some("OPENAI_API_KEY"),
+            Self::Runway => Some("RUNWAY_API_KEY"),
         }
     }
 
@@ -1123,6 +1162,9 @@ pub fn infer_backend(model: &str) -> Backend {
         || crate::openai::KNOWN_MODELS.contains(&key.as_str())
     {
         return Backend::OpenAi;
+    }
+    if crate::runway::is_runway_image_model(&key) {
+        return Backend::Runway;
     }
     if crate::bfl::MODEL_ALIASES.iter().any(|(a, _)| *a == key)
         || crate::bfl::KNOWN_MODELS.contains(&key.as_str())

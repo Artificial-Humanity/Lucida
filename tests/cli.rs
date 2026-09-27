@@ -284,6 +284,18 @@ fn capabilities_print_without_a_credential() {
     out.says("This provider supports:").says("output carries");
 }
 
+#[test]
+fn a_provider_of_both_media_lists_both() {
+    // `runway` was a video provider only, and `lucida models --provider runway`
+    // listed its video models. Now that it renders images too, the image lane
+    // must not hide the video one that command has always shown.
+    let sandbox = Sandbox::new("runway-both");
+    run(lucida(&sandbox).args(["models", "--provider", "runway"]))
+        .says("gen4_image")
+        .says("gen4.5")
+        .never_says("panicked");
+}
+
 // --- config file resolution -------------------------------------------------
 
 #[test]

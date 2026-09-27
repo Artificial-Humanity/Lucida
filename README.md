@@ -2,7 +2,7 @@
 
 Generate and edit images and video — as a standalone CLI or as a Model Context Protocol (MCP) server for coding agents.
 
-* **Images:** Google Gemini, local ComfyUI, Black Forest Labs (FLUX), Stability AI, OpenAI.
+* **Images:** Google Gemini, local ComfyUI, Black Forest Labs (FLUX), Stability AI, OpenAI, Runway.
 * **Video:** Google Veo, Runway, Kling.
 
 ## Contents
@@ -161,7 +161,7 @@ Values defined in a configuration file take precedence over environment variable
 
 | Medium | Supported Providers |
 |---|---|
-| **Images** | `google` (Gemini), `comfyui` (local Flux/SD), `bfl` (FLUX), `stability`, `openai` |
+| **Images** | `google` (Gemini), `comfyui` (local Flux/SD), `bfl` (FLUX), `stability`, `openai`, `runway` (Gen-4) |
 | **Video** | `google` (Veo), `runway`, `kling` |
 
 * **Provider resolution:** Selected with `--provider <name>`. If omitted, Lucida infers the provider from `--model` or falls back to the order defined in `LUCIDA_IMAGE_PROVIDERS` / `LUCIDA_VIDEO_PROVIDERS`.

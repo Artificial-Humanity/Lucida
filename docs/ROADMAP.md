@@ -2,7 +2,8 @@
 
 Lucida speaks to seven providers as of v1.1.1 — **images** from Google Gemini, a
 local ComfyUI, hosted FLUX from Black Forest Labs, Stability AI and OpenAI;
-**video** from Veo, Runway and Kling. This records where it goes next and, more
+**video** from Veo, Runway and Kling. Runway's images have landed on `main` since, not yet
+in a release. This records where it goes next and, more
 usefully, what has to be true first.
 
 Nothing below the "Done" section is committed work. Items are ordered by what
@@ -766,12 +767,21 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 | `bfl` | shipped | **missing** — FLUX 3 announced video 2026-07-23, gated early access |
 | `openai` | shipped | **missing** — see Sora below |
 | `stability` | shipped | **missing** — `/v2beta/image-to-video` returns 404 today; retired or moved, unverified |
-| `runway` | **missing** — 8 models, probe-confirmed | shipped |
+| `runway` | shipped on `main`, 2026-09-27 — its own two models | shipped |
 | `kling` | **missing** — endpoint confirmed, models not enumerable free | shipped |
 
 ### The items, in the order worth doing them
 
-1. **Runway images — `gen4_image` and `gen4_image_turbo`.** Its own two models,
+1. **Runway images — DONE on `main`, 2026-09-27, unreleased.** Shipped as
+   written below: `gen4_image` and `gen4_image_turbo` behind `ImageProvider`, in
+   `runway.rs`. By then the endpoint listed twelve models — the two, plus ten
+   it fronts — and only the two are claimed. The one live render read a signed
+   C2PA manifest and no pixel watermark, so the lane ships `C2paOnly` rather
+   than `Unverified`. It also found that `--aspect 16:9` had always been refused
+   on Runway *video*, which the module promised it would not be; both lanes
+   now accept a ratio wherever an offered pixel pair has its shape.
+
+   The original entry: **Runway images — `gen4_image` and `gen4_image_turbo`.** Its own two models,
    which is the scope already set for Runway (owner, 2026-08-09). The endpoint is
    `POST /v1/text_to_image`, confirmed live: an invalid model is rejected with
    the full list. `ImageProvider` already exists to implement against, and the

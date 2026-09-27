@@ -1,4 +1,4 @@
-//! Runway — Gen-4 video.
+//! Runway — Gen-4 video, and Gen-4 images.
 //!
 //! The second video provider, and the one that makes video a *substitution*
 //! rather than a single hardcoded lane, the way BFL did for images. The call
@@ -45,12 +45,13 @@
 //! reading a rejection that named the field, never by the lack of one.
 
 use crate::provider::{
-    Aspect, AspectSupport, DurationSupport, Provenance, VideoCapabilities, VideoProvider,
+    Aspect, AspectSupport, Capabilities, DurationSupport, GeneratedImage, ImageProvider,
+    ImageRequest, MaskSupport, Provenance, VideoCapabilities, VideoProvider,
 };
 use crate::video::{VideoRequest, VideoStatus};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const API_ROOT: &str = "https://api.dev.runwayml.com/v1";
 
@@ -115,7 +116,7 @@ pub fn capabilities(model: &str) -> VideoCapabilities {
     VideoCapabilities {
         provider: "runway",
         tagline: "Gen-4. Paid, per second, and a real alternative to Veo — no Google account, and durations from 2 to 10 seconds rather than three fixed lengths.",
-        aspect: AspectSupport::Named(if turbo { TURBO_RATIOS } else { GEN45_RATIOS }),
+        aspect: AspectSupport::Pixels(if turbo { TURBO_RATIOS } else { GEN45_RATIOS }),
         // Measured from both bounds: "expected number to be >=2" and "<=10".
         duration: DurationSupport::Range { min: 2, max: 10 },
         image_to_video: true,
@@ -140,6 +141,102 @@ pub fn capabilities(model: &str) -> VideoCapabilities {
         // was wrong. Not claiming is the honest state until a render settles it.
         provenance: Provenance::Unverified,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+//
+// Runway's image endpoint, `POST /v1/text_to_image`, is the same submit-poll-
+// download shape as its video lane, on the same key, base URL and version
+// header — which is why it lives here rather than in a module of its own.
+//
+// **Its own two models only**, the line the video lane draws and for the same
+// reasons. On 2026-09-27 the endpoint's `model` field listed twelve: these two,
+// and ten it fronts (`gemini_image3_pro`, `gpt_image_2`, `seedream5_pro`,
+// `grok_imagine_image_2` and more). Coverage being per-credential reopens that
+// question for someone holding only a Runway key, and it is an open question in
+// the roadmap — but it is a separate decision, not a side effect of this lane.
+//
+// Everything below was read from free validation errors on 2026-09-27, each
+// probe carrying a deliberately invalid `ratio` so that nothing could render.
+
+/// Runway's own image models, from the endpoint's own list.
+pub const IMAGE_MODELS: &[&str] = &["gen4_image", "gen4_image_turbo"];
+
+/// The one of the two that can start from a prompt alone.
+pub const DEFAULT_IMAGE_MODEL: &str = "gen4_image";
+
+pub const IMAGE_ALIASES: &[(&str, &str)] = &[
+    ("gen4-image", "gen4_image"),
+    ("gen4-image-turbo", "gen4_image_turbo"),
+];
+
+/// The pixel pairs both image models accept — identical lists, in the
+/// endpoint's own order, which puts the 1080-class pair before the 720-class
+/// one of the same shape. [`nearest_ratio`] keeps the first of equally near
+/// pairs, so `--aspect 16:9` renders at `1920:1080`.
+const IMAGE_RATIOS: &[&str] = &[
+    "1024:1024", "1080:1080", "1168:880", "1360:768", "1440:1080", "1080:1440", "1808:768",
+    "1920:1080", "1080:1920", "2112:912", "1280:720", "720:1280", "720:720", "960:720", "720:960",
+    "1680:720",
+];
+
+/// A render that has not resolved by now is abandoned as a wait, not as a
+/// charge — the same bound BFL uses.
+const IMAGE_DEADLINE: Duration = Duration::from_secs(600);
+
+pub fn resolve_image_model(input: &str) -> String {
+    let key = input.trim().to_ascii_lowercase();
+    IMAGE_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == key)
+        .map(|(_, id)| (*id).to_string())
+        .unwrap_or(key)
+}
+
+/// Whether a model id is one of Runway's own image models.
+pub fn is_runway_image_model(model: &str) -> bool {
+    IMAGE_MODELS.contains(&resolve_image_model(model).as_str())
+}
+
+pub fn image_capabilities(model: &str) -> Capabilities {
+    let _ = model; // The two models validate identically; kept for the shape.
+    Capabilities {
+        provider: "runway",
+        tagline: "Gen-4 images on a Runway key — up to three reference images, a seed, and sixteen fixed pixel ratios.",
+        aspect: AspectSupport::Pixels(IMAGE_RATIOS),
+        // The ratio is a pixel pair — `1920:1080` — so it *is* the size, and the
+        // endpoint has no other dimension field.
+        size: false,
+        // "expected number to be >=0" and "<=4294967295".
+        seed: true,
+        // No field for one, and unknown fields are silently ignored here — so
+        // sending one would be exactly the silent drop this refuses.
+        negative_prompt: false,
+        // `referenceImages`: at most three, each `https://`, `runway://` or
+        // `data:image/`.
+        references: true,
+        mask: MaskSupport::No,
+        workflow: false,
+        steps: false,
+        guidance: false,
+        // Measured 2026-09-27 on one `gen4_image` render (1024:1024, 8 credits):
+        // a `caBX` chunk holding a C2PA manifest signed by a `runwayml.com`
+        // certificate, naming "Runway Image Generation" 4.0.0 as software agent
+        // and asserting `digitalSourceType: trainedAlgorithmicMedia` — and no
+        // pixel watermark found. The same evidence BFL's classification rests
+        // on. Runway's *video* lane is a different product and stays
+        // `Unverified` until one of its renders is read the same way.
+        provenance: Provenance::C2paOnly,
+    }
+}
+
+/// How a Runway task stands, shared by the image and video lanes.
+enum Task {
+    Pending,
+    /// The first output URL.
+    Done(String),
 }
 
 pub struct Client {
@@ -251,9 +348,9 @@ impl Client {
         };
 
         let accepted = match capabilities(model).aspect {
-            AspectSupport::Named(ratios) => ratios,
-            // Unreachable: Runway's ratios are always a named set.
-            AspectSupport::Free { .. } => GEN45_RATIOS,
+            AspectSupport::Pixels(ratios) => ratios,
+            // Unreachable: Runway's ratios are always pixel pairs.
+            AspectSupport::Named(_) | AspectSupport::Free { .. } => GEN45_RATIOS,
         };
         body.insert("ratio".into(), json!(nearest_ratio(req.aspect, accepted)));
 
@@ -326,8 +423,131 @@ impl VideoProvider for Client {
     }
 
     fn poll(&self, operation: &str) -> Result<VideoStatus> {
+        match self.task(operation)? {
+            Task::Done(url) => Ok(VideoStatus::Done(self.download(&url, "video")?)),
+            Task::Pending => Ok(VideoStatus::Pending),
+        }
+    }
+}
+
+impl ImageProvider for Client {
+    fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
+        let model = resolve_image_model(&req.model);
+
+        // Measured: the endpoint answers "expected array, received undefined"
+        // for `referenceImages` on turbo. Said here, as a refusal, so the
+        // alternative can be named — and before anything is sent.
+        if model == "gen4_image_turbo" && req.references.is_empty() {
+            return Err(anyhow::Error::new(crate::out::Refused(
+                "`gen4_image_turbo` cannot start from a prompt alone — Runway \
+                 requires at least one reference image for it.\n\n\
+                 Use `lucida edit <image> <prompt> --model gen4_image_turbo`, or \
+                 `--model gen4_image`, which renders from text."
+                    .to_string(),
+            )));
+        }
+
+        let body = self.image_body(req, &model)?;
+        let verb = if req.references.is_empty() { "Rendering" } else { "Editing" };
+        eprintln!("{verb} {} with {model}…", body["ratio"].as_str().unwrap_or("?"));
+
+        // Deliberately not retried, as with video: this call starts billing.
+        let response = self
+            .authed(self.http.post(format!("{}/text_to_image", self.base)))
+            .json(&body)
+            .send()
+            .context("starting the Runway render")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("{}", explain_error(status.as_u16(), &text));
+        }
+        let payload: Value = response.json().context("parsing the task response")?;
+        let id = payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Runway accepted the job but returned no task id: {payload}"))?
+            .to_string();
+
+        let url = self.await_task(&id)?;
+        let bytes = self.download(&url, "image")?;
+        let mime_type = crate::sniff_mime(&bytes).unwrap_or("image/png").to_string();
+
+        Ok(GeneratedImage {
+            bytes,
+            mime_type,
+            commentary: None,
+            // Runway echoes no seed, so only a pinned one can be reported.
+            seed: req.seed,
+        })
+    }
+
+    fn list_models(&self) -> Result<Vec<String>> {
+        // No endpoint lists them for free; the catalogue is fixed at release.
+        // What `lucida models` is really asking is whether the key works, and
+        // the balance answers that without spending.
+        self.credits()?;
+        Ok(IMAGE_MODELS.iter().map(|m| m.to_string()).collect())
+    }
+}
+
+impl Client {
+    fn image_body(&self, req: &ImageRequest, model: &str) -> Result<Value> {
+        let mut body = serde_json::Map::new();
+        body.insert("model".into(), json!(model));
+        body.insert("promptText".into(), json!(req.prompt));
+        body.insert("ratio".into(), json!(nearest_ratio(req.aspect, IMAGE_RATIOS)));
+
+        if !req.references.is_empty() {
+            let mut images = Vec::new();
+            for reference in &req.references {
+                // A URL passes through — the endpoint fetches `https://` itself.
+                let uri = if reference.starts_with("https://") {
+                    reference.clone()
+                } else {
+                    let bytes = std::fs::read(reference)
+                        .with_context(|| format!("reading reference image {reference}"))?;
+                    let mime = crate::sniff_mime(&bytes).unwrap_or("image/png");
+                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    format!("data:{mime};base64,{}", STANDARD.encode(&bytes))
+                };
+                images.push(json!({ "uri": uri }));
+            }
+            body.insert("referenceImages".into(), Value::Array(images));
+        }
+        if let Some(seed) = req.seed {
+            body.insert("seed".into(), json!(seed));
+        }
+        Ok(Value::Object(body))
+    }
+
+    /// Polls an image task until it resolves. The video lane polls from the
+    /// caller instead, because a video outlives a session and an image does not.
+    fn await_task(&self, id: &str) -> Result<String> {
+        let started = Instant::now();
+        let mut interval = Duration::from_millis(500);
+        loop {
+            // Between polls only: the render is billed by now, so a cancellation
+            // stops the waiting, not the charge.
+            crate::cancel::check()?;
+            if started.elapsed() > IMAGE_DEADLINE {
+                bail!(
+                    "gave up after {} minutes. The render may still complete; its \
+                     Runway task id is {id}.",
+                    IMAGE_DEADLINE.as_secs() / 60
+                );
+            }
+            if let Task::Done(url) = self.task(id)? {
+                return Ok(url);
+            }
+            std::thread::sleep(interval);
+            interval = (interval * 2).min(Duration::from_secs(3));
+        }
+    }
+
+    /// One read of a task, for either lane.
+    fn task(&self, id: &str) -> Result<Task> {
         let response = crate::retry::send_idempotent("polling the render", || {
-            self.authed(self.http.get(format!("{}/tasks/{operation}", self.base)))
+            self.authed(self.http.get(format!("{}/tasks/{id}", self.base)))
         })
         .context("polling the Runway task")?;
 
@@ -339,12 +559,10 @@ impl VideoProvider for Client {
 
         let payload: Value = response.json().context("parsing the task response")?;
         match payload["status"].as_str().unwrap_or_default() {
-            "SUCCEEDED" => {
-                let url = payload["output"][0]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("the render finished but carries no output: {payload}"))?;
-                Ok(VideoStatus::Done(self.download(url)?))
-            }
+            "SUCCEEDED" => payload["output"][0]
+                .as_str()
+                .map(|url| Task::Done(url.to_string()))
+                .ok_or_else(|| anyhow!("the render finished but carries no output: {payload}")),
             "FAILED" | "CANCELLED" => {
                 let reason = payload["failure"]
                     .as_str()
@@ -353,24 +571,24 @@ impl VideoProvider for Client {
                 bail!("the render failed: {reason}");
             }
             // PENDING, RUNNING, THROTTLED — all still in flight.
-            _ => Ok(VideoStatus::Pending),
+            _ => Ok(Task::Pending),
         }
     }
 }
 
 impl Client {
-    fn download(&self, url: &str) -> Result<Vec<u8>> {
+    fn download(&self, url: &str, what: &str) -> Result<Vec<u8>> {
         // No credential on this request: the output URL is pre-signed object
         // storage, and sending a key to a host that does not need it is how
         // credentials end up somewhere unexpected. Same reasoning as BFL, and
         // the opposite of Veo, whose download URL does require one — which is
         // exactly why both are pinned by tests.
-        let response = crate::retry::send_idempotent("downloading the video", || {
+        let response = crate::retry::send_idempotent(&format!("downloading the {what}"), || {
             self.http.get(url)
         })
         .with_context(|| {
             format!(
-                "downloading the finished video. The render was billed; its URL \
+                "downloading the finished {what}. The render was billed; its URL \
                  expires, so fetch it by hand while it lasts:\n\n  {url}"
             )
         })?;
@@ -383,7 +601,7 @@ impl Client {
             );
         }
 
-        Ok(response.bytes().context("reading video bytes")?.to_vec())
+        Ok(response.bytes().with_context(|| format!("reading {what} bytes"))?.to_vec())
     }
 }
 
@@ -448,6 +666,150 @@ mod tests {
 
     fn wired(server: &crate::testserver::Server) -> Client {
         Client::recorded(server.url())
+    }
+
+    // ---- images -------------------------------------------------------------
+
+    /// Runway spells geometry in pixels, so `--aspect 16:9` has to be accepted
+    /// wherever an offered pair *is* 16:9 — the module note promised it, while
+    /// the capability check compared strings and refused it (found 2026-09-27,
+    /// on a release). A shape nothing offers is still refused, not approximated.
+    #[test]
+    fn a_ratio_is_accepted_when_an_offered_pixel_pair_has_its_shape() {
+        let aspect = |text| ImageRequest { aspect: Aspect::parse(text).ok(), ..Default::default() };
+        let caps = image_capabilities(DEFAULT_IMAGE_MODEL);
+        for ok in ["1:1", "16:9", "9:16", "4:3", "1024:1024", "1920:1080"] {
+            assert!(caps.check(&aspect(ok)).is_ok(), "{ok}");
+        }
+        assert!(caps.check(&aspect("3:2")).is_err(), "no pair is 3:2");
+
+        let video = |text| VideoRequest { aspect: Aspect::parse(text).ok(), ..Default::default() };
+        let gen45 = capabilities("gen4.5");
+        assert!(gen45.check(&video("16:9")).is_ok());
+        assert!(gen45.check(&video("9:16")).is_ok());
+        assert!(gen45.check(&video("1:1")).is_err(), "gen4.5 offers no square");
+    }
+
+    /// Runway's own two image models route here, by id or alias. Its video ids
+    /// do not, and neither does the catalogue it fronts — the same line the video
+    /// lane draws, owner's call 2026-08-09.
+    #[test]
+    fn runways_own_image_models_route_to_runway() {
+        use crate::provider::{Backend, infer_backend};
+        for model in IMAGE_MODELS {
+            assert_eq!(infer_backend(model), Backend::Runway, "{model}");
+        }
+        assert_eq!(infer_backend("gen4-image-turbo"), Backend::Runway);
+        assert_ne!(infer_backend("gen4.5"), Backend::Runway, "a video model");
+        assert_ne!(infer_backend("seedream5_pro"), Backend::Runway, "a fronted model");
+    }
+
+    /// Each value here was read from a rejection naming the field, 2026-09-27 —
+    /// never from the absence of one, since this API ignores unknown fields.
+    #[test]
+    fn image_capabilities_are_what_the_endpoint_validates() {
+        use crate::provider::MaskSupport;
+        for model in IMAGE_MODELS {
+            let caps = image_capabilities(model);
+            assert!(caps.references, "{model}: up to three reference images");
+            assert!(caps.seed, "{model}: 0..=4294967295");
+            // The ratio is a pixel pair and decides the size; there is no other.
+            assert!(!caps.size, "{model}");
+            assert!(!caps.negative_prompt, "{model}");
+            assert!(!caps.steps && !caps.guidance && !caps.workflow, "{model}");
+            assert_eq!(caps.mask, MaskSupport::No, "{model}");
+            // Measured 2026-09-27 on a real `gen4_image` render: a signed C2PA
+            // manifest and no pixel watermark found — the evidence BFL's was read on.
+            assert_eq!(caps.provenance, Provenance::C2paOnly, "{model}");
+            match caps.aspect {
+                AspectSupport::Pixels(ratios) => assert_eq!(ratios.len(), 16, "{model}"),
+                _ => panic!("{model}: Runway names its ratios as pixel pairs"),
+            }
+        }
+    }
+
+    /// Submit, poll, download — and the download carries no key, as with video.
+    #[test]
+    fn an_image_is_submitted_polled_and_downloaded() {
+        let server = serve(vec![
+            Reply::json(r#"{"id":"img-1"}"#),
+            Reply::json(r#"{"status":"RUNNING"}"#),
+            Reply::json(r#"{"status":"SUCCEEDED","output":["{{server}}/signed/out.png"]}"#),
+            Reply::bytes("image/png", &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+        ]);
+
+        let request = ImageRequest {
+            prompt: "a lighthouse at dusk".into(),
+            model: "gen4_image".into(),
+            aspect: Aspect::parse("16:9").ok(),
+            seed: Some(7),
+            ..Default::default()
+        };
+        let image = wired(&server).generate(&request).unwrap();
+        assert_eq!(image.bytes[..4], [0x89, b'P', b'N', b'G']);
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.seed, Some(7));
+
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/text_to_image");
+        assert_eq!(requests[0].header("x-runway-version"), Some(API_VERSION));
+        let body = requests[0].json();
+        assert_eq!(body["model"], "gen4_image");
+        assert_eq!(body["promptText"], "a lighthouse at dusk");
+        // 16:9 is two of the accepted pairs; the larger comes first in Runway's list.
+        assert_eq!(body["ratio"], "1920:1080");
+        assert_eq!(body["seed"], 7);
+        assert!(body.get("referenceImages").is_none());
+
+        assert_eq!(requests[1].path, "/tasks/img-1");
+        assert_eq!(requests[2].path, "/tasks/img-1");
+        assert_eq!(requests[3].path, "/signed/out.png");
+        assert_eq!(requests[3].header("authorization"), None, "the key went to object storage");
+    }
+
+    /// A local reference file travels as a data URI — the endpoint takes
+    /// `https://`, `runway://` uploads or `data:image/`, and the last needs no
+    /// second round trip.
+    #[test]
+    fn a_reference_image_travels_as_a_data_uri() {
+        let dir = std::env::temp_dir().join(format!("lucida-runway-ref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("ref.png");
+        std::fs::write(&source, [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+
+        let server = serve(vec![
+            Reply::json(r#"{"id":"img-2"}"#),
+            Reply::json(r#"{"status":"SUCCEEDED","output":["{{server}}/signed/out.png"]}"#),
+            Reply::bytes("image/png", &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+        ]);
+        let request = ImageRequest {
+            prompt: "the same lighthouse, in snow".into(),
+            model: "gen4_image_turbo".into(),
+            references: vec![source.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        wired(&server).generate(&request).unwrap();
+
+        let body = server.finish()[0].json();
+        let uri = body["referenceImages"][0]["uri"].as_str().unwrap();
+        assert!(uri.starts_with("data:image/png;base64,"), "{uri}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `gen4_image_turbo` cannot start from text — the endpoint requires
+    /// `referenceImages` for it. Said before anything is sent, as a refusal.
+    #[test]
+    fn turbo_without_a_reference_is_refused_before_anything_is_sent() {
+        let server = serve(vec![]);
+        let request = ImageRequest {
+            prompt: "a lighthouse".into(),
+            model: "gen4_image_turbo".into(),
+            ..Default::default()
+        };
+        let error = wired(&server).generate(&request).unwrap_err();
+        assert!(error.downcast_ref::<crate::out::Refused>().is_some(), "{error:#}");
+        assert!(format!("{error:#}").contains("gen4_image"), "{error:#}");
+        assert!(server.finish().is_empty(), "a refused request reached the API");
     }
 
     /// The catalogue Runway fronts is deliberately unreachable. Owner's call,
