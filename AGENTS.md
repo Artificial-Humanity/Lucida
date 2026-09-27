@@ -73,8 +73,9 @@ published — so it is named here rather than linked. Read it before starting wo
   it carries are true.
 * **Verification trio:** `cargo test`, `cargo clippy --all-targets` (kept warning-free so
   the next warning is visible), and `scripts/smoke.sh` — all three green before tagging a
-  release. `scripts/canary.sh` is run before every release too (see Integration Dependencies). A release ships three platform assets with checksums (macOS universal, Linux
-  musl-static, Windows); a release missing an asset is the v0.5.0 failure mode. The crate
+  release. `scripts/canary.sh` is run before every release too (see Integration
+  Dependencies). A release ships three platform assets with checksums (macOS universal,
+  Linux musl-static, Windows); a release missing an asset is the v0.5.0 failure mode. The crate
   goes to crates.io from the same tag-push run, via trusted publishing (`release.yml`'s
   `crate` job), first proven by v1.1.1. If it fails, publish by hand from a checkout of the tag,
   never `main` — see `docs/ROADMAP.md` § 4.
