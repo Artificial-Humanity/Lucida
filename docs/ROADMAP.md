@@ -708,7 +708,8 @@ Three things worth keeping from that:
   crate whose `Cargo.toml` does not match the tag it claims to be is a
   discrepancy worth one patch release to avoid.
 
-  **Later versions publish from the release workflow — proven at v1.1.1.**
+  **Later versions publish from the release workflow — the publish path proven
+  at v1.1.1.**
   The `crate` job in `release.yml` runs after the GitHub release and publishes
   through crates.io trusted publishing, so a tag push publishes the crate from
   the same commit as the binaries, with no stored token. It runs on a tag push
@@ -721,7 +722,9 @@ Three things worth keeping from that:
   first tag to run it, on 2026-09-27 (run `36338142541`): crates.io records that
   version as published by GitHub trusted publishing, and the crate's
   `.cargo_vcs_info.json` names the tagged commit. If the job ever fails, publish
-  that version by hand from a checkout of the tag, not from `main`. ⚠ This
+  that version by hand from a checkout of the tag, not from `main`. Two
+  branches have still never run: the skip for a version already on crates.io,
+  and the environment refusing a ref that is not a `v*` tag. ⚠ This
   paragraph said the registry token "is not an agent's to hold" until the
   owner reversed that on 2026-09-26.
 - **Video beyond Veo — DONE at v1.0.0.** Runway and Kling shipped behind
