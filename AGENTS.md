@@ -73,7 +73,7 @@ published — so it is named here rather than linked. Read it before starting wo
   it carries are true.
 * **Verification trio:** `cargo test`, `cargo clippy --all-targets` (kept warning-free so
   the next warning is visible), and `scripts/smoke.sh` — all three green before tagging a
-  release. A release ships three platform assets with checksums (macOS universal, Linux
+  release. `scripts/canary.sh` is run before every release too (see Integration Dependencies). A release ships three platform assets with checksums (macOS universal, Linux
   musl-static, Windows); a release missing an asset is the v0.5.0 failure mode. The crate
   goes to crates.io from the same tag-push run, via trusted publishing (`release.yml`'s
   `crate` job), first proven by v1.1.1. If it fails, publish by hand from a checkout of the tag,
@@ -110,9 +110,9 @@ published — so it is named here rather than linked. Read it before starting wo
   credential-geography reasoning of 2026-08-09). ⚠ Until 2026-09-27 this paragraph said a
   weekly cron ran it there; a search found none and the owner knew of none. **Run it before
   every release and after changing a provider lane** — proposed by the resident, approved by
-  the owner the same day. The GitHub workflow is `workflow_dispatch` only, deliberately, so
-  the credentials gain no second home. A successful render inside the canary is reported as a
-  *failure* — it would mean money was
+  the owner the same day ("That suggestion is sound. I'm okay with it"). The GitHub workflow
+  is `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
+  successful render inside the canary is reported as a *failure* — it would mean money was
   spent by a script whose contract is that it spends none.
 
 ---
