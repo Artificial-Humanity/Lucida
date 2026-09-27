@@ -46,6 +46,7 @@
 use crate::config;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -138,8 +139,8 @@ fn confirm() -> Result<bool> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Install {
     /// Under a cargo bin directory: cargo owns it, so cargo must replace it.
-    /// `root` is the install root holding that `bin`, as cargo is configured
-    /// with it — where its record lives and where the reinstall must go.
+    /// `root` is the cargo home whose `bin` holds the copy — where cargo's record
+    /// lives and where the reinstall is sent.
     Cargo { root: PathBuf },
     /// A downloaded release binary, or anything else: replaceable in place.
     Standalone,
@@ -420,10 +421,12 @@ fn record_check(path: &Path) {
 /// `--locked` also builds against the lockfile the crate ships.
 ///
 /// **`--root` is the copy's own install root.** Without it cargo installs
-/// wherever it is configured to today — `CARGO_INSTALL_ROOT`, `install.root`,
-/// `CARGO_HOME` — and if that moved since this copy was installed, the update
-/// lands elsewhere, reports success, and the copy on PATH stays old.
-fn cargo_args(source: &CargoSource, tag: &str, root: &Path) -> Vec<String> {
+/// wherever it is configured to — and a `CARGO_INSTALL_ROOT` or `install.root`
+/// set since this copy was installed sends the update elsewhere, reports
+/// success, and leaves the copy on PATH old. The arguments are OS strings so the
+/// root reaches cargo byte for byte: a lossy one names a directory that does not
+/// exist, and cargo creates it.
+fn cargo_args(source: &CargoSource, tag: &str, root: &Path) -> Vec<OsString> {
     let version = tag.trim_start_matches('v');
     let args: &[&str] = match source {
         CargoSource::Registry => {
@@ -431,8 +434,8 @@ fn cargo_args(source: &CargoSource, tag: &str, root: &Path) -> Vec<String> {
         }
         CargoSource::Git => &["install", "--git", REPO, "--tag", tag, "--force"],
     };
-    let mut args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    args.extend(["--root".to_string(), root.display().to_string()]);
+    let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    args.extend([OsString::from("--root"), root.as_os_str().to_owned()]);
     args
 }
 
@@ -511,7 +514,8 @@ fn reinstall_with_cargo(exe: &Path, root: &Path, tag: &str) -> Result<()> {
     // and, via `--root`, where the reinstall goes — so the two cannot disagree.
     let source = cargo_source(root);
     let args = cargo_args(&source, tag, root);
-    let printable = format!("cargo {}", args.join(" "));
+    let shown: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+    let printable = format!("cargo {}", shown.join(" "));
 
     // Respects CARGO, which is set when this is itself invoked from cargo, and
     // names the toolchain's own binary rather than whatever is first on PATH.
@@ -562,8 +566,8 @@ pub fn install_kind(exe: &Path) -> Install {
 /// Windows' `\\?\` prefix on a canonical path, stops the two sharing a prefix and
 /// a cargo-managed copy is written over as though it were a download — the one
 /// outcome this module exists to prevent. The unresolved form is still tried, for
-/// an exe that was never canonicalized. The root returned is the configured one,
-/// link and all, since that is the path cargo itself would be given.
+/// an exe that was never canonicalized. The root returned is the cargo home as
+/// found, link and all, so cargo is never handed a `\\?\` path.
 fn install_kind_under(exe: &Path, cargo_home: Option<PathBuf>) -> Install {
     let Some(root) = cargo_home else {
         return Install::Standalone;
@@ -815,8 +819,8 @@ mod tests {
         // Without --tag, cargo builds the default branch — so an update that
         // announced 0.7.0 would install whatever main had become, then report a
         // version the release page has never heard of.
-        assert!(args.contains(&"--tag".to_string()));
-        assert!(args.contains(&"--force".to_string()));
+        assert!(args.iter().any(|a| a == "--tag"));
+        assert!(args.iter().any(|a| a == "--force"));
     }
 
     #[test]
@@ -890,12 +894,25 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_not_utf_8_reaches_cargo_intact() {
+        // `display()` would turn the 0xff into U+FFFD, and cargo, given that, makes
+        // a new sibling directory and installs there — measured — which is the
+        // silent wrong-place install `--root` exists to prevent.
+        use std::os::unix::ffi::OsStrExt;
+        let root = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/cargo-\xff"));
+        let args = cargo_args(&CargoSource::Git, "v1.2.0", root);
+        assert_eq!(args.last().unwrap(), root.as_os_str());
+    }
+
     #[test]
     fn a_cargo_bin_is_recognised_once_both_paths_are_resolved() {
         // `run` canonicalizes the exe; the cargo bin has to be resolved too, or the
         // two stop sharing a prefix — and a cargo-managed copy gets written over
-        // as though it were a download. On Windows canonicalizing alone does it
-        // (a `\\?\` prefix); on Unix a symlinked `~/.cargo` does.
+        // as though it were a download. The first assertion tells old from new on
+        // Windows (a `\\?\` prefix) and macOS (`/var` is `/private/var`); on Linux
+        // the symlinked `~/.cargo` below does.
         let base = std::env::temp_dir().join(format!("lucida-cargo-bin-{}", std::process::id()));
         let home = base.join("real-cargo");
         std::fs::create_dir_all(home.join("bin")).unwrap();
