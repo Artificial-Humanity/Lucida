@@ -187,6 +187,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     steps: false,
     guidance: false,
     provenance: Provenance::SynthIdAndC2pa,
+    needs_reference: false,
+    foreign_model: None,
 };
 
 impl ImageProvider for Client {

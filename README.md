@@ -136,7 +136,7 @@ lucida config                           # displays active configuration sources
 | `BFL_API_KEY` | key | Black Forest Labs (hosted FLUX) |
 | `STABILITY_API_KEY` | key | Stability AI developer platform |
 | `OPENAI_API_KEY` | key | OpenAI API |
-| `RUNWAY_API_KEY` | key | Runway Gen-4 video |
+| `RUNWAY_API_KEY` | key | Runway Gen-4 images and video |
 | `KLINGAI_API_KEY` | key | Kling video (single API key) |
 | `LUCIDA_COMFYUI_URL` | URL | ComfyUI base URL (default: `http://127.0.0.1:8188`) |
 | `LUCIDA_COMFYUI_AUTH` | credentials | ComfyUI authentication (`user:password`, `Bearer …`, or `Basic …`) |

@@ -120,6 +120,7 @@ pub fn capabilities(_model: &str) -> VideoCapabilities {
         // Nobody has rendered anything here and read the bytes. See
         // `Provenance::Unverified` — BFL is why this is not a guess.
         provenance: Provenance::Unverified,
+        foreign_model: None,
     }
 }
 

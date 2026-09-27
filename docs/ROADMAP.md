@@ -748,15 +748,16 @@ This is the same rule as [coverage is per-credential](../AGENTS.md), turned
 sideways. That rule says a lane exists so someone holding *that* subscription
 gets the full width of what they pay for. The width is not only "which
 providers" — it is also "how much of each provider". Someone with a Runway
-subscription and nothing else gets **no image generation at all** from Lucida
-today, while paying for eight image models. "They could use Gemini instead"
+subscription and nothing else got **no image generation at all** from Lucida,
+while paying for eight image models (twelve by 2026-09-27). Runway's own two now
+render on `main`; the ten it fronts are item 4. "They could use Gemini instead"
 reasons from a keyring that happens to hold every key.
 
 Scope note: this is about **widening providers that already exist**, which the
 2026-08-09 pause on new providers does not cover (owner clarified the pause meant
 new *providers*, not new endpoints).
 
-### The matrix, as of 2026-08-09
+### The matrix, as of 2026-08-09, with the runway row updated 2026-09-27
 
 Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 
@@ -838,8 +839,10 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
    successor was looked for in the same check. So the answer is unchanged:
    OpenAI stays image-only here until OpenAI names a successor.
 
-4. **Runway's six fronted image models** (`gemini_*`, `gpt_image_2`,
-   `seedream5_*`). The aggregator question, already recorded as open rather than
+4. **Runway's fronted image models** — six on 2026-08-09, ten by 2026-09-27
+   (`gemini_*`, `gpt_image_2*`, `seedream5_*`, `grok_imagine_image_2`,
+   `muse_image`). Refused today even with `--provider runway` explicit, rather
+   than passed through unlabelled. The aggregator question, already recorded as open rather than
    settled. The coverage rule argues *for* them — a Runway-only subscriber
    reaches Seedream no other way — and the honest-labelling vocabulary already
    exists (`Provenance::Unverified`, `Price::Unverified`). Kept separate from

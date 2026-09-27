@@ -160,6 +160,8 @@ pub fn capabilities(model: &str) -> Capabilities {
         // manifest asserting trainedAlgorithmicMedia, and no SynthID. Third
         // provider in this category — marked, but only in metadata.
         provenance: Provenance::C2paOnly,
+        needs_reference: false,
+        foreign_model: None,
     }
 }
 

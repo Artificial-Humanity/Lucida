@@ -783,6 +783,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     steps: true,
     guidance: true,
     provenance: Provenance::Unmarked,
+    needs_reference: false,
+    foreign_model: None,
 };
 
 impl ImageProvider for Client {

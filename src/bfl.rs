@@ -107,6 +107,8 @@ pub fn capabilities(model: &str) -> Capabilities {
         // marks the pixels too, ComfyUI marks nothing — and the difference
         // matters, because a re-encode strips C2PA and cannot strip SynthID.
         provenance: Provenance::C2paOnly,
+        needs_reference: false,
+        foreign_model: None,
     }
 }
 

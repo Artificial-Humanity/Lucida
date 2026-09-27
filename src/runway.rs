@@ -140,6 +140,10 @@ pub fn capabilities(model: &str) -> VideoCapabilities {
         // render proved it `C2paOnly`, and the guess most people would have made
         // was wrong. Not claiming is the honest state until a render settles it.
         provenance: Provenance::Unverified,
+        // Empty is the default, resolved later. Anything else outside the three
+        // is a model this endpoint fronts — `veo3.1`, `kling3.0_pro` — which
+        // `--provider runway` must not reach. See the module note.
+        foreign_model: (!id.is_empty() && !MODELS.contains(&id.as_str())).then_some(MODELS),
     }
 }
 
@@ -201,7 +205,7 @@ pub fn is_runway_image_model(model: &str) -> bool {
 }
 
 pub fn image_capabilities(model: &str) -> Capabilities {
-    let _ = model; // The two models validate identically; kept for the shape.
+    let id = resolve_image_model(model);
     Capabilities {
         provider: "runway",
         tagline: "Gen-4 images on a Runway key — up to three reference images, a seed, and sixteen fixed pixel ratios.",
@@ -229,6 +233,12 @@ pub fn image_capabilities(model: &str) -> Capabilities {
         // on. Runway's *video* lane is a different product and stays
         // `Unverified` until one of its renders is read the same way.
         provenance: Provenance::C2paOnly,
+        // Measured: "expected array, received undefined" for `referenceImages`.
+        needs_reference: id == "gen4_image_turbo",
+        // Empty is the default, resolved later; anything else outside the two
+        // is one of the ten models this endpoint fronts.
+        foreign_model: (!id.is_empty() && !IMAGE_MODELS.contains(&id.as_str()))
+            .then_some(IMAGE_MODELS),
     }
 }
 
@@ -382,6 +392,13 @@ fn nearest_ratio(requested: Option<Aspect>, accepted: &[&str]) -> String {
         return fallback;
     };
 
+    // Exact first: several offered pairs can share a shape (`1920:1080` and
+    // `1280:720`), and choosing by shape alone would send the first of them
+    // for either.
+    if let Some(pair) = accepted.iter().find(|pair| Aspect::parse(pair).ok() == Some(aspect)) {
+        return (*pair).to_string();
+    }
+
     let wanted = f64::from(aspect.w) / f64::from(aspect.h);
     accepted
         .iter()
@@ -434,18 +451,9 @@ impl ImageProvider for Client {
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
         let model = resolve_image_model(&req.model);
 
-        // Measured: the endpoint answers "expected array, received undefined"
-        // for `referenceImages` on turbo. Said here, as a refusal, so the
-        // alternative can be named — and before anything is sent.
-        if model == "gen4_image_turbo" && req.references.is_empty() {
-            return Err(anyhow::Error::new(crate::out::Refused(
-                "`gen4_image_turbo` cannot start from a prompt alone — Runway \
-                 requires at least one reference image for it.\n\n\
-                 Use `lucida edit <image> <prompt> --model gen4_image_turbo`, or \
-                 `--model gen4_image`, which renders from text."
-                    .to_string(),
-            )));
-        }
+        // The front ends check this before a client exists; checked again here
+        // so a direct caller cannot send what the check refuses.
+        image_capabilities(&model).check(req)?;
 
         let body = self.image_body(req, &model)?;
         let verb = if req.references.is_empty() { "Rendering" } else { "Editing" };
@@ -500,8 +508,12 @@ impl Client {
         if !req.references.is_empty() {
             let mut images = Vec::new();
             for reference in &req.references {
-                // A URL passes through — the endpoint fetches `https://` itself.
-                let uri = if reference.starts_with("https://") {
+                // What the endpoint takes as a URI passes through: it fetches
+                // `https://`, resolves `runway://` uploads and decodes data URIs.
+                let uri = if ["https://", "runway://", "data:image/"]
+                    .iter()
+                    .any(|scheme| reference.starts_with(scheme))
+                {
                     reference.clone()
                 } else {
                     let bytes = std::fs::read(reference)
@@ -688,6 +700,93 @@ mod tests {
         assert!(gen45.check(&video("16:9")).is_ok());
         assert!(gen45.check(&video("9:16")).is_ok());
         assert!(gen45.check(&video("1:1")).is_err(), "gen4.5 offers no square");
+    }
+
+    /// Every advertised pair is sent as itself. Runway lists several pairs per
+    /// shape — `1920:1080` and `1280:720` — and picking by shape alone sent the
+    /// first, so six of the sixteen could never be asked for and a 720-class
+    /// request rendered, and billed, at 1080 (found in review, 2026-09-27).
+    #[test]
+    fn every_offered_pair_is_sent_as_itself() {
+        for list in [IMAGE_RATIOS, TURBO_RATIOS, GEN45_RATIOS] {
+            for pair in list {
+                assert_eq!(nearest_ratio(Aspect::parse(pair).ok(), list), *pair);
+            }
+        }
+    }
+
+    /// Refused before a client exists, so with no key the answer is the real
+    /// objection (exit 2), and `--dry-run` reports what a real run would.
+    #[test]
+    fn turbo_without_a_reference_is_refused_by_the_capability_check() {
+        let caps = image_capabilities("gen4_image_turbo");
+        let bare = ImageRequest { model: "gen4_image_turbo".into(), ..Default::default() };
+        let error = caps.check(&bare).unwrap_err();
+        assert!(error.downcast_ref::<crate::out::Refused>().is_some());
+        assert!(format!("{error:#}").contains("gen4_image"), "{error:#}");
+
+        let edit = ImageRequest { references: vec!["a.png".into()], ..bare };
+        assert!(caps.check(&edit).is_ok());
+    }
+
+    /// Only Runway's own models, even with `--provider runway` explicit: the
+    /// endpoints list what Runway fronts for other companies, and sending one
+    /// would bill it here and record it as Runway's own output.
+    #[test]
+    fn a_fronted_model_is_refused_even_when_runway_is_named() {
+        let image = ImageRequest { model: "gpt_image_2".into(), ..Default::default() };
+        let error = image_capabilities("gpt_image_2").check(&image).unwrap_err();
+        assert!(error.downcast_ref::<crate::out::Refused>().is_some());
+        assert!(format!("{error:#}").contains("gen4_image"), "{error:#}");
+        for own in ["gen4_image", "gen4-image-turbo", ""] {
+            let req = ImageRequest { model: own.into(), references: vec!["a.png".into()], ..Default::default() };
+            assert!(image_capabilities(own).check(&req).is_ok(), "{own}");
+        }
+
+        let video = VideoRequest { model: "veo3.1".into(), ..Default::default() };
+        let error = capabilities("veo3.1").check(&video).unwrap_err();
+        assert!(format!("{error:#}").contains("gen4.5"), "{error:#}");
+        for own in ["gen4.5", "gen4-turbo", ""] {
+            let req = VideoRequest { model: own.into(), image: Some("a.png".into()), ..Default::default() };
+            assert!(capabilities(own).check(&req).is_ok(), "{own}");
+        }
+    }
+
+    /// A reference the endpoint can fetch or decode itself is passed through
+    /// rather than read as a local path.
+    #[test]
+    fn a_reference_uri_the_endpoint_accepts_is_passed_through() {
+        let server = serve(vec![
+            Reply::json(r#"{"id":"img-3"}"#),
+            Reply::json(r#"{"status":"SUCCEEDED","output":["{{server}}/signed/out.png"]}"#),
+            Reply::bytes("image/png", &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+        ]);
+        let refs = [
+            "https://example.com/ref.png",
+            "runway://upload/0000-1111",
+            "data:image/png;base64,iVBORw0KGgo=",
+        ];
+        let request = ImageRequest {
+            prompt: "x".into(),
+            model: "gen4_image".into(),
+            references: refs.iter().map(|r| r.to_string()).collect(),
+            ..Default::default()
+        };
+        wired(&server).generate(&request).unwrap();
+        let body = server.finish()[0].json();
+        for (i, r) in refs.iter().enumerate() {
+            assert_eq!(body["referenceImages"][i]["uri"], *r);
+        }
+    }
+
+    /// `--size` has no field here, but the pixel count *can* be chosen — by
+    /// spelling the pair. The generic remedy sent people to other providers.
+    #[test]
+    fn a_size_request_is_told_to_spell_the_pixel_pair() {
+        let req = ImageRequest { size: Some(crate::provider::Size(1920)), ..Default::default() };
+        let error = format!("{:#}", image_capabilities(DEFAULT_IMAGE_MODEL).check(&req).unwrap_err());
+        assert!(error.contains("--aspect 1024:1024"), "{error}");
+        assert!(error.contains("1920:1080"), "{error}");
     }
 
     /// Runway's own two image models route here, by id or alias. Its video ids

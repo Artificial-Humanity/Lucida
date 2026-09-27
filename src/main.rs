@@ -6,10 +6,10 @@
 //! One binary, two front ends: a plain CLI for shell and script use, and an MCP
 //! server (`lucida mcp`) so agents can call it as a first-class tool.
 //!
-//! Images come from one of five providers — Google's Gemini models, a local
-//! ComfyUI, hosted FLUX from Black Forest Labs, Stability AI, or OpenAI —
-//! chosen from the model id unless `--provider` says otherwise. Video is
-//! Google-only for now.
+//! Images come from one of six providers — Google's Gemini models, a local
+//! ComfyUI, hosted FLUX from Black Forest Labs, Stability AI, OpenAI, or
+//! Runway — chosen from the model id unless `--provider` says otherwise. Video
+//! comes from Veo, Runway or Kling.
 
 mod bfl;
 mod cancel;
@@ -399,19 +399,24 @@ fn run(cli: Cli) -> Result<i32> {
         // missing key for one lane says nothing about the other's table.
         Command::Models { provider } => match Backend::parse(&provider) {
             Ok(backend) => {
+                let video = provider::VideoBackend::parse(&provider).ok();
+                // Two capability tables read alike, so each half says which it is.
+                if video.is_some() {
+                    println!("== Images ==\n");
+                }
                 let images = list_models(backend);
-                match provider::VideoBackend::parse(&provider) {
-                    Ok(video) => {
-                        println!();
+                match video {
+                    Some(video) => {
+                        println!("\n== Video ==\n");
                         let videos = list_video_models(video);
                         images.and(videos).map(|()| out::OK)
                     }
-                    Err(_) => images.map(|()| out::OK),
+                    None => images.map(|()| out::OK),
                 }
             }
             Err(image_error) => match provider::VideoBackend::parse(&provider) {
                 Ok(backend) => list_video_models(backend).map(|()| out::OK),
-                // The image error, not the video one: five of the six providers
+                // The image error, not the video one: six of the seven providers
                 // are image providers, so that is the more likely mistake and
                 // the more useful list to be shown.
                 Err(_) => Err(image_error),

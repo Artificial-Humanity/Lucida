@@ -459,9 +459,13 @@ fn image_schema() -> Value {
                         "W:H, e.g. 16:9. google accepts only: {}. stability accepts a \
                          DIFFERENT nine: {}. comfyui and bfl accept any ratio; on \
                          openai, gpt-image-2 takes any ratio and its siblings only \
-                         1:1, 2:3 and 3:2.",
+                         1:1, 2:3 and 3:2. runway names its shapes as pixel pairs, \
+                         which are also the output size: {}.",
                         genai::ASPECT_RATIOS.join(", "),
-                        crate::stability::ASPECT_RATIOS.join(", ")
+                        crate::stability::ASPECT_RATIOS.join(", "),
+                        describe_aspect(
+                            capabilities_for(Backend::Runway, crate::runway::DEFAULT_IMAGE_MODEL).aspect
+                        )
                     )
                 },
                 "size": {

@@ -156,9 +156,30 @@ probe bfl       "flux-2-pro-canary-does-not-exist"
 probe stability "core-canary-does-not-exist"
 probe openai    "gpt-image-canary-does-not-exist"
 
-# Runway is a *video* provider, so the image probe above does not reach it. Its
-# free endpoint is the balance, which `lucida models` already calls — and that
-# alone exercises the base URL, the Bearer header and the mandatory
+# Runway renders images too, but `probe` cannot reach it: Lucida refuses a model
+# that is not one of Runway's own before anything is sent, because the endpoint
+# fronts other companies' models. So this probe names a real model and a seed
+# one past the endpoint's measured ceiling (4294967295), which Lucida passes on
+# and the endpoint rejects for free. If it ever renders, the ceiling moved and
+# money was spent — reported as the failure it is.
+if have_key runway; then
+  out=$("$BIN" generate "canary probe, never rendered" \
+          --provider runway --model gen4_image --seed 4294967296 \
+          --out /dev/null 2>&1)
+  code=$?
+  case "$code:$out" in
+    0:*) fail "runway — A PROBE RENDERED. This spent money. Investigate before running again." ;;
+    2:*) skip "runway — refused locally, probe never left the machine" ;;
+    *"4294967295"*) pass "runway — rejected the out-of-range seed, as expected" ;;
+    *"key was rejected"*|*"401"*|*"403"*) fail "runway — the credential is no longer accepted" ;;
+    *) fail "runway — unrecognised rejection: $(printf '%s' "$out" | head -2 | tr '\n' ' ')" ;;
+  esac
+else
+  skip "runway — no credential in this environment"
+fi
+
+# Runway's and Kling's balances are free, and `lucida models` reads them. For
+# Runway that exercises the base URL, the Bearer header and the mandatory
 # X-Runway-Version header, which is the one most likely to be retired under us.
 if have_key runway; then
   out=$("$BIN" models --provider runway 2>&1)
@@ -193,6 +214,10 @@ for provider in google openai; do
   fi
 
   listed=$("$BIN" models --provider "$provider" 2>&1)
+  # Only the image half: a provider of both media lists its video models after,
+  # and google's static Veo aliases carry `(default)` of their own — which would
+  # pass this check whether or not the image default is still offered.
+  listed=${listed%%Video models available*}
   case "$listed" in
     *"(default"*|*"default)"*)
       pass "$provider — its default is present in the live list"

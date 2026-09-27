@@ -79,6 +79,7 @@ pub const CAPABILITIES: crate::provider::VideoCapabilities = crate::provider::Vi
     seed: false,
     modes: &[],
     provenance: crate::provider::Provenance::SynthIdAndC2pa,
+    foreign_model: None,
 };
 
 /// One poll of a render in flight.

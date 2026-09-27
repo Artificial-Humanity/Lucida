@@ -285,6 +285,18 @@ fn capabilities_print_without_a_credential() {
 }
 
 #[test]
+fn a_model_that_needs_a_reference_is_refused_before_the_missing_key() {
+    // `gen4_image_turbo` cannot render from text. That objection is real with or
+    // without a key, so it must win over "no Runway API key found" — and exit 2,
+    // since no retry can succeed.
+    let sandbox = Sandbox::new("turbo-noref");
+    run(lucida(&sandbox).args(["generate", "x", "--model", "gen4_image_turbo"]))
+        .says("reference image")
+        .never_says("no Runway API key")
+        .exits(2);
+}
+
+#[test]
 fn a_provider_of_both_media_lists_both() {
     // `runway` was a video provider only, and `lucida models --provider runway`
     // listed its video models. Now that it renders images too, the image lane

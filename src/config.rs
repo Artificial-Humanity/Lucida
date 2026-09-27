@@ -49,7 +49,7 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     // one vendor's spelling. No retirement entry is owed — Runway support has
     // never appeared in a release, so no configuration anywhere holds the old
     // name except the machine this was written on.
-    ("RUNWAY_API_KEY", "Runway API key (Gen-4 video)"),
+    ("RUNWAY_API_KEY", "Runway API key (Gen-4 images and video)"),
     ("KLINGAI_API_KEY", "Kling API key (video) — the single-key scheme, not AK/SK"),
     ("LUCIDA_COMFYUI_URL", "Where ComfyUI is listening"),
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),

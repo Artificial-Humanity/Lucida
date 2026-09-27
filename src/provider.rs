@@ -460,6 +460,9 @@ pub struct VideoCapabilities {
     /// concept does not exist, which is everywhere but Kling.
     pub modes: &'static [&'static str],
     pub provenance: Provenance,
+    /// As `Capabilities::foreign_model`: the model is not one of this
+    /// provider's own, which are listed.
+    pub foreign_model: Option<&'static [&'static str]>,
 }
 
 impl VideoCapabilities {
@@ -475,6 +478,15 @@ impl VideoCapabilities {
 
     fn refuse(&self, req: &crate::video::VideoRequest) -> Result<()> {
         let me = self.provider;
+
+        if let Some(own) = self.foreign_model {
+            bail!(
+                "`{me}` renders only its own models here: {}. `{}` is one it fronts \
+                 for another company, which Lucida does not route through it.",
+                join_and(own),
+                req.model
+            );
+        }
 
         if req.image.is_some() && !self.image_to_video {
             bail!("`{me}` cannot animate a still image; it renders from a prompt alone.");
@@ -530,10 +542,18 @@ impl VideoCapabilities {
                 AspectSupport::Free { .. } => true,
             };
             if !offered {
-                let (AspectSupport::Named(list) | AspectSupport::Pixels(list)) = self.aspect else {
-                    unreachable!("a free aspect accepts everything")
-                };
-                bail!("`{me}` does not offer {aspect}. It accepts: {}.", list.join(", "));
+                match self.aspect {
+                    AspectSupport::Pixels(pairs) => bail!(
+                        "`{me}` does not offer {aspect}. It offers these shapes, as pixel \
+                         pairs: {}. A ratio such as `16:9` is accepted wherever one of \
+                         them has that shape.",
+                        pairs.join(", ")
+                    ),
+                    AspectSupport::Named(list) => {
+                        bail!("`{me}` does not offer {aspect}. It accepts: {}.", list.join(", "))
+                    }
+                    AspectSupport::Free { .. } => unreachable!("a free aspect accepts everything"),
+                }
             }
         }
 
@@ -791,6 +811,14 @@ pub struct Capabilities {
     pub steps: bool,
     pub guidance: bool,
     pub provenance: Provenance,
+    /// This model cannot start from a prompt alone. Runway's
+    /// `gen4_image_turbo` is the case: its endpoint requires reference images.
+    pub needs_reference: bool,
+    /// `Some(own)` when the model asked for is not one of this provider's own,
+    /// listing the ones that are. For a provider whose endpoint also fronts
+    /// other companies' models — Runway — so naming one with `--provider`
+    /// explicit is refused rather than billed and recorded as this provider's.
+    pub foreign_model: Option<&'static [&'static str]>,
 }
 
 impl Capabilities {
@@ -812,6 +840,40 @@ impl Capabilities {
 
     fn refuse(&self, req: &ImageRequest) -> Result<()> {
         let me = self.provider;
+
+        if let Some(own) = self.foreign_model {
+            bail!(
+                "`{me}` renders only its own models here: {}. `{}` is one it fronts \
+                 for another company, which Lucida does not route through it — \
+                 that would bill it here and record it as {me}'s own output.",
+                join_and(own),
+                req.model
+            );
+        }
+
+        if self.needs_reference && req.references.is_empty() {
+            let remedy = match me {
+                "runway" => "Use `lucida edit <image> <prompt>` with it, or `--model gen4_image`, which renders from text.",
+                _ => "Use `lucida edit <image> <prompt>` with it, or a model that renders from text.",
+            };
+            bail!(
+                "this `{me}` model cannot start from a prompt alone — it needs at \
+                 least one reference image.\n\n{remedy}"
+            );
+        }
+
+        if req.size.is_some() && !self.size && matches!(self.aspect, AspectSupport::Pixels(_)) {
+            // Here the shape *is* the size, so the pixel count can be chosen —
+            // by spelling the pair rather than with `--size`.
+            let AspectSupport::Pixels(pairs) = self.aspect else { unreachable!() };
+            bail!(
+                "`{me}` has no separate size, so `--size` cannot be honoured.\n\n\
+                 Its aspect ratios are pixel pairs, and the pair is the size: spell \
+                 the one you want, e.g. `--aspect {}`. It offers: {}.",
+                pairs.first().copied().unwrap_or("1024:1024"),
+                pairs.join(", ")
+            );
+        }
 
         if req.size.is_some() && !self.size {
             bail!(

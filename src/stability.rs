@@ -116,6 +116,8 @@ pub fn capabilities(_model: &str) -> Capabilities {
         // and asserting trainedAlgorithmicMedia, with no SynthID. Same category
         // as BFL — marked, but only in metadata a re-encode discards.
         provenance: Provenance::C2paOnly,
+        needs_reference: false,
+        foreign_model: None,
     }
 }
 
