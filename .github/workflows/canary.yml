@@ -1,13 +1,13 @@
 name: canary
 
-# Deliberately NOT scheduled here.
+# Deliberately NOT scheduled.
 #
-# The canary is run by hand on ai-lab-0 — owner's call, 2026-09-27 ("manual is
-# fine"), replacing a 2026-08-09 plan for a weekly cron there that was never
-# installed. The reason it runs there rather than here is credential geography:
-# the provider keys already live on that machine, and putting a second copy into
-# GitHub Actions secrets would double the number of places they exist, on
-# infrastructure we do not control.
+# The canary is run by hand — owner's call, 2026-09-27 ("manual is fine", no
+# scheduled job), replacing a 2026-08-09 plan for a weekly cron on ai-lab-0.
+# ai-lab-0 is the natural place to run it, for credential geography: the provider
+# keys already live on that machine, and putting a second copy into GitHub Actions
+# secrets would double the number of places they exist, on infrastructure we do
+# not control.
 #
 # This workflow exists for the other case: running the probes by hand against a
 # specific commit, from a machine that is not ai-lab-0. It reads whatever

@@ -11,11 +11,13 @@
 #
 # Usage: canary.sh <path-to-binary>
 #
-# WHERE THIS RUNS: by hand, on ai-lab-0 — owner's call, 2026-09-27 ("manual is
-# fine"), replacing a 2026-08-09 plan for a weekly cron that was never installed.
-# When is not ruled; a suggested habit is before a release and after changing a
-# provider lane. It runs there
-# because of credential geography rather than convenience — the provider keys
+# WHERE THIS RUNS: by hand — owner's call, 2026-09-27 ("manual is fine", no
+# scheduled job), replacing a 2026-08-09 plan for a weekly cron on ai-lab-0 that a
+# search found no trace of. When is not ruled; the resident's suggested habit, not
+# the owner's, is before a release and after changing a provider lane.
+#
+# ai-lab-0 is the natural place to run it, because of credential geography
+# rather than convenience — the provider keys
 # already live on that machine, and putting a second copy into GitHub Actions
 # secrets would double the number of places they exist for no gain. The workflow
 # in .github/workflows/canary.yml is therefore `workflow_dispatch` only: it can

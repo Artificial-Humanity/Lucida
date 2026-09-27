@@ -105,13 +105,14 @@ published — so it is named here rather than linked. Read it before starting wo
   endpoints, plus render requests naming a model that cannot exist — or, for Runway, which
   refuses unknown models locally, a real model with an out-of-range seed *and* an over-long
   prompt: free by measurement rather than by construction, since each rests on a limit
-  Runway validates today). **It is run by hand, on ai-lab-0 where the provider keys live** —
-  owner, 2026-09-27: "manual is fine". ⚠ Until that day this paragraph said a weekly cron ran
-  it there (the owner's 2026-08-09 intent); none was ever installed, so it never had. When to
-  run it is not ruled; a suggested habit is before a release and after changing a provider
-  lane. The GitHub workflow is
-  `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
-  successful render inside the canary is reported as a *failure* — it would mean money was
+  Runway validates today). **It is run by hand** — owner, 2026-09-27: "manual is fine", no
+  scheduled job. ai-lab-0 is the natural place, because the provider keys live there (the
+  credential-geography reasoning of 2026-08-09). ⚠ Until 2026-09-27 this paragraph said a
+  weekly cron ran it there; a search found none and the owner knew of none. When to run it is
+  not ruled; the resident's suggested habit, not the owner's, is before a release and after
+  changing a provider lane. The GitHub workflow is `workflow_dispatch` only, deliberately, so
+  the credentials gain no second home. A successful render inside the canary is reported as a
+  *failure* — it would mean money was
   spent by a script whose contract is that it spends none.
 
 ---
