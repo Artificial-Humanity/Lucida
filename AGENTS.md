@@ -47,7 +47,7 @@ published — so it is named here rather than linked. Read it before starting wo
 * **Width is per-provider too** (owner, 2026-08-09). Lucida covers image generation *and*
   video generation, and **each provider should be as completely represented as possible across
   both**. A provider present for one medium and absent for the other is a coverage gap, not a
-  finished integration: as of v1.1.0, runway and kling are video-only here while both offer
+  finished integration: as of v1.1.1, runway and kling are video-only here while both offer
   image generation, and openai is image-only. The live matrix and the ordered work list are in
   `docs/ROADMAP.md` § 5. This widens providers that already exist, which is **not** what the
   2026-08-09 pause on new providers covers — the owner clarified the pause meant new

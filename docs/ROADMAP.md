@@ -1,6 +1,6 @@
 # Roadmap
 
-Lucida speaks to seven providers as of v1.1.0 — **images** from Google Gemini, a
+Lucida speaks to seven providers as of v1.1.1 — **images** from Google Gemini, a
 local ComfyUI, hosted FLUX from Black Forest Labs, Stability AI and OpenAI;
 **video** from Veo, Runway and Kling. This records where it goes next and, more
 usefully, what has to be true first.
