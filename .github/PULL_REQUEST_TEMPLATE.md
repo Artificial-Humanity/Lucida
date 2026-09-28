@@ -1,22 +1,12 @@
-## What does this PR do?
+## What this changes
 
-<!--
-Please include a summary of the change and which issue is fixed.
-Please also include relevant motivation and context.
-List any dependencies that are required for this change.
-List all the breaking changes introduced by this pull request.
--->
+<!-- The change and why. Name anything a user or an agent session will notice:
+     CLI flags, exit codes, MCP tool schemas or descriptions. -->
 
-Fixes #\<issue_number>
+## Verification
 
-## Before submitting
-
-- [ ] Did you make sure **title is self-explanatory** and **the description concisely explains the PR**?
-- [ ] Did you make sure your **PR does only one thing**, instead of bundling different changes together?
-- [ ] Did you list all the **breaking changes** introduced by this pull request?
-- [ ] Did you **test your PR locally** with `pytest` command?
-- [ ] Did you **run pre-commit hooks** with `pre-commit run -a` command?
-
-## Did you have fun?
-
-Make sure you had fun coding 🙃
+- [ ] `cargo test`
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `scripts/smoke.sh <binary>`
+- [ ] `scripts/canary.sh <binary>`, if a provider lane changed
+- [ ] Review dispatched and its findings addressed (see `WORKFLOW.md`)

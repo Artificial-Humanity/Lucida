@@ -101,18 +101,14 @@ published — so it is named here rather than linked. Read it before starting wo
   and tool-description edits as public API.
 * A recording proves Lucida still speaks **yesterday's** protocol, not that the provider
   still does: live verification is owed once per new provider or changed endpoint
-  (`docs/ROADMAP.md` §3). Since 2026-08-09 that limit also has a standing answer —
-  `scripts/canary.sh` probes every provider live and costs nothing by construction (free
-  endpoints, plus render requests naming a model that cannot exist — or, for Runway, which
-  refuses unknown models locally, a real model with an out-of-range seed *and* an over-long
-  prompt: free by measurement rather than by construction, since each rests on a limit
-  Runway validates today). **It is run by hand** — owner, 2026-09-27: "manual is fine", no
-  scheduled job. ai-lab-0 is the natural place, because the provider keys live there (the
-  credential-geography reasoning of 2026-08-09). ⚠ Until 2026-09-27 this paragraph said a
-  weekly cron ran it there; a search found none and the owner knew of none. **Run it before
-  every release and after changing a provider lane** — proposed by the resident, approved by
-  the owner the same day ("That suggestion is sound. I'm okay with it"). The GitHub workflow
-  is `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
+  (`docs/ROADMAP.md` §3). That limit has a standing answer: `scripts/canary.sh` probes every
+  provider live and costs nothing by construction (free endpoints, plus render requests naming
+  a model that cannot exist — or, for Runway, which refuses unknown models locally, a real
+  model with an out-of-range seed *and* an over-long prompt: free by measurement rather than
+  by construction, since each rests on a limit Runway validates today). **It is run by hand**,
+  with no scheduled job. ai-lab-0 is the natural place, because the provider keys live there.
+  **Run it before every release and after changing a provider lane.** The GitHub workflow is
+  `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
   successful render inside the canary is reported as a *failure* — it would mean money was
   spent by a script whose contract is that it spends none.
 
@@ -134,10 +130,9 @@ case-insensitive macOS/Windows.
 ## System Operational Mandates
 
 ⚠ **How work gets done — [WORKFLOW.md](WORKFLOW.md).** Branching, review, and landing on
-`main` are there; read it before your first commit. The commit-hygiene section that stood at
-§1 is gone (2026-09-08) and stays gone; a new, simpler policy was authored in `WORKFLOW.md` on
-2026-09-16 — it is not a restoration of what was there before. The number below is left at
-**2** deliberately:
+`main` are there; read it before your first commit. `main` takes changes only through an
+approved pull request, and commits are authored by the machine account, never the owner. The
+number below is **2** deliberately; there is no §1:
 `docs/ROADMAP.md` and three internal documents — the state snapshot, the code review and the
 product review — all cite "AGENTS.md §2", so the number is an identifier those citations
 depend on rather than a position in a list. Renumbering it would silently falsify every one of
