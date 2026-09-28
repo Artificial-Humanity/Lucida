@@ -3,10 +3,10 @@ name: canary
 # Deliberately NOT scheduled.
 #
 # The canary is run by hand, before every release and after changing a provider
-# lane. ai-lab-0 is the natural place to run it, for credential geography: the provider
-# keys already live on that machine, and putting a second copy into GitHub Actions
-# secrets would double the number of places they exist, on infrastructure we do
-# not control.
+# lane. ai-lab-0 is the natural place to run it, for credential geography: the
+# provider keys already live on that machine, and putting a second copy into
+# GitHub Actions secrets would double the number of places they exist, on
+# infrastructure we do not control.
 #
 # This workflow exists for the other case: running the probes by hand against a
 # specific commit, from a machine that is not ai-lab-0. It reads whatever

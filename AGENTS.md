@@ -132,7 +132,7 @@ case-insensitive macOS/Windows.
 ⚠ **How work gets done — [WORKFLOW.md](WORKFLOW.md).** Branching, review, and landing on
 `main` are there; read it before your first commit. `main` takes changes only through an
 approved pull request, and commits are authored by the machine account, never the owner. The
-number below is **2** deliberately:
+number below is **2** deliberately; there is no §1:
 `docs/ROADMAP.md` and three internal documents — the state snapshot, the code review and the
 product review — all cite "AGENTS.md §2", so the number is an identifier those citations
 depend on rather than a position in a list. Renumbering it would silently falsify every one of
