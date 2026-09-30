@@ -768,7 +768,7 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 | `openai` | shipped | **missing** — see Sora below |
 | `stability` | shipped | **missing** — `/v2beta/image-to-video` returns 404 today; retired or moved, unverified |
 | `runway` | shipped in v1.2.0 — its own two models | shipped |
-| `kling` | **missing** — endpoint confirmed, models not enumerable free | shipped |
+| `kling` | **on hold** — endpoint confirmed, models not enumerable free; no Kling credit | shipped |
 
 ### The items, in the order worth doing them
 
@@ -788,7 +788,15 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
    auth, base URL and mandatory `X-Runway-Version` header are already in
    `runway.rs`. Smallest of these by a wide margin.
 
-2. **Kling images.** `POST /v1/images/generations` exists and validates —
+2. **Kling images — ON HOLD (owner, 2026-09-30).** Our Kling account has no
+   resource pack, and Kling offers no online refill: buying one means contacting
+   them, and the owner doubts it is worth it. Without credit this lane can be
+   neither built nor checked, so it waits until an account with credit exists.
+   The Kling video lane stays shipped, since it serves anyone holding their own
+   Kling credit, but it cannot be verified live meanwhile: `scripts/canary.sh`
+   reports the empty account as a skip, not drift.
+
+   The original entry: `POST /v1/images/generations` exists and validates —
    an invalid `model_name` came back `code 1201`. It does **not** enumerate the
    valid ones, and the obvious next probe is the trap: on Kling a *valid* model
    renders, which is how 6 units went on 2026-08-09. So the model list has to
