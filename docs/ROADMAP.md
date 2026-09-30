@@ -756,7 +756,7 @@ Scope note: this is about **widening providers that already exist**, which the
 2026-08-09 pause on new providers does not cover (owner clarified the pause meant
 new *providers*, not new endpoints).
 
-### The matrix, as of 2026-08-09, with the runway row updated 2026-09-27
+### The matrix, as of 2026-08-09, with the runway row updated 2026-09-27 and the kling row 2026-09-30
 
 Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 

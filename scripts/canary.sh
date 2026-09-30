@@ -94,7 +94,7 @@ for provider in google comfyui bfl stability openai runway kling; do
   case "$out" in
     *"no resource pack on this account"*)
       # See the kling balance check below.
-      skip "kling — key accepted, but the account has no resource pack to read"
+      skip "$provider — key accepted, but the account has no resource pack to read"
       ;;
     *"NOT reachable"*|*"cannot be used right now"*)
       # ComfyUI being off is an ordinary state of the world, not drift.
