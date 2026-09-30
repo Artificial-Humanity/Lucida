@@ -92,6 +92,10 @@ for provider in google comfyui bfl stability openai runway kling; do
 
   out=$("$BIN" models --provider "$provider" 2>&1)
   case "$out" in
+    *"no resource pack on this account"*)
+      # See the kling balance check below.
+      skip "$provider — key accepted, but the account has no resource pack to read"
+      ;;
     *"NOT reachable"*|*"cannot be used right now"*)
       # ComfyUI being off is an ordinary state of the world, not drift.
       if [ "$provider" = comfyui ]; then
@@ -198,6 +202,13 @@ if have_key kling; then
   out=$("$BIN" models --provider kling 2>&1)
   case "$out" in
     *"Remaining units"*) pass "kling — reachable, balance readable" ;;
+    # Lucida says this only after Kling accepted the signed key and answered
+    # with a balance document that holds no resource pack. An empty account is
+    # a state of the account, not drift, so it is skipped rather than failed.
+    # It is not a pass either: a renamed balance field reads the same way, and
+    # with no pack there is nothing to tell the two apart.
+    *"no resource pack on this account"*)
+      skip "kling — key accepted, but the account has no resource pack to read" ;;
     *) fail "kling — $(printf '%s' "$out" | head -2 | tr '\n' ' ')" ;;
   esac
 else
