@@ -684,7 +684,7 @@ fn providers_schema() -> Value {
 
 /// The video providers for which `predicate` holds, as prose.
 ///
-/// The video twin of [`providers_where`], over `VideoBackend::ALL`. It read each
+/// The video twin of [`providers_where`], over `VideoBackend::ALL`. It reads each
 /// provider's *default* model's capabilities, which is the right question for a
 /// per-provider claim; the one model-level exception (`veo-lite` and negative
 /// prompts) is said beside the list that cannot carry it.
