@@ -100,6 +100,18 @@ pub fn capabilities(_model: &str) -> Capabilities {
         seed: true,
         // Verified by rendering, not by the absence of a validation error —
         // unknown fields here are silently dropped, so absence proves nothing.
+        //
+        // Declared for every model, `_model` ignored, and that is what the
+        // documentation says rather than an oversight. Read 2026-10-04 from the
+        // API reference's own spec, `https://api.stability.ai/v2alpha/openapi`
+        // (the URL the docs site at platform.stability.ai loads it from):
+        // `/v2beta/stable-image/generate/sd3` lists `negative_prompt` under
+        // "Both modes support the following optional parameters", beside
+        // `model` naming all four variants, with no per-variant exception, and
+        // the only per-variant remark in the request is that `cfg_scale`
+        // defaults to 1 on Turbo and Flash. Whether a turbo model makes the field
+        // pointless at its default guidance is a claim to test by render, not a
+        // documented refusal to encode.
         negative_prompt: true,
         // Deliberately false for now. The generate endpoints take no reference
         // image; editing lives on separate endpoints (edit/inpaint, edit/erase,
