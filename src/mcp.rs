@@ -1057,8 +1057,11 @@ fn generate_image(args: &Value) -> Result<String> {
     let caps = capabilities_for(backend, &request.model);
     caps.check(&request)?;
 
-    let price = crate::spend::price_for(backend, &request.model);
-    crate::spend::check(price, "render")?;
+    // Held, not just checked: workers run calls concurrently, and the cost
+    // stays reserved until the ledger entry below exists. Every early return —
+    // a provider error, a cancellation — drops it.
+    let price = crate::spend::price_for(backend, &request.model, request.size);
+    let reservation = crate::spend::check(price, "render")?;
 
     let provider = open(backend)?;
     let image = provider.generate(&request)?;
@@ -1069,15 +1072,18 @@ fn generate_image(args: &Value) -> Result<String> {
     let requested = std::path::Path::new(output_path);
     let destination = crate::correct_extension(requested, &image.mime_type);
     let renamed = destination != requested;
-    let written = crate::write_image(&destination, &image.bytes)?;
-    crate::ledger::image(
-        caps.provider,
-        &request.model,
-        &request.prompt,
-        &written.to_string_lossy(),
-        image.seed,
-        price.against_budget(),
-    );
+    let written = crate::write_billed(&destination, &image.bytes, |path, unsaved| {
+        crate::ledger::image(
+            caps.provider,
+            &request.model,
+            &request.prompt,
+            path,
+            image.seed,
+            price.against_budget(),
+            unsaved,
+        );
+    })?;
+    drop(reservation);
 
     // The dimensions are stated because they are not always the ones requested:
     // an edit on comfyui normalizes to roughly a megapixel, so the result can
@@ -1250,7 +1256,7 @@ fn start_video(args: &Value) -> Result<String> {
     // Video bills per second, so the check happens before the round trip that
     // starts the meter.
     let price = crate::spend::video_price(backend, &resolved, request.duration);
-    crate::spend::check(price, "video render")?;
+    let reservation = crate::spend::check(price, "video render")?;
 
     let client: Box<dyn crate::provider::VideoProvider> = match backend {
         crate::provider::VideoBackend::Google => Box::new(genai::Client::from_env()?),
@@ -1270,6 +1276,8 @@ fn start_video(args: &Value) -> Result<String> {
         &operation,
         price.against_budget(),
     );
+    // The started entry carries the spend, so the hold can go.
+    drop(reservation);
     Ok(format!(
         "Render started — {}.\n\noperation: {operation}\n\n\
          It typically takes 1-3 minutes. Wait about 30 seconds, then call \

@@ -68,6 +68,10 @@ pub const DONE: &str = "done";
 pub const FAILED: &str = "failed";
 /// A video render handed back an operation id and nothing has collected it yet.
 pub const STARTED: &str = "started";
+/// An image the provider returned — and so billed — whose file could not be
+/// written. Recorded rather than dropped, because the spend is real whether or
+/// not the bytes reached the disk, and the budget is summed from this file.
+pub const UNSAVED: &str = "unsaved";
 
 /// The ledger file, or `None` if it is switched off or has nowhere to live.
 ///
@@ -102,7 +106,12 @@ pub fn record(entry: Value) {
     }
 }
 
-/// A finished image.
+/// A finished image, or one that was billed and could not be saved.
+///
+/// `unsaved` is the write's error when the file never landed. The entry is
+/// written either way: once the provider has returned the image it has been
+/// billed, and an entry that waited for the write left a full disk or an
+/// unwritable path with a paid render the budget never counted.
 pub fn image(
     provider: &str,
     model: &str,
@@ -110,21 +119,39 @@ pub fn image(
     path: &str,
     seed: Option<u64>,
     estimated_usd: f64,
+    unsaved: Option<&anyhow::Error>,
 ) {
-    record(json!({
+    record(image_entry(provider, model, prompt, path, seed, estimated_usd, unsaved));
+}
+
+fn image_entry(
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    path: &str,
+    seed: Option<u64>,
+    estimated_usd: f64,
+    unsaved: Option<&anyhow::Error>,
+) -> Value {
+    let mut entry = json!({
         "at": clock::now(),
         "kind": IMAGE,
-        "status": DONE,
+        "status": if unsaved.is_some() { UNSAVED } else { DONE },
         "provider": provider,
         "model": model,
         "prompt": prompt,
+        // Where it was written, or for an unsaved image where it was meant to be.
         "path": path,
         "seed": seed,
         // An estimate, never a charge — the provider's invoice is the authority.
         // Recorded per entry rather than summed anywhere, so the rolling budget
         // window is derived from the log like everything else here.
         "estimated_usd": estimated_usd,
-    }));
+    });
+    if let Some(error) = unsaved {
+        entry["error"] = json!(summarise(&format!("{error:#}")));
+    }
+    entry
 }
 
 /// A video render that has been started and not yet collected.
@@ -510,6 +537,23 @@ mod tests {
         let survived = read(&path);
         assert_eq!(survived.len(), 3);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// An image that was billed and could not be written still carries its
+    /// spend, because the budget is summed from these entries and the provider
+    /// charged for the render whatever happened to the disk afterwards.
+    #[test]
+    fn an_unsaved_image_still_records_its_spend() {
+        let error = anyhow::anyhow!("writing out.png: No space left on device");
+        let entry = image_entry("google", "m", "p", "out.png", None, 0.134, Some(&error));
+        assert_eq!(entry["status"], UNSAVED);
+        assert_eq!(entry["estimated_usd"], 0.134);
+        assert_eq!(entry["path"], "out.png");
+        assert!(entry["error"].as_str().unwrap().contains("No space left"), "{entry}");
+
+        let saved = image_entry("google", "m", "p", "out.png", None, 0.134, None);
+        assert_eq!(saved["status"], DONE);
+        assert!(saved.get("error").is_none(), "{saved}");
     }
 
     /// Outstanding operations are derived, not stored, so a render collected

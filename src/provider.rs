@@ -422,6 +422,15 @@ impl DurationSupport {
         }
     }
 
+    /// The longest clip on offer, which the budget assumes when a provider
+    /// states no default length of its own.
+    pub fn longest(self) -> u32 {
+        match self {
+            DurationSupport::Named(lengths) => lengths.iter().copied().max().unwrap_or(0),
+            DurationSupport::Range { max, .. } => max,
+        }
+    }
+
     pub fn describe(self) -> String {
         match self {
             DurationSupport::Named(lengths) => {

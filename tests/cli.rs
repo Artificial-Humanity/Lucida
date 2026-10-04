@@ -596,6 +596,63 @@ fn a_dry_run_still_refuses_what_a_real_run_would() {
     .exits(2);
 }
 
+// --- a budget that cannot be enforced refuses -------------------------------
+//
+// Each of these used to remove the cap without a word: the value was read as no
+// budget at all, and every render went through. Driven as dry runs, because a
+// dry run refuses exactly what a real run would and sends nothing.
+
+#[test]
+fn an_unreadable_budget_refuses_a_paid_render_and_names_the_value() {
+    for written in ["$5", "5 USD", "NaN", "inf", "-1"] {
+        let sandbox = Sandbox::new("budget-unreadable");
+        run(lucida(&sandbox)
+            .env("LUCIDA_BUDGET", written)
+            .args(["generate", "x", "--provider", "google", "--dry-run"]))
+        .exits(2)
+        .says(&format!("`{written}`"))
+        .says("such as `5`");
+    }
+}
+
+#[test]
+fn an_unreadable_budget_never_refuses_the_local_lane() {
+    let sandbox = Sandbox::new("budget-unreadable-free");
+    run(lucida(&sandbox)
+        .env("LUCIDA_BUDGET", "$5")
+        .args(["generate", "x", "--provider", "comfyui", "--dry-run"]))
+    .exits(0);
+}
+
+#[test]
+fn config_flags_an_unreadable_budget() {
+    let sandbox = Sandbox::new("budget-config");
+    sandbox.write_config("LUCIDA_BUDGET=$5\n");
+    run(lucida(&sandbox).arg("config"))
+        .says("LUCIDA_BUDGET  (`$5`")
+        .says("such as `5`");
+}
+
+#[test]
+fn a_budget_with_the_ledger_off_refuses_a_paid_render() {
+    // The budget is counted from the ledger, so with the ledger off nothing
+    // spent is ever counted and the cap could never be reached.
+    let sandbox = Sandbox::new("budget-no-ledger");
+    run(lucida(&sandbox)
+        .env("LUCIDA_BUDGET", "5")
+        .env("LUCIDA_NO_LEDGER", "1")
+        .args(["video", "x", "--provider", "google", "--dry-run"]))
+    .exits(2)
+    .says("LUCIDA_BUDGET")
+    .says("LUCIDA_NO_LEDGER");
+
+    run(lucida(&sandbox)
+        .env("LUCIDA_BUDGET", "5")
+        .env("LUCIDA_NO_LEDGER", "1")
+        .args(["generate", "x", "--provider", "comfyui", "--dry-run"]))
+    .exits(0);
+}
+
 // --- the render ledger ------------------------------------------------------
 //
 // Checked out of a real process because the ledger's location is resolved at

@@ -28,10 +28,25 @@
 //! assumed upper bound rather than a price. Erring high is the safe direction
 //! for a spend guard: it stops early rather than late, and being stopped early
 //! is a nuisance where being stopped late is a bill.
+//!
+//! Video is the exception that needed its own bound. Counting a Runway or Kling
+//! clip at the image ceiling priced ten seconds of per-second billing at a
+//! quarter, so an unverified video counts at [`VIDEO_CEILING_PER_SECOND`] times
+//! its length instead.
+//!
+//! # A cap that cannot be enforced refuses
+//!
+//! A `LUCIDA_BUDGET` that does not parse used to read as no budget at all, and
+//! so did one set beside `LUCIDA_NO_LEDGER`, whose ledger is the only place
+//! spend is counted. Both removed the cap without a word, which is the one
+//! failure a spend guard cannot have: whoever set it believes it is holding.
+//! Both now refuse every render that costs money and name the way out. Free
+//! renders are never refused, so the local lane stays the answer.
 
 use crate::clock;
-use crate::provider::Backend;
+use crate::provider::{Backend, Size};
 use anyhow::Result;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// What one render is expected to cost, in US dollars.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,6 +62,10 @@ pub enum Price {
     PerSecond { usd: f64, verified: &'static str, seconds: u32 },
     /// Billed, but at no rate this table has verified.
     Unverified,
+    /// Billed per second of video at a rate this table has not verified.
+    /// Carries the clip length, because the assumed upper bound scales with it
+    /// exactly as a verified rate does.
+    UnverifiedVideo { seconds: u32 },
 }
 
 /// What an unverified render is assumed to cost when a budget is being enforced.
@@ -55,6 +74,15 @@ pub enum Price {
 /// safe direction to be wrong in is *early*. Never printed as a price — the
 /// message that uses it says it is an assumed upper bound.
 pub const CEILING: f64 = 0.25;
+
+/// What an unverified video is assumed to cost per second of output.
+///
+/// Its own bound, because the image ceiling is a price per *render* and video is
+/// billed per *second*: counting a ten-second Runway clip at $0.25 put it below
+/// a four-second Veo render at $1.60. Set above every verified video rate in
+/// [`video_price`] — Veo's $0.40 a second is the highest — for the same reason
+/// [`CEILING`] sits above every image price.
+pub const VIDEO_CEILING_PER_SECOND: f64 = 0.50;
 
 impl Price {
     /// Dollars to charge against a budget, which is not the same as what it
@@ -67,6 +95,7 @@ impl Price {
             // the price are the same conversation.
             Price::PerSecond { usd, seconds, .. } => usd * f64::from(seconds),
             Price::Unverified => CEILING,
+            Price::UnverifiedVideo { seconds } => VIDEO_CEILING_PER_SECOND * f64::from(seconds),
         }
     }
 
@@ -87,6 +116,10 @@ impl Price {
                  own pricing"
                     .to_string()
             }
+            Price::UnverifiedVideo { seconds } => format!(
+                "billed per second for {seconds}s, at a rate this table has not \
+                 verified — see the provider's own pricing"
+            ),
         }
     }
 }
@@ -97,8 +130,22 @@ impl Price {
 /// provider's own pricing at the time of writing, so they are the only ones with
 /// a number. The rest are `Unverified` rather than approximated — a plausible
 /// wrong price is worse than an admitted gap, because it will be believed.
-pub fn price_for(backend: Backend, model: &str) -> Price {
+///
+/// `size` is taken because Google bills by output tier: a 4K image is priced
+/// as more tokens than a 1K one. Without it every Gemini render was priced at
+/// the 1K rate and labelled verified — a pro 4K render counted at $0.134
+/// against a published $0.24.
+pub fn price_for(backend: Backend, model: &str, size: Option<Size>) -> Price {
     const CHECKED: &str = "2026-08-09";
+    // Google's published rates per output tier, read from
+    // https://ai.google.dev/gemini-api/docs/pricing on this date: Gemini 3 Pro
+    // Image "$0.134 per 1K/2K image and $0.24 per 4K image"; Gemini 3.1 Flash
+    // Image "$0.067 per 1K image, $0.101 per 2K image, and $0.151 per 4K image".
+    // No size means Google's default tier, 1K.
+    const TIERS_CHECKED: &str = "2026-10-04";
+
+    let tier = size.map_or("1K", Size::tier_name);
+    let per_image = |usd: f64, verified: &'static str| Price::PerImage { usd, verified };
 
     match backend {
         Backend::ComfyUi => Price::Free,
@@ -108,15 +155,16 @@ pub fn price_for(backend: Backend, model: &str) -> Price {
             // meant `--model banana-pro` — the documented spelling — priced as
             // Unverified and counted at the ceiling, so a budget refused a
             // 13-cent render as if it might cost a quarter.
-            match crate::genai::resolve_model(model).as_str() {
-                m if m.starts_with("gemini-3-pro-image") => Price::PerImage {
-                    usd: 0.134,
-                    verified: CHECKED,
-                },
-                m if m.starts_with("gemini-3.1-flash-image") => Price::PerImage {
-                    usd: 0.067,
-                    verified: CHECKED,
-                },
+            match (crate::genai::resolve_model(model).as_str(), tier) {
+                (m, "4K") if m.starts_with("gemini-3-pro-image") => per_image(0.24, TIERS_CHECKED),
+                (m, _) if m.starts_with("gemini-3-pro-image") => per_image(0.134, CHECKED),
+                (m, "4K") if m.starts_with("gemini-3.1-flash-image") => {
+                    per_image(0.151, TIERS_CHECKED)
+                }
+                (m, "2K") if m.starts_with("gemini-3.1-flash-image") => {
+                    per_image(0.101, TIERS_CHECKED)
+                }
+                (m, _) if m.starts_with("gemini-3.1-flash-image") => per_image(0.067, CHECKED),
                 _ => Price::Unverified,
             }
         }
@@ -135,6 +183,16 @@ pub fn price_for(backend: Backend, model: &str) -> Price {
 pub fn video_price(backend: crate::provider::VideoBackend, model: &str, duration: Option<u32>) -> Price {
     const CHECKED: &str = "2026-08-09";
 
+    // Neither Runway's nor Kling's code states a default clip length — both
+    // send no `duration` when none is asked for and let the provider choose —
+    // so the longest length each accepts is assumed. Erring long is the safe
+    // direction for the same reason the ceiling errs high.
+    let unverified = || Price::UnverifiedVideo {
+        seconds: duration.unwrap_or_else(|| {
+            crate::provider::video_capabilities_for(backend, model).duration.longest()
+        }),
+    };
+
     let per_second = match backend {
         crate::provider::VideoBackend::Google => {
             if model.contains("lite") {
@@ -145,16 +203,14 @@ pub fn video_price(backend: crate::provider::VideoBackend, model: &str, duration
                 0.40
             }
         }
-        // Runway bills in credits rather than dollars and this table has not
-        // verified the conversion, so its rate is not stated. `Unverified`
-        // counts at the ceiling, which is the honest answer until a render and
-        // a balance reading settle it.
         // Runway and Kling both bill in their own credits and this table has
-        // not verified either conversion, so neither rate is stated.
-        // `Unverified` counts at the ceiling, which is the honest answer until a
-        // render and a balance reading settle it.
+        // not verified either conversion, so neither rate is stated. They count
+        // at the per-second video ceiling times the clip length, which is the
+        // honest answer until a render and a balance reading settle it. They
+        // used to count at the image ceiling — a quarter for a clip of any
+        // length.
         crate::provider::VideoBackend::Runway | crate::provider::VideoBackend::Kling => {
-            return Price::Unverified;
+            return unverified();
         }
     };
 
@@ -176,8 +232,58 @@ pub fn video_price(backend: crate::provider::VideoBackend, model: &str, duration
 /// means — do not let this thing spend more than five dollars today.
 pub const WINDOW_SECONDS: i64 = 24 * 60 * 60;
 
+/// What `LUCIDA_BUDGET` says, including when it says nothing usable.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Budget {
+    /// No budget: nothing is ever refused for cost.
+    Unset,
+    /// A cap in US dollars — finite and not negative.
+    Cap(f64),
+    /// Set, but not an amount: `$5`, `5 USD`, `NaN`, `-1`. Held with the text
+    /// as written, so the refusal can quote it.
+    Unreadable(String),
+}
+
+impl Budget {
+    /// Reads a raw setting. An unreadable value is kept rather than dropped,
+    /// because dropping it is what used to turn `LUCIDA_BUDGET=$5` into no cap:
+    /// `.parse().ok()` read it as unset and every render went through.
+    fn parse(raw: Option<&str>) -> Budget {
+        let Some(raw) = raw else { return Budget::Unset };
+        match raw.trim().parse::<f64>() {
+            // `f64::from_str` accepts `inf`, `NaN` and `-5`, none of which is a
+            // cap: infinity and NaN never refuse anything, and a negative one
+            // reads as a typo rather than a decision to refuse everything.
+            Ok(cap) if cap.is_finite() && cap >= 0.0 => Budget::Cap(cap),
+            _ => Budget::Unreadable(raw.to_string()),
+        }
+    }
+
+    /// The refusal for a budget that cannot be read, or `None` when it can.
+    ///
+    /// Public so `lucida config` can say the same thing a render would.
+    pub fn problem(&self) -> Option<String> {
+        match self {
+            Budget::Unreadable(raw) => Some(format!(
+                "`{raw}` — expected a plain number of US dollars, such as `5` or \
+                 `2.50`: no `$`, no units, no comment"
+            )),
+            Budget::Unset | Budget::Cap(_) => None,
+        }
+    }
+}
+
+/// The budget as set, read through the config file and the environment.
+pub fn budget_setting() -> Budget {
+    Budget::parse(crate::config::var("LUCIDA_BUDGET").as_deref())
+}
+
+/// The cap in dollars, when one is set and readable.
 pub fn budget() -> Option<f64> {
-    crate::config::var("LUCIDA_BUDGET")?.trim().parse().ok()
+    match budget_setting() {
+        Budget::Cap(cap) => Some(cap),
+        Budget::Unset | Budget::Unreadable(_) => None,
+    }
 }
 
 /// Estimated dollars spent in the last [`WINDOW_SECONDS`], from the ledger.
@@ -197,16 +303,77 @@ pub fn spent_recently() -> f64 {
     total.max(0.0)
 }
 
-/// Refuses a render that would take the day past its budget.
+/// Spend promised to renders in flight in this process and not yet in the
+/// ledger, in US dollars.
+///
+/// Exists because the ledger is written when a render *finishes*, and a check
+/// that reads only the ledger lets every concurrent caller see the same total.
+/// The MCP server runs tool calls on a pool of workers, so four `start_video`
+/// calls against `LUCIDA_BUDGET=5` each read the same empty ledger, each saw
+/// $3.20 fit, and all four started: $12.80 under a five-dollar cap. A check
+/// and its reservation now happen under one lock, so the second caller sees
+/// the first one's $3.20 before the ledger does.
+///
+/// **In-process only.** Two separate `lucida` processes — two shells, or a
+/// shell and the MCP server — each have their own, and can still both pass
+/// against the same ledger. Closing that needs a file lock, and
+/// `std::fs::File::lock` is newer than this crate's MSRV of 1.85; a locking
+/// crate would be a new dependency. So the gap is stated rather than closed.
+struct Held(Mutex<f64>);
+
+impl Held {
+    const fn new() -> Held {
+        Held(Mutex::new(0.0))
+    }
+
+    /// A poisoned lock is taken anyway. The value is a running sum that a panic
+    /// elsewhere cannot leave half-written, and a budget that stopped working
+    /// because some unrelated render panicked would be the silent removal of
+    /// the cap again.
+    fn lock(&self) -> MutexGuard<'_, f64> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+static HELD: Held = Held::new();
+
+/// A render's estimated cost, held against the budget until it is in the
+/// ledger.
+///
+/// Released when dropped, which is what makes it reach every exit: kept until
+/// the ledger entry is written on success, and dropped by the `?` of a provider
+/// error, a cancelled render, or the unwinding of a panic. Holding it a moment
+/// past the ledger write counts the render twice for that moment, which errs
+/// toward refusing — the direction this module always chooses.
+#[must_use = "dropping a reservation releases it — hold it until the ledger entry is written"]
+pub struct Reservation {
+    usd: f64,
+    held: &'static Held,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.usd > 0.0 {
+            let mut held = self.held.lock();
+            // Clamped, so float rounding over many reservations can never leave
+            // a negative sum that would quietly raise the cap.
+            *held = (*held - self.usd).max(0.0);
+        }
+    }
+}
+
+/// Refuses a render that would take the day past its budget, and otherwise
+/// reserves its cost until the caller's ledger entry is written.
 ///
 /// Checked before a client exists, beside `Capabilities::check` and in the same
 /// voice, for the same reason: the point of a refusal is that it happens before
 /// the money moves, and it names what to do instead.
-pub fn check(price: Price, what: &str) -> Result<()> {
+pub fn check(price: Price, what: &str) -> Result<Reservation> {
     check_batch(price, 1, what)
 }
 
-/// Refuses a batch that would take the day past its budget.
+/// Refuses a batch that would take the day past its budget, and otherwise
+/// reserves the whole batch's cost.
 ///
 /// `count` is load-bearing and was learned the expensive way. The first version
 /// of the batch path called [`check`] in a loop — once per image — which reads
@@ -215,7 +382,31 @@ pub fn check(price: Price, what: &str) -> Result<()> {
 /// A three-image batch at $0.134 sailed through a $0.20 budget and rendered all
 /// three. The cap has to see the whole batch before the first render, because
 /// after the first render it is too late for the first render.
-pub fn check_batch(price: Price, count: usize, what: &str) -> Result<()> {
+pub fn check_batch(price: Price, count: usize, what: &str) -> Result<Reservation> {
+    reserve(
+        &HELD,
+        price,
+        count,
+        what,
+        budget_setting(),
+        crate::ledger::disabled(),
+        spent_recently,
+    )
+}
+
+/// [`check_batch`] with its inputs passed in, so the arithmetic can be tested
+/// without touching the environment or the real ledger.
+fn reserve(
+    held: &'static Held,
+    price: Price,
+    count: usize,
+    what: &str,
+    budget: Budget,
+    ledger_off: bool,
+    spent: impl FnOnce() -> f64,
+) -> Result<Reservation> {
+    let nothing = || Reservation { usd: 0.0, held };
+
     // A render that spends nothing is never refused, whatever has been spent
     // already. Checked before the budget is even read, because the arithmetic
     // gets this wrong in the most embarrassing possible way: with the day's
@@ -224,37 +415,82 @@ pub fn check_batch(price: Price, count: usize, what: &str) -> Result<()> {
     // use instead. Caught by running it, not by reading it.
     let estimate = price.against_budget() * count as f64;
     if estimate <= 0.0 {
-        return Ok(());
+        return Ok(nothing());
     }
 
-    let Some(budget) = budget() else {
-        return Ok(());
+    // A refusal, not a failure, in every branch below: understood, declined
+    // before the money moved, and naming what to do instead. The CLI exits 2
+    // for it, so a wrapper that retries on failure does not retry something
+    // that cannot succeed.
+    let refuse = |message: String| Err(anyhow::Error::new(crate::out::Refused(message)));
+
+    let budget = match budget {
+        Budget::Unset => return Ok(nothing()),
+        Budget::Cap(cap) => cap,
+        unreadable @ Budget::Unreadable(_) => {
+            let problem = unreadable.problem().unwrap_or_default();
+            return refuse(format!(
+                "LUCIDA_BUDGET is {problem}. A cap that cannot be read is not \
+                 treated as no cap, so this {what} is refused rather than sent.\n\n\
+                 Fix the value, or unset LUCIDA_BUDGET to run without a cap. \
+                 comfyui renders locally, costs nothing, and is never refused. \
+                 `lucida config` shows where the setting comes from."
+            ));
+        }
     };
 
-    let spent = spent_recently();
-    if spent + estimate <= budget {
-        return Ok(());
+    // The budget is counted from the ledger, so with the ledger off nothing
+    // spent is ever counted and the cap could never be reached. It used to
+    // allow everything, forever, without saying so.
+    if ledger_off {
+        return refuse(format!(
+            "LUCIDA_BUDGET is set (${budget:.2}), and so is LUCIDA_NO_LEDGER. The \
+             budget is counted from the render ledger, so with the ledger off \
+             nothing spent is ever counted and the cap cannot hold — this {what} \
+             is refused rather than sent unmetered.\n\n\
+             Unset LUCIDA_NO_LEDGER to keep the budget (the ledger records your \
+             prompts), or unset LUCIDA_BUDGET to run without a cap. comfyui \
+             renders locally, costs nothing, and is never refused."
+        ));
     }
+
+    // One lock across the read, the decision and the reservation: anything
+    // less lets two workers both read the same total and both pass.
+    let mut in_flight = held.lock();
+    let spent = spent();
+    if spent + *in_flight + estimate <= budget {
+        *in_flight += estimate;
+        return Ok(Reservation { usd: estimate, held });
+    }
+    let reserved = *in_flight;
+    drop(in_flight);
 
     let assumption = match price {
         Price::Unverified => format!(
             "\n\nThis provider's rate is not verified here, so it is counted at \
              ${CEILING:.2} — an assumed upper bound, not a price."
         ),
+        Price::UnverifiedVideo { seconds } => format!(
+            "\n\nThis provider's rate is not verified here, so it is counted at \
+             ${VIDEO_CEILING_PER_SECOND:.2} a second for {seconds}s — an assumed \
+             upper bound, not a price."
+        ),
         _ => String::new(),
     };
+    let running = if reserved > 0.0 {
+        format!(", and renders still running in this process hold another ${reserved:.2}")
+    } else {
+        String::new()
+    };
 
-    // A refusal, not a failure: understood, declined before the money moved, and
-    // naming what to do instead. The CLI exits 2 for it, so a wrapper that
-    // retries on failure does not retry something that cannot succeed.
-    Err(anyhow::Error::new(crate::out::Refused(format!(
+    refuse(format!(
         "LUCIDA_BUDGET is ${budget:.2} for a rolling 24 hours, and about \
-         ${spent:.2} of that is already spent. This {what} would add roughly \
-         ${estimate:.2}.{assumption}\n\n\
+         ${spent:.2} of that is already spent{running}. This {what} would add \
+         roughly ${estimate:.2}.{assumption}\n\n\
          Raise or unset LUCIDA_BUDGET, wait for the window to roll, or use \
          comfyui, which renders locally and costs nothing. `lucida history` \
          shows what the estimate is made of."
-    ))))
+    ))
 }
 
 #[cfg(test)]
@@ -267,7 +503,7 @@ mod tests {
     #[test]
     fn every_stated_price_carries_the_date_it_was_checked() {
         for backend in Backend::ALL {
-            match price_for(*backend, backend.default_model()) {
+            match price_for(*backend, backend.default_model(), None) {
                 Price::PerImage { verified, .. } | Price::PerSecond { verified, .. } => {
                     assert!(
                         crate::clock::unix_time(verified).is_some(),
@@ -275,7 +511,7 @@ mod tests {
                         backend.name()
                     );
                 }
-                Price::Free | Price::Unverified => {}
+                Price::Free | Price::Unverified | Price::UnverifiedVideo { .. } => {}
             }
         }
     }
@@ -332,13 +568,13 @@ mod tests {
     fn an_alias_is_priced_like_the_model_it_names() {
         for (alias, id) in crate::genai::MODEL_ALIASES {
             assert_eq!(
-                price_for(Backend::Google, alias),
-                price_for(Backend::Google, id),
+                price_for(Backend::Google, alias, None),
+                price_for(Backend::Google, id, None),
                 "`{alias}` and `{id}` are the same model and must cost the same"
             );
         }
         assert!(matches!(
-            price_for(Backend::Google, "banana-pro"),
+            price_for(Backend::Google, "banana-pro", None),
             Price::PerImage { .. }
         ));
     }
@@ -347,11 +583,11 @@ mod tests {
     /// genuinely cost nothing.
     #[test]
     fn the_local_lane_is_free_and_the_hosted_ones_are_not() {
-        assert_eq!(price_for(Backend::ComfyUi, "klein"), Price::Free);
-        assert_eq!(price_for(Backend::ComfyUi, "klein").against_budget(), 0.0);
+        assert_eq!(price_for(Backend::ComfyUi, "klein", None), Price::Free);
+        assert_eq!(price_for(Backend::ComfyUi, "klein", None).against_budget(), 0.0);
 
         for backend in [Backend::Google, Backend::Bfl, Backend::Stability, Backend::OpenAi] {
-            let price = price_for(backend, backend.default_model());
+            let price = price_for(backend, backend.default_model(), None);
             assert_ne!(price, Price::Free, "{} is not free", backend.name());
             assert!(price.against_budget() > 0.0);
         }
@@ -359,16 +595,23 @@ mod tests {
 
     /// An unverified price must count as *something*, or a budget would be off
     /// for three of the five image providers — which is the same as not existing.
+    /// Video too, and per second: Runway and Kling clips counted at the image
+    /// ceiling, a quarter for ten seconds of per-second billing.
     #[test]
     fn an_unverified_price_still_counts_against_a_budget() {
+        use crate::provider::VideoBackend;
+
         assert_eq!(Price::Unverified.against_budget(), CEILING);
 
         // Read off the table rather than compared against a literal, so adding a
         // price that exceeds the ceiling fails here rather than quietly making
-        // the "upper bound" an under-estimate.
+        // the "upper bound" an under-estimate. Every tier, since 4K is priced
+        // above the rest.
+        let tiers = [None, Some(Size::ONE_K), Some(Size::TWO_K), Some(Size::FOUR_K)];
         let highest = ["gemini-3-pro-image", "gemini-3.1-flash-image"]
             .iter()
-            .filter_map(|model| match price_for(Backend::Google, model) {
+            .flat_map(|model| tiers.map(|size| price_for(Backend::Google, model, size)))
+            .filter_map(|price| match price {
                 Price::PerImage { usd, .. } => Some(usd),
                 _ => None,
             })
@@ -379,6 +622,65 @@ mod tests {
             "the ceiling (${CEILING}) is below a price this table states \
              (${highest}), so it is not an upper bound"
         );
+
+        // The video bound sits above every verified per-second rate, read off
+        // the table for the same reason.
+        let fastest = ["veo-3.1-lite-generate-preview", "veo-3.1-fast-generate-preview", "veo-3.1-generate-preview"]
+            .iter()
+            .filter_map(|model| match video_price(VideoBackend::Google, model, Some(8)) {
+                Price::PerSecond { usd, .. } => Some(usd),
+                _ => None,
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            VIDEO_CEILING_PER_SECOND > fastest,
+            "the video ceiling (${VIDEO_CEILING_PER_SECOND}/s) is not above a \
+             verified rate (${fastest}/s), so it is not an upper bound"
+        );
+
+        // Scaled by the clip length asked for, and with none asked for, by the
+        // longest each provider accepts — neither states a default of its own.
+        for backend in [VideoBackend::Runway, VideoBackend::Kling] {
+            let model = backend.default_model();
+            assert_eq!(
+                video_price(backend, model, Some(5)).against_budget(),
+                VIDEO_CEILING_PER_SECOND * 5.0,
+                "{}: five seconds",
+                backend.name()
+            );
+            let longest = crate::provider::video_capabilities_for(backend, model).duration.longest();
+            assert_eq!(longest, 10, "{}: the longest clip on offer", backend.name());
+            assert_eq!(
+                video_price(backend, model, None).against_budget(),
+                VIDEO_CEILING_PER_SECOND * f64::from(longest),
+                "{}: no duration asked for",
+                backend.name()
+            );
+            assert!(
+                video_price(backend, model, None).against_budget() > CEILING,
+                "{}: an unverified clip must not count at the image ceiling",
+                backend.name()
+            );
+        }
+    }
+
+    /// Google bills by output tier, and the pro model's 4K tier is published at
+    /// $0.24 — it was counted at the 1K/2K rate of $0.134 and labelled verified.
+    #[test]
+    fn a_gemini_render_is_priced_by_its_size_tier() {
+        let usd = |model: &str, size: Option<Size>| match price_for(Backend::Google, model, size) {
+            Price::PerImage { usd, .. } => usd,
+            other => panic!("{model} at {size:?} priced as {other:?}"),
+        };
+        assert_eq!(usd("banana-pro", None), 0.134);
+        assert_eq!(usd("banana-pro", Some(Size::TWO_K)), 0.134);
+        assert_eq!(usd("banana-pro", Some(Size::FOUR_K)), 0.24);
+        // A pixel count lands in the tier Google is actually sent.
+        assert_eq!(usd("banana-pro", Some(Size(4000))), 0.24);
+
+        assert_eq!(usd("gemini-3.1-flash-image", Some(Size::ONE_K)), 0.067);
+        assert_eq!(usd("gemini-3.1-flash-image", Some(Size::TWO_K)), 0.101);
+        assert_eq!(usd("gemini-3.1-flash-image", Some(Size::FOUR_K)), 0.151);
     }
 
     /// Never a charge, always an estimate — the provider's invoice is the
@@ -390,6 +692,7 @@ mod tests {
             Price::PerImage { usd: 0.067, verified: "2026-08-09" },
             Price::PerSecond { usd: 0.15, verified: "2026-08-09", seconds: 8 },
             Price::Unverified,
+            Price::UnverifiedVideo { seconds: 10 },
         ] {
             let described = price.describe().to_lowercase();
             assert!(
@@ -433,6 +736,121 @@ mod tests {
     #[test]
     fn a_free_render_is_never_refused() {
         assert!(check(Price::Free, "render").is_ok());
-        assert_eq!(price_for(Backend::ComfyUi, "klein").against_budget(), 0.0);
+        assert_eq!(price_for(Backend::ComfyUi, "klein", None).against_budget(), 0.0);
+    }
+
+    fn is_refusal(result: &Result<Reservation>) -> bool {
+        matches!(result, Err(e) if e.downcast_ref::<crate::out::Refused>().is_some())
+    }
+
+    fn refusal(result: Result<Reservation>) -> String {
+        match result {
+            Err(e) if e.downcast_ref::<crate::out::Refused>().is_some() => e.to_string(),
+            Err(e) => panic!("an error, not a refusal: {e:#}"),
+            Ok(_) => panic!("expected a refusal and the render was allowed"),
+        }
+    }
+
+    /// The race across the MCP worker pool. Each call read the ledger, which a
+    /// render only reaches once it finishes, so four $3.20 Veo starts against a
+    /// five-dollar budget each saw an empty ledger and all four started. Two
+    /// back to back must see each other.
+    #[test]
+    fn a_second_reservation_sees_the_first() {
+        // Its own table, not the process-wide one, so a render reserving in a
+        // parallel test cannot move the numbers under this one.
+        static TABLE: Held = Held::new();
+        let veo = Price::PerSecond { usd: 0.40, verified: "2026-08-09", seconds: 8 };
+        let budget = || Budget::Cap(5.0);
+
+        let first = reserve(&TABLE, veo, 1, "video render", budget(), false, || 0.0);
+        assert!(first.is_ok(), "$3.20 fits a $5.00 budget");
+
+        let second = reserve(&TABLE, veo, 1, "video render", budget(), false, || 0.0);
+        let message = refusal(second);
+        assert!(message.contains("hold another $3.20"), "{message}");
+
+        // Released when the first is dropped, which is what the ledger entry
+        // being written looks like from here.
+        drop(first);
+        assert_eq!(*TABLE.lock(), 0.0);
+        assert!(reserve(&TABLE, veo, 1, "video render", budget(), false, || 0.0).is_ok());
+    }
+
+    /// The reservation is released on every way out, a panic included — or one
+    /// render that panicked would hold its estimate against the budget for as
+    /// long as the server runs.
+    #[test]
+    fn a_panicking_render_releases_its_reservation() {
+        static TABLE: Held = Held::new();
+        let price = Price::PerImage { usd: 0.134, verified: "2026-08-09" };
+
+        let unwound = std::panic::catch_unwind(|| {
+            let _held = reserve(&TABLE, price, 1, "render", Budget::Cap(1.0), false, || 0.0)
+                .expect("fits");
+            panic!("the provider call blew up");
+        });
+        assert!(unwound.is_err());
+        assert_eq!(*TABLE.lock(), 0.0, "the panic left its estimate held");
+    }
+
+    /// `.parse().ok()` read every one of these as no budget, so writing the cap
+    /// the way people write money removed it.
+    #[test]
+    fn a_budget_that_does_not_parse_is_kept_as_unreadable() {
+        for raw in ["$5", "5 USD", "5  # cap", "NaN", "inf", "-inf", "-1", "five"] {
+            assert_eq!(
+                Budget::parse(Some(raw)),
+                Budget::Unreadable(raw.to_string()),
+                "`{raw}` must not read as a cap or as no budget"
+            );
+        }
+        assert_eq!(Budget::parse(Some(" 2.50 ")), Budget::Cap(2.5));
+        assert_eq!(Budget::parse(Some("0")), Budget::Cap(0.0));
+        assert_eq!(Budget::parse(None), Budget::Unset);
+    }
+
+    /// An unreadable budget refuses what costs money, quoting the value and the
+    /// form expected — and never the local lane.
+    #[test]
+    fn an_unreadable_budget_refuses_a_paid_render() {
+        static TABLE: Held = Held::new();
+        let unreadable = || Budget::Unreadable("$5".to_string());
+
+        let message = refusal(reserve(&TABLE, Price::Unverified, 1, "render", unreadable(), false, || 0.0));
+        assert!(message.contains("`$5`") && message.contains("such as `5`"), "{message}");
+
+        assert!(reserve(&TABLE, Price::Free, 1, "render", unreadable(), false, || 0.0).is_ok());
+    }
+
+    /// The ledger is where spend is counted, so a budget beside
+    /// `LUCIDA_NO_LEDGER` could never be reached and allowed everything.
+    #[test]
+    fn a_budget_with_no_ledger_refuses_a_paid_render() {
+        static TABLE: Held = Held::new();
+
+        let result = reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(5.0), true, || 0.0);
+        assert!(is_refusal(&result));
+        let message = refusal(result);
+        assert!(
+            message.contains("LUCIDA_BUDGET") && message.contains("LUCIDA_NO_LEDGER"),
+            "{message}"
+        );
+
+        assert!(reserve(&TABLE, Price::Free, 1, "render", Budget::Cap(5.0), true, || 0.0).is_ok());
+        // And with no budget at all, the ledger being off is nobody's business here.
+        assert!(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Unset, true, || 0.0).is_ok());
+    }
+
+    /// The video refusal states its assumption in the same words as the image
+    /// one: an assumed upper bound, not a price.
+    #[test]
+    fn an_unverified_video_refusal_says_what_it_assumed() {
+        static TABLE: Held = Held::new();
+        let clip = Price::UnverifiedVideo { seconds: 10 };
+
+        let message = refusal(reserve(&TABLE, clip, 1, "video render", Budget::Cap(1.0), false, || 0.0));
+        assert!(message.contains("$0.50 a second for 10s"), "{message}");
+        assert!(message.contains("assumed upper bound"), "{message}");
     }
 }

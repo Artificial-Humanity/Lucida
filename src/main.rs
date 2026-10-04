@@ -625,7 +625,7 @@ fn run(cli: Cli) -> Result<i32> {
             // before the render rather than after it — this is where a wrong
             // parameter is expensive rather than merely annoying.
             let price = spend::video_price(backend, &resolved, request.duration);
-            spend::check(price, "video render")?;
+            let reservation = spend::check(price, "video render")?;
 
             // After the capability and budget checks, so a dry run reports the
             // same refusals a real one would, and before any client exists, so
@@ -665,6 +665,9 @@ fn run(cli: Cli) -> Result<i32> {
                 &operation,
                 price.against_budget(),
             );
+            // The started entry carries the spend, so the hold can go — before
+            // the wait, which can run for minutes.
+            drop(reservation);
             eprintln!("{}", video::resume_notice(&operation));
 
             // The shape the MCP surface has had since it existed — start, hand
@@ -830,9 +833,14 @@ fn show_history(count: usize) -> Result<()> {
     let spent = spend::spent_recently();
     if spent > 0.0 {
         print!("\nEstimated spend in the last 24 hours: ${spent:.2}");
-        match spend::budget() {
-            Some(budget) => println!(" of a ${budget:.2} LUCIDA_BUDGET"),
-            None => println!(" (no LUCIDA_BUDGET set)"),
+        match spend::budget_setting() {
+            spend::Budget::Cap(budget) => println!(" of a ${budget:.2} LUCIDA_BUDGET"),
+            spend::Budget::Unset => println!(" (no LUCIDA_BUDGET set)"),
+            // Not "no budget": an unreadable one refuses every paid render.
+            spend::Budget::Unreadable(raw) => println!(
+                " (LUCIDA_BUDGET is `{raw}`, which is not a number — paid renders \
+                 are refused until it is fixed)"
+            ),
         }
     }
     Ok(())
@@ -997,6 +1005,14 @@ fn show_config() {
         for name in &unrecognised {
             println!("  {name}  (ignored — check the spelling)");
         }
+    }
+
+    // The other way a setting can be present and not do what it says. Flagged
+    // here because a budget that cannot be read refuses every paid render, and
+    // this is where someone looks to find out why.
+    if let Some(problem) = spend::budget_setting().problem() {
+        println!("\nSet, but not a value Lucida can use:");
+        println!("  LUCIDA_BUDGET  ({problem} — paid renders are refused until it is fixed)");
     }
 
     if config::source().is_none() {
@@ -1561,8 +1577,13 @@ fn execute(
     // per render and is not one — every call re-reads the same ledger, so all of
     // them ask "can I afford one more?" and all of them say yes. Measured: three
     // images at $0.134 went through a $0.20 budget and rendered all three.
-    let price = spend::price_for(backend, &request.model);
-    spend::check_batch(price, count, "render")?;
+    //
+    // The reservation is held for the whole batch, released when this function
+    // returns — after the last image's ledger entry, or on the first failure.
+    // Each image's entry lands while the batch's hold is still up, so for that
+    // moment it counts twice; nothing in a CLI process checks again meanwhile.
+    let price = spend::price_for(backend, &request.model, request.size);
+    let _reservation = spend::check_batch(price, count, "render")?;
 
     // A pinned seed asks for one specific image; a batch asks for several
     // different ones. Together they are a contradiction that renders the same
@@ -1666,7 +1687,17 @@ fn render_one(
             out.display()
         );
     }
-    let written = write_image(&destination, &image.bytes)?;
+    let written = write_billed(&destination, &image.bytes, |path, unsaved| {
+        ledger::image(
+            caps.provider,
+            &request.model,
+            &request.prompt,
+            path,
+            image.seed,
+            price.against_budget(),
+            unsaved,
+        );
+    })?;
 
     if let Some(commentary) = &image.commentary
         && !commentary.is_empty()
@@ -1703,14 +1734,6 @@ fn render_one(
     if price != spend::Price::Free {
         eprintln!("Cost: {}.", price.describe());
     }
-    ledger::image(
-        caps.provider,
-        &request.model,
-        &request.prompt,
-        &written.to_string_lossy(),
-        image.seed,
-        price.against_budget(),
-    );
 
     // Returned rather than printed, so a batch can be reported as one document
     // and a single render still gets its path on stdout alone — which is what
@@ -1924,6 +1947,32 @@ fn staging_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// Writes a render the provider has already billed, recording it whether or not
+/// the write succeeds.
+///
+/// `record` receives the path written, or the path intended and the write's
+/// error. The ledger call used to come after a successful write, so a full disk
+/// or an unwritable path after a paid render left no entry, and the budget —
+/// summed from the ledger — never counted money that was spent. Routing both
+/// image call sites through here makes the record unskippable: there is no way
+/// to get the written path without passing it.
+pub fn write_billed(
+    destination: &Path,
+    bytes: &[u8],
+    record: impl FnOnce(&str, Option<&anyhow::Error>),
+) -> Result<PathBuf> {
+    match write_image(destination, bytes) {
+        Ok(written) => {
+            record(&written.to_string_lossy(), None);
+            Ok(written)
+        }
+        Err(error) => {
+            record(&destination.to_string_lossy(), Some(&error));
+            Err(error)
+        }
+    }
+}
+
 /// Writes an image to `path`, creating parent directories, and returns the
 /// absolute path actually written.
 ///
@@ -2119,6 +2168,37 @@ mod tests {
             .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
             .collect();
         assert_eq!(left, vec!["cat.png"], "a staging file survived: {left:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A render the provider has returned has been billed, so it is recorded
+    /// whether or not the file lands. The ledger call used to follow a
+    /// successful write, and a failed one left a paid render uncounted.
+    #[test]
+    fn a_billed_image_is_recorded_even_when_the_write_fails() {
+        let dir = std::env::temp_dir().join(format!("lucida-billed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A regular file where a directory has to be: the write cannot succeed.
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"").unwrap();
+        let unwritable = blocker.join("cat.png");
+
+        let mut recorded = None;
+        let result = write_billed(&unwritable, b"paid for", |path, unsaved| {
+            recorded = Some((path.to_string(), unsaved.map(|e| format!("{e:#}"))));
+        });
+        assert!(result.is_err(), "the write was expected to fail");
+        let (path, unsaved) = recorded.expect("a failed write recorded nothing");
+        assert_eq!(path, unwritable.to_string_lossy());
+        assert!(unsaved.is_some(), "recorded as saved when it was not");
+
+        let mut recorded = None;
+        let written = write_billed(&dir.join("cat.png"), b"paid for", |path, unsaved| {
+            recorded = Some((path.to_string(), unsaved.is_some()));
+        })
+        .unwrap();
+        assert_eq!(recorded, Some((written.to_string_lossy().into_owned(), false)));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
