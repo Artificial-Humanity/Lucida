@@ -82,9 +82,55 @@ jobs:
             *) echo "ok: \"$TAG\" is not a release tag" ;;
           esac
 
+      # `github.sha` on a push, so every job builds the commit that triggered the
+      # run. `github.ref` is the tag NAME, which each job would resolve again when
+      # it started — and a tag deleted and re-pushed during a notarization wait
+      # would then give the jobs of one run different commits. A dispatch has no
+      # triggering tag (its `github.sha` is the branch it was run from), so it
+      # names the tag in its input instead.
+      #
+      # Full history, because the next step asks whether a commit is an ancestor
+      # of `main`, and the default depth of one has no ancestry to ask about.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.sha }}
+          fetch-depth: 0
+
+      # A tag is not a review. Anyone who can push a `v*` tag could put one on a
+      # commit from an unmerged branch, and the run would then sign three
+      # binaries, publish a release users can install, and push a crate version
+      # that can be yanked but never deleted — none of it having passed the
+      # pull-request and owner-approval step that protects `main`. This holds the
+      # tag to the branch that does have that protection.
+      #
+      # A dispatch is checked the same way, on the commit its tag names. `^{commit}`
+      # because an annotated tag is an object of its own, and the question is
+      # about the commit underneath it.
+      - name: The tag's commit is on main
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$TAG" ]; then
+            sha=$(git rev-parse "refs/tags/$TAG^{commit}")
+          else
+            sha=$(git rev-parse "$GITHUB_SHA^{commit}")
+          fi
+          # Exit 1 means "not an ancestor". Anything else means the question could
+          # not be asked (no `origin/main`, a shallow clone), which must not read
+          # as an answer in either direction.
+          rc=0
+          git merge-base --is-ancestor "$sha" origin/main || rc=$?
+          case "$rc" in
+            0) echo "ok: $sha is on main" ;;
+            1) echo "refusing: $sha is not on main, so it has not been through"
+               echo "the review that protects main. Merge it first, then tag the"
+               echo "merge commit."
+               exit 1 ;;
+            *) echo "could not tell whether $sha is on main (git exited $rc)"
+               exit 1 ;;
+          esac
+
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
 
@@ -117,7 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.sha }}
 
       - name: Add both Apple targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -369,14 +415,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.sha }}
 
       - name: Build statically against musl
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           rustup target add x86_64-unknown-linux-musl
-          sudo apt-get update && sudo apt-get install -y musl-tools
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
           cargo build --locked --release --target x86_64-unknown-linux-musl
           NAME="lucida-${TAG#v}-x86_64-linux-musl"
           cp target/x86_64-unknown-linux-musl/release/lucida "$NAME"
@@ -428,7 +475,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.sha }}
 
       - name: Build
         env:
