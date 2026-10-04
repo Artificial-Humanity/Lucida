@@ -1154,6 +1154,25 @@ fn assigns(line: &str, name: &str) -> bool {
     bare.split_once('=').is_some_and(|(key, _)| key.trim() == name)
 }
 
+/// Stops a config writer before it resolves a path, when running under test.
+///
+/// `config` seals what a unit test can *read* (`files_to_load` and
+/// `from_environment` answer nothing under `cfg(test)`), but `preferred_path`
+/// still resolves the real `HOME`, because a test of the search needs it to.
+/// The file it names is the developer's own `config.env`, which holds real
+/// provider keys, so `init`, `set` and `remove` would write to it from any unit
+/// test that called them. Each calls this first — `set` before it reads stdin
+/// — so the seal covers writing too.
+fn refuse_config_writes_under_test() -> Result<()> {
+    if cfg!(test) {
+        anyhow::bail!(
+            "config writes are refused under cfg(test): the path they resolve is \
+             the developer's real config.env, which holds real keys."
+        );
+    }
+    Ok(())
+}
+
 /// Removes one setting from the config file.
 ///
 /// The counterpart to `--set`, and the reason it exists is that changing a key
@@ -1163,6 +1182,7 @@ fn assigns(line: &str, name: &str) -> bool {
 /// search order, or in one named by `LUCIDA_CONFIG`. Removing from anywhere else
 /// would report success and change nothing.
 fn remove_config(name: &str) -> Result<()> {
+    refuse_config_writes_under_test()?;
     let name = name.trim();
     validate_setting_name(name)?;
 
@@ -1212,6 +1232,7 @@ fn remove_config(name: &str) -> Result<()> {
 }
 
 fn set_config(name: &str) -> Result<()> {
+    refuse_config_writes_under_test()?;
     let name = name.trim();
     validate_setting_name(name)?;
 
@@ -1321,6 +1342,7 @@ fn set_config(name: &str) -> Result<()> {
 }
 
 fn init_config() -> Result<()> {
+    refuse_config_writes_under_test()?;
     let path = config::preferred_path()
         .context(
             "could not determine a config location: none of XDG_CONFIG_HOME, HOME or \
@@ -2742,6 +2764,25 @@ mod tests {
         vp8l.push(0x2F); // signature
         vp8l.extend_from_slice(&[0xFF, 0xC3, 0x8F, 0x00]);
         assert_eq!(image_dimensions(&vp8l, "image/webp"), Some((1024, 576)));
+    }
+
+    /// None of the config writers can reach a file from a unit test.
+    ///
+    /// `config::preferred_path` reads the real `HOME` even under `cfg(test)`,
+    /// and the file it names is the developer's own `config.env`, which holds
+    /// real provider keys. Each writer must refuse before resolving a path —
+    /// and `set_config` before reading stdin — so a future test that calls one
+    /// cannot overwrite that file.
+    #[test]
+    fn the_config_writers_refuse_under_test() {
+        for (what, result) in [
+            ("init", init_config()),
+            ("set", set_config("GEMINI_API_KEY")),
+            ("remove", remove_config("GEMINI_API_KEY")),
+        ] {
+            let error = result.expect_err(&format!("config --{what} ran under test"));
+            assert!(format!("{error:#}").contains("under cfg(test)"), "{what}: {error:#}");
+        }
     }
 
     /// The last silent drop from the review: `--workflow` ignored an explicit
