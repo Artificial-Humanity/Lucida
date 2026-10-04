@@ -214,8 +214,16 @@ pub enum Registration {
     /// Registered, and its command is this binary.
     Current,
     /// Registered, and its command is something else — the binary was moved, or
-    /// another copy was installed.
+    /// another copy was installed. Only a `Command:` line that was read and
+    /// differs earns this.
     Elsewhere,
+    /// `claude mcp get` succeeded but its output has no `Command:` line and does
+    /// not mention this binary, so what is registered cannot be told. The format
+    /// is Claude Code's to change, and a registration that cannot be read is not
+    /// one that can be judged stale: planning a remove on that guess could drop
+    /// someone's own configuration. This plans the plain add, as before the
+    /// remove existed, which at worst fails on a name that is taken.
+    Unreadable,
 }
 
 fn plan(
@@ -236,11 +244,12 @@ fn plan(
             Registration::Current => steps.push(Step::AlreadyDone {
                 what: "Claude Code already registers this binary".into(),
             }),
-            Registration::Absent | Registration::Elsewhere => steps.push(Step::ClaudeCodeMcp {
-                claude: claude.clone(),
-                scope: scope_flag,
-                replace: registration == Registration::Elsewhere,
-            }),
+            Registration::Absent | Registration::Unreadable | Registration::Elsewhere => steps
+                .push(Step::ClaudeCodeMcp {
+                    claude: claude.clone(),
+                    scope: scope_flag,
+                    replace: registration == Registration::Elsewhere,
+                }),
         }
     }
 
@@ -432,11 +441,14 @@ fn json_kind(value: &Value) -> &'static str {
 /// Run in the project directory under project scope, because `claude mcp get`
 /// resolves local and project servers from the working directory: asked from
 /// anywhere else it answers for a different project than the one `add` will
-/// write to, and plans from the wrong answer.
+/// write to, and plans from the wrong answer. The converse holds for user scope:
+/// asked from wherever the caller happens to be, a local or project registration
+/// of lucida in that directory answers for it and decides a plan for the user
+/// config, so it is asked from the home directory, where none is likely to be.
 fn claude_code_registration(claude: &Path, scope: &Scope, exe: &Path) -> Registration {
     let mut cmd = std::process::Command::new(claude);
     cmd.args(["mcp", "get", "lucida"]);
-    if let Scope::Project(dir) = scope {
+    if let Some(dir) = registration_dir(scope, home()) {
         cmd.current_dir(dir);
     }
     let stdout = cmd
@@ -447,6 +459,16 @@ fn claude_code_registration(claude: &Path, scope: &Scope, exe: &Path) -> Registr
     parse_registration(stdout.as_deref(), exe)
 }
 
+/// The directory `claude mcp get` is run from: the project's under project scope,
+/// the home directory under user scope, and `None` (the caller's own) only when
+/// there is no home to use.
+fn registration_dir(scope: &Scope, home: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        Scope::Project(dir) => Some(dir.clone()),
+        Scope::User => home,
+    }
+}
+
 /// Reads `claude mcp get lucida`'s output; `None` is a command that failed,
 /// which is how it reports a name it does not have.
 ///
@@ -454,8 +476,10 @@ fn claude_code_registration(claude: &Path, scope: &Scope, exe: &Path) -> Registr
 /// calls `/usr/bin/lucida` registered when what is registered is
 /// `/usr/bin/lucida-old`, and setup then reports a stale registration as done. If
 /// the output has no such line — the format is Claude Code's and can change —
-/// this falls back to the search, which is the behaviour before the line was read:
-/// it can miss a stale registration but never invents one.
+/// this falls back to the search, which is the behaviour before the line was read.
+/// A search that finds nothing is `Unreadable`, not `Elsewhere`: only a command
+/// that was read and differs plans a remove, so a format change can miss a stale
+/// registration but never condemns one.
 fn parse_registration(stdout: Option<&str>, exe: &Path) -> Registration {
     let Some(stdout) = stdout else {
         return Registration::Absent;
@@ -467,14 +491,11 @@ fn parse_registration(stdout: Option<&str>, exe: &Path) -> Registration {
         .find_map(|line| line.trim().strip_prefix("Command:"))
         .map(str::trim);
 
-    let current = match command {
-        Some(command) => command == exe,
-        None => stdout.contains(&*exe),
-    };
-    if current {
-        Registration::Current
-    } else {
-        Registration::Elsewhere
+    match command {
+        Some(command) if command == exe => Registration::Current,
+        Some(_) => Registration::Elsewhere,
+        None if stdout.contains(&*exe) => Registration::Current,
+        None => Registration::Unreadable,
     }
 }
 
@@ -525,10 +546,12 @@ fn home() -> Option<PathBuf> {
 ///
 /// The bare name alone was enough until Windows became a release platform. There
 /// `claude` on `PATH` is `claude.exe` or `claude.cmd` depending on how it was
-/// installed, the extensionless file does not exist, and the whole of `setup`
-/// then failed quietly: the Claude Code steps and the skill write were skipped,
-/// and a machine without the desktop app reported "found neither Claude Code nor
-/// the Claude app" while `claude` ran fine in the same terminal.
+/// installed, and the whole of `setup` then failed quietly: the Claude Code steps
+/// and the skill write were skipped, and a machine without the desktop app
+/// reported "found neither Claude Code nor the Claude app" while `claude` ran
+/// fine in the same terminal. The extensionless file can exist there too — npm
+/// writes `claude`, `claude.cmd` and `claude.ps1` side by side, the first a `sh`
+/// script — which is why the extensions are tried before the bare name.
 fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     // Only Windows makes the extension part of finding a program; elsewhere the
@@ -573,13 +596,20 @@ fn candidate_names(program: &str, pathext: Option<&str>) -> Vec<String> {
             .collect();
     }
 
-    // The bare name first: a PATH entry can hold an extensionless shim, and a
-    // file that is there is a better answer than one that might be.
-    let mut names = vec![program.to_string()];
-    names.extend(extensions.into_iter().map(|ext| match ext.strip_prefix('.') {
-        Some(bare) => format!("{program}.{bare}"),
-        None => format!("{program}.{ext}"),
-    }));
+    // The extensions first, the bare name last. npm's cmd-shim puts an
+    // extensionless `#!/bin/sh` script next to `claude.cmd`, and `Command::new`
+    // on that file fails on Windows (error 193, not a valid Win32 application) —
+    // so finding it first would hand `setup` a path it cannot run, for exactly the
+    // install this exists to support. The bare name stays as the last resort for
+    // a PATH entry where it is all there is.
+    let mut names: Vec<String> = extensions
+        .into_iter()
+        .map(|ext| match ext.strip_prefix('.') {
+            Some(bare) => format!("{program}.{bare}"),
+            None => format!("{program}.{ext}"),
+        })
+        .collect();
+    names.push(program.to_string());
     names
 }
 
@@ -760,6 +790,53 @@ mod tests {
             parse_registration(Some("lucida: /usr/bin/lucida mcp"), exe),
             Registration::Current
         );
+        // And when the search finds nothing either, the registration is unreadable,
+        // not elsewhere: only a `Command:` that was read and differs may plan a
+        // remove, or a format change drops a registration someone configured.
+        assert_eq!(
+            parse_registration(Some("lucida: /somewhere/else/lucida mcp"), exe),
+            Registration::Unreadable
+        );
+    }
+
+    /// `claude mcp get` resolves local and project servers from its working
+    /// directory, so the user-scope question must not be asked from wherever the
+    /// caller is standing.
+    #[test]
+    fn the_registration_is_asked_about_from_the_directory_that_scope_means() {
+        let home = Some(PathBuf::from("/home/someone"));
+        let project = PathBuf::from("/work/project");
+
+        assert_eq!(
+            registration_dir(&Scope::User, home.clone()),
+            Some(PathBuf::from("/home/someone"))
+        );
+        assert_eq!(
+            registration_dir(&Scope::Project(project.clone()), home),
+            Some(project)
+        );
+        assert_eq!(registration_dir(&Scope::User, None), None);
+    }
+
+    /// An unreadable registration plans the add and not the remove.
+    #[test]
+    fn an_unreadable_registration_is_never_removed() {
+        let exe = Path::new("/new/place/lucida");
+        let project = scratch("unreadable");
+        let scope = Scope::Project(project.clone());
+
+        let steps = plan(&scope, exe, &claude_only(), Registration::Unreadable).unwrap();
+        match &steps[0] {
+            Step::ClaudeCodeMcp { replace, .. } => {
+                assert!(
+                    !replace,
+                    "a registration that cannot be read is not removed"
+                )
+            }
+            other => panic!("expected a registration step, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&project).ok();
     }
 
     /// The bug: the skill was always rewritten and always counted as work, so a
@@ -938,7 +1015,11 @@ mod tests {
         // Windows, with a real PATHEXT: the shell's own list, case-folded,
         // because the files on disk are lowercase.
         let names = candidate_names("claude", Some(".COM;.EXE;.BAT;.CMD;.VBS"));
-        assert_eq!(names.first().unwrap(), "claude", "the bare name comes first");
+        // The bare name is the last resort: npm leaves an extensionless `sh`
+        // script beside `claude.cmd`, and that one cannot be run on Windows.
+        assert_eq!(names.last().unwrap(), "claude", "the bare name comes last");
+        let position = |name: &str| names.iter().position(|n| n == name).unwrap();
+        assert!(position("claude.cmd") < position("claude"), "{names:?}");
         for expected in ["claude.exe", "claude.cmd", "claude.bat", "claude.vbs"] {
             assert!(names.contains(&expected.to_string()), "{names:?}");
         }

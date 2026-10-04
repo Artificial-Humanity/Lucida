@@ -129,11 +129,13 @@ main() {
     # checksum leaves nothing behind. (Only a SIGKILL skips the trap.)
     mkdir -p "$dir" || die "could not create $dir"
     tmp=""
-    # INT and TERM exit, which runs the EXIT trap: a handler that only cleaned up
-    # would let the script carry on installing after Ctrl-C.
+    # HUP, INT and TERM exit, which runs the EXIT trap: a handler that only cleaned
+    # up would let the script carry on installing after Ctrl-C, and without HUP a
+    # closed terminal leaves the staging directory in the bin directory.
     trap '[ -z "$tmp" ] || rm -rf "$tmp"' EXIT
-    trap 'exit 1' INT TERM
-    tmp=$(mktemp -d "$dir/.lucida-install.XXXXXX") || die "could not create a staging directory in $dir"
+    trap 'exit 1' HUP INT TERM
+    tmp=$(mktemp -d "$dir/.lucida-install.XXXXXX") ||
+        die "could not create a staging directory in $dir. The install directory must be writable; set LUCIDA_INSTALL_DIR to install somewhere else"
 
     curl -fsSL -o "$tmp/$asset" "$base/$asset" ||
         die "could not download $base/$asset. See $RELEASES_PAGE"
