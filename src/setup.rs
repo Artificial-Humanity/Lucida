@@ -46,7 +46,18 @@ pub enum Scope {
 enum Step {
     /// Register the MCP server through Claude Code's own CLI, which owns the
     /// file format so Lucida does not have to know it.
-    ClaudeCodeMcp { scope: &'static str },
+    ///
+    /// `claude` is the path `which` found, not the bare name: `Command` on
+    /// Windows appends only `.exe`, so the name finds nothing when npm installed
+    /// `claude.cmd`, even though detection (which does read `PATHEXT`) said it
+    /// was there. `replace` means lucida is already registered under another
+    /// command, which has to be removed first because `claude mcp add` refuses a
+    /// name that exists.
+    ClaudeCodeMcp {
+        claude: PathBuf,
+        scope: &'static str,
+        replace: bool,
+    },
     /// Merge into the desktop app's config, preserving everything else in it.
     DesktopMcp { path: PathBuf },
     /// Write the skill where a client will find it.
@@ -74,9 +85,19 @@ const DESKTOP_SKILL_NOTE: &str = "\nThe Claude app keeps skills in its own store
 impl Step {
     fn describe(&self) -> String {
         match self {
-            Step::ClaudeCodeMcp { scope } => {
-                format!("Claude Code   register MCP server (--scope {scope})")
-            }
+            Step::ClaudeCodeMcp {
+                scope,
+                replace: false,
+                ..
+            } => format!("Claude Code   register MCP server (--scope {scope})"),
+            Step::ClaudeCodeMcp {
+                scope,
+                replace: true,
+                ..
+            } => format!(
+                "Claude Code   re-register MCP server (--scope {scope}); \
+                 it is registered under a different path"
+            ),
             Step::DesktopMcp { path } => {
                 format!("Claude app    add mcpServers.lucida to {}", tilde(path))
             }
@@ -95,7 +116,11 @@ pub fn run(scope: Scope, dry_run: bool, assume_yes: bool) -> Result<()> {
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
 
     let clients = Clients::detect(&scope);
-    let steps = plan(&scope, &exe, &clients)?;
+    let registration = match &clients.claude_code {
+        Some(claude) => claude_code_registration(claude, &scope, &exe),
+        None => Registration::Absent,
+    };
+    let steps = plan(&scope, &exe, &clients, registration)?;
 
     println!("Lucida  {}", exe.display());
     println!(
@@ -158,7 +183,8 @@ pub fn run(scope: Scope, dry_run: bool, assume_yes: bool) -> Result<()> {
 /// produced on the machine running the tests. `plan` had no tests at all, which
 /// is how it shipped naming a file it never wrote.
 pub struct Clients {
-    pub claude_code: bool,
+    /// The `claude` that `which` found, kept as a path so it is the one that runs.
+    pub claude_code: Option<PathBuf>,
     /// The desktop app's config file, if it is there.
     pub desktop: Option<PathBuf>,
 }
@@ -166,7 +192,7 @@ pub struct Clients {
 impl Clients {
     fn detect(scope: &Scope) -> Self {
         Self {
-            claude_code: which("claude").is_some(),
+            claude_code: which("claude"),
             // The desktop app has no notion of a project, so a project-scope run
             // does not touch it. Saying so beats silently ignoring the flag.
             desktop: match scope {
@@ -177,21 +203,44 @@ impl Clients {
     }
 }
 
-fn plan(scope: &Scope, exe: &Path, clients: &Clients) -> Result<Vec<Step>> {
-    let mut steps = Vec::new();
-    let has_claude_code = clients.claude_code;
+/// What Claude Code's `mcp get lucida` says about this binary.
+///
+/// A parameter of `plan`, like `Clients`, because the answer comes from running
+/// another program and the three cases are exactly what needed testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// No server called lucida.
+    Absent,
+    /// Registered, and its command is this binary.
+    Current,
+    /// Registered, and its command is something else — the binary was moved, or
+    /// another copy was installed.
+    Elsewhere,
+}
 
-    if has_claude_code {
+fn plan(
+    scope: &Scope,
+    exe: &Path,
+    clients: &Clients,
+    registration: Registration,
+) -> Result<Vec<Step>> {
+    let mut steps = Vec::new();
+    let has_claude_code = clients.claude_code.is_some();
+
+    if let Some(claude) = &clients.claude_code {
         let scope_flag = match scope {
             Scope::User => "user",
             Scope::Project(_) => "project",
         };
-        if claude_code_has_lucida(exe) {
-            steps.push(Step::AlreadyDone {
+        match registration {
+            Registration::Current => steps.push(Step::AlreadyDone {
                 what: "Claude Code already registers this binary".into(),
-            });
-        } else {
-            steps.push(Step::ClaudeCodeMcp { scope: scope_flag });
+            }),
+            Registration::Absent | Registration::Elsewhere => steps.push(Step::ClaudeCodeMcp {
+                claude: claude.clone(),
+                scope: scope_flag,
+                replace: registration == Registration::Elsewhere,
+            }),
         }
     }
 
@@ -215,10 +264,20 @@ fn plan(scope: &Scope, exe: &Path, clients: &Clients) -> Result<Vec<Step>> {
     // no Claude Code CLI — a perfectly ordinary machine — setup finished by
     // naming a file it had never written, and the instruction it gave you was to
     // go and upload that file.
+    //
+    // Skipped when the file already holds exactly this build's text. It used to
+    // be planned unconditionally, which counted as work every time and so made
+    // "Nothing to do." unreachable: a second run on a finished machine asked for
+    // confirmation to rewrite a file with the bytes it already had.
     if has_claude_code || desktop.is_some() {
-        steps.push(Step::Skill {
-            path: skill_path(scope),
-        });
+        let path = skill_path(scope);
+        if std::fs::read_to_string(&path).is_ok_and(|text| text == skill::SKILL) {
+            steps.push(Step::AlreadyDone {
+                what: format!("the skill at {} is up to date", tilde(&path)),
+            });
+        } else {
+            steps.push(Step::Skill { path });
+        }
     }
 
     if steps.is_empty() {
@@ -236,12 +295,40 @@ fn apply(step: &Step, exe: &Path, scope: &Scope) -> Result<()> {
     match step {
         Step::AlreadyDone { .. } => Ok(()),
 
-        Step::ClaudeCodeMcp { scope: flag } => {
+        Step::ClaudeCodeMcp {
+            claude,
+            scope: flag,
+            replace,
+        } => {
             // Claude Code's own CLI writes it, because the tool that owns a
             // config format should be the one to edit it — the same reasoning
             // that has `lucida update` run cargo rather than overwrite a
             // cargo-managed binary.
-            let mut cmd = std::process::Command::new("claude");
+            if *replace {
+                let mut remove = std::process::Command::new(claude);
+                remove.args(["mcp", "remove", "--scope", flag, "lucida"]);
+                if let Scope::Project(dir) = scope {
+                    remove.current_dir(dir);
+                }
+                // Not fatal. `mcp get` reports the server from whichever scope
+                // holds it, so it can be registered in a scope other than the one
+                // being set up, and removing from this one then finds nothing.
+                // The add that follows is the real test: it succeeds unless the
+                // name is genuinely still taken in this scope, and says so itself.
+                match remove.status() {
+                    Ok(status) if status.success() => {
+                        println!("  removed the old registration from Claude Code");
+                    }
+                    Ok(status) => println!(
+                        "  `claude mcp remove` exited with {status}; trying to register anyway"
+                    ),
+                    Err(error) => {
+                        return Err(error).context("running `claude mcp remove`");
+                    }
+                }
+            }
+
+            let mut cmd = std::process::Command::new(claude);
             cmd.args(["mcp", "add", "--scope", flag, "lucida", "--"]);
             cmd.arg(exe).arg("mcp");
 
@@ -340,13 +427,55 @@ fn json_kind(value: &Value) -> &'static str {
     }
 }
 
-fn claude_code_has_lucida(exe: &Path) -> bool {
-    std::process::Command::new("claude")
-        .args(["mcp", "get", "lucida"])
+/// Asks `claude` what it has registered as lucida.
+///
+/// Run in the project directory under project scope, because `claude mcp get`
+/// resolves local and project servers from the working directory: asked from
+/// anywhere else it answers for a different project than the one `add` will
+/// write to, and plans from the wrong answer.
+fn claude_code_registration(claude: &Path, scope: &Scope, exe: &Path) -> Registration {
+    let mut cmd = std::process::Command::new(claude);
+    cmd.args(["mcp", "get", "lucida"]);
+    if let Scope::Project(dir) = scope {
+        cmd.current_dir(dir);
+    }
+    let stdout = cmd
         .output()
         .ok()
         .filter(|out| out.status.success())
-        .is_some_and(|out| String::from_utf8_lossy(&out.stdout).contains(&*exe.to_string_lossy()))
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+    parse_registration(stdout.as_deref(), exe)
+}
+
+/// Reads `claude mcp get lucida`'s output; `None` is a command that failed,
+/// which is how it reports a name it does not have.
+///
+/// The `Command:` line is compared whole, not searched for the path. A search
+/// calls `/usr/bin/lucida` registered when what is registered is
+/// `/usr/bin/lucida-old`, and setup then reports a stale registration as done. If
+/// the output has no such line — the format is Claude Code's and can change —
+/// this falls back to the search, which is the behaviour before the line was read:
+/// it can miss a stale registration but never invents one.
+fn parse_registration(stdout: Option<&str>, exe: &Path) -> Registration {
+    let Some(stdout) = stdout else {
+        return Registration::Absent;
+    };
+    let exe = exe.to_string_lossy();
+
+    let command = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Command:"))
+        .map(str::trim);
+
+    let current = match command {
+        Some(command) => command == exe,
+        None => stdout.contains(&*exe),
+    };
+    if current {
+        Registration::Current
+    } else {
+        Registration::Elsewhere
+    }
 }
 
 fn desktop_has_lucida(path: &Path, exe: &Path) -> Result<bool> {
@@ -509,6 +638,9 @@ mod tests {
         // A path that does not exist, so `desktop_has_lucida` answers false
         // without this test depending on anything installed here.
         let config = PathBuf::from("/nonexistent/claude_desktop_config.json");
+        // A project that has no skill yet, so the answer does not depend on
+        // whatever skill file the machine running this already has.
+        let project = scratch("skill-either-client");
 
         let cases = [
             (true, true, true, "both clients"),
@@ -519,10 +651,15 @@ mod tests {
 
         for (claude_code, desktop, expect_skill, what) in cases {
             let clients = Clients {
-                claude_code,
+                claude_code: claude_code.then(|| PathBuf::from("claude")),
                 desktop: desktop.then(|| config.clone()),
             };
-            let planned = plan(&Scope::User, exe, &clients);
+            let planned = plan(
+                &Scope::Project(project.clone()),
+                exe,
+                &clients,
+                Registration::Absent,
+            );
 
             if !claude_code && !desktop {
                 assert!(planned.is_err(), "{what}: must refuse, not plan nothing");
@@ -533,6 +670,125 @@ mod tests {
             let has_skill = steps.iter().any(|s| matches!(s, Step::Skill { .. }));
             assert_eq!(has_skill, expect_skill, "{what}: skill step wrong");
         }
+
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    /// A fresh, empty directory for one test, named by the test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lucida-setup-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn claude_only() -> Clients {
+        Clients {
+            claude_code: Some(PathBuf::from("/opt/claude/claude.cmd")),
+            desktop: None,
+        }
+    }
+
+    /// The bug: setup planned `claude mcp add` for a binary that had moved, and
+    /// `add` refuses a name that exists, so the error stopped setup before the
+    /// desktop and skill steps ran. A registration under another command has to
+    /// be planned as remove-then-add, and the claude that runs is the one found.
+    #[test]
+    fn a_registration_under_another_path_is_replaced_not_added_over() {
+        let exe = Path::new("/new/place/lucida");
+        let project = scratch("replace");
+        let scope = Scope::Project(project.clone());
+
+        let planned = |registration| plan(&scope, exe, &claude_only(), registration).unwrap();
+
+        let steps = planned(Registration::Elsewhere);
+        match &steps[0] {
+            Step::ClaudeCodeMcp {
+                claude,
+                scope,
+                replace,
+            } => {
+                assert_eq!(claude, Path::new("/opt/claude/claude.cmd"));
+                assert_eq!(*scope, "project");
+                assert!(*replace, "a moved binary must be removed before the add");
+            }
+            other => panic!("expected a registration step, got {other:?}"),
+        }
+
+        // Nothing registered is a plain add, and the right registration is done.
+        match &planned(Registration::Absent)[0] {
+            Step::ClaudeCodeMcp { replace, .. } => assert!(!replace),
+            other => panic!("expected a registration step, got {other:?}"),
+        }
+        assert!(matches!(
+            planned(Registration::Current)[0],
+            Step::AlreadyDone { .. }
+        ));
+
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    /// What `claude mcp get lucida` printed decides which of the three it is.
+    #[test]
+    fn the_registered_command_is_compared_not_searched_for() {
+        let exe = Path::new("/usr/bin/lucida");
+        let get = |command: &str| {
+            format!(
+                "lucida:\n  Scope: User config (available in all your projects)\n  \
+                 Status: Connected\n  Type: stdio\n  Command: {command}\n  Args: mcp\n"
+            )
+        };
+
+        assert_eq!(parse_registration(None, exe), Registration::Absent);
+        assert_eq!(
+            parse_registration(Some(&get("/usr/bin/lucida")), exe),
+            Registration::Current
+        );
+        assert_eq!(
+            parse_registration(Some(&get("/old/place/lucida")), exe),
+            Registration::Elsewhere
+        );
+        // A path that merely starts with ours is another binary, and a search for
+        // the substring would call it this one.
+        assert_eq!(
+            parse_registration(Some(&get("/usr/bin/lucida-old")), exe),
+            Registration::Elsewhere
+        );
+        // Output with no `Command:` line falls back to the search, so a format
+        // change cannot turn a good registration into a replace.
+        assert_eq!(
+            parse_registration(Some("lucida: /usr/bin/lucida mcp"), exe),
+            Registration::Current
+        );
+    }
+
+    /// The bug: the skill was always rewritten and always counted as work, so a
+    /// finished machine never reached "Nothing to do.".
+    #[test]
+    fn a_skill_that_is_already_current_is_not_work() {
+        let project = scratch("skill-current");
+        let scope = Scope::Project(project.clone());
+        let exe = Path::new("/opt/lucida");
+        let is_work = |steps: &[Step]| steps.iter().any(Step::is_work);
+
+        // Absent: written.
+        let steps = plan(&scope, exe, &claude_only(), Registration::Current).unwrap();
+        assert!(is_work(&steps), "{steps:?}");
+
+        // Present and identical: reported, and nothing is left to do.
+        let path = skill_path(&scope);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, skill::SKILL).unwrap();
+        let steps = plan(&scope, exe, &claude_only(), Registration::Current).unwrap();
+        assert!(!is_work(&steps), "{steps:?}");
+        assert!(steps.iter().any(|s| s.describe().contains("up to date")));
+
+        // Present and different: rewritten.
+        std::fs::write(&path, "an older skill\n").unwrap();
+        let steps = plan(&scope, exe, &claude_only(), Registration::Current).unwrap();
+        assert!(is_work(&steps), "{steps:?}");
+
+        std::fs::remove_dir_all(&project).ok();
     }
 
     /// The desktop app has no notion of a project, so a project-scope run must
