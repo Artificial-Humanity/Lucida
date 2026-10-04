@@ -261,16 +261,7 @@ impl VideoProvider for Client {
             .send()
             .context("starting the Kling render")?;
 
-        let status = response.status();
-        let payload: Value = response.json().context("parsing the task response")?;
-
-        // Kling answers 200 with a non-zero `code` for some failures, so the
-        // HTTP status alone is not the verdict — a check on `status.is_success()`
-        // by itself would read a refusal as a submission.
-        if !status.is_success() || payload["code"].as_i64().unwrap_or(0) != 0 {
-            bail!("{}", explain_error(status.as_u16(), &payload.to_string()));
-        }
-
+        let payload = task_payload(response, true)?;
         payload["data"]["task_id"]
             .as_str()
             .map(str::to_string)
@@ -287,12 +278,7 @@ impl VideoProvider for Client {
         })
         .context("polling the Kling task")?;
 
-        let status = response.status();
-        let payload: Value = response.json().context("parsing the task response")?;
-        if !status.is_success() || payload["code"].as_i64().unwrap_or(0) != 0 {
-            bail!("{}", explain_error(status.as_u16(), &payload.to_string()));
-        }
-
+        let payload = task_payload(response, false)?;
         let task = &payload["data"];
         match task["task_status"].as_str().unwrap_or_default() {
             "succeed" => {
@@ -331,7 +317,74 @@ impl Client {
             );
         }
 
-        Ok(response.bytes().context("reading video bytes")?.to_vec())
+        // The body can fail after the status line arrived: the same billed
+        // render, so the same advice as a send that failed.
+        Ok(response
+            .bytes()
+            .with_context(|| {
+                format!(
+                    "reading the finished video. The render was billed; fetch \
+                     it by hand while the URL lasts:\n\n  {url}"
+                )
+            })?
+            .to_vec())
+    }
+}
+
+/// Reads a task answer: the body as text, then the status, and only then JSON.
+///
+/// Parsing first made a gateway's HTML error page read as "expected value at
+/// line 1" — no status, and nothing to say whether a start had reached Kling.
+/// Kling also answers 200 with a non-zero `code` for some failures, so the HTTP
+/// status alone is not the verdict: a check on `is_success()` by itself would
+/// read a refusal as a submission.
+///
+/// `submitting` is the start, the one call that bills. A 4xx or a non-zero
+/// `code` is Kling saying no, so nothing was queued; a 5xx, or an answer that is
+/// not JSON, is silent on it, and the error says so rather than leaving a user
+/// to retry — and pay — twice.
+fn task_payload(response: reqwest::blocking::Response, submitting: bool) -> Result<Value> {
+    let status = response.status();
+    let text = response
+        .text()
+        .with_context(|| format!("reading the task response (HTTP {})", status.as_u16()))?;
+    let parsed: Option<Value> = serde_json::from_str(&text).ok();
+
+    let refused = parsed
+        .as_ref()
+        .is_some_and(|payload| payload["code"].as_i64().unwrap_or(0) != 0);
+    if let Some(payload) = &parsed
+        && status.is_success()
+        && !refused
+    {
+        return Ok(payload.clone());
+    }
+
+    // Kling's own refusal is definite; everything else is not.
+    let definite = parsed.is_some() && (status.is_client_error() || refused);
+    let shown = if parsed.is_some() { text.clone() } else { snippet(&text) };
+    let message = if status.is_success() && parsed.is_none() {
+        format!("Kling answered HTTP {} with a body that is not JSON: {shown}", status.as_u16())
+    } else {
+        explain_error(status.as_u16(), &shown)
+    };
+    if submitting && !definite {
+        bail!(
+            "{message}\n\nThis answer does not say whether the job was queued. Check \
+             the Kling console before starting it again, or the render may be paid for twice."
+        );
+    }
+    bail!("{message}")
+}
+
+/// The start of a body that is not JSON — enough to recognise a gateway's page
+/// without printing all of it.
+fn snippet(text: &str) -> String {
+    const LIMIT: usize = 300;
+    let text = text.trim();
+    match text.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
     }
 }
 
@@ -354,7 +407,7 @@ fn explain_error(status: u16, body: &str) -> String {
             "Kling is rate limiting or the quota is exhausted: {message}\n\n\
              `lucida models --provider kling` reports the remaining balance."
         ),
-        _ => format!("Kling refused the request: {message}"),
+        _ => format!("Kling refused the request (HTTP {status}): {message}"),
     };
 
     if let Some(id) = payload["request_id"].as_str() {
@@ -552,6 +605,89 @@ mod tests {
             error.downcast_ref::<crate::video::TerminalFailure>().is_none(),
             "an error response retired the operation: {error:#}"
         );
+        server.finish();
+    }
+
+    fn text_to_video() -> VideoRequest {
+        VideoRequest {
+            prompt: "a fox running".into(),
+            model: DEFAULT_MODEL.into(),
+            duration: Some(5),
+            ..Default::default()
+        }
+    }
+
+    /// A gateway's HTML error page used to reach the JSON parser first, so the
+    /// user read "expected value at line 1" — no status, and on a start no hint
+    /// whether the job had been queued. The status is read before the body is
+    /// interpreted, and a start whose answer cannot settle the question says so.
+    #[test]
+    fn a_gateway_error_page_names_its_status_on_start_and_on_poll() {
+        let server = serve(vec![Reply::status(502, "<html><body>Bad Gateway</body></html>")]);
+        let error = wired(&server).start(&text_to_video()).expect_err("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("502"), "{message}");
+        assert!(message.contains("Bad Gateway"), "the page itself is the evidence: {message}");
+        assert!(!message.contains("expected value"), "{message}");
+        assert!(message.contains("queued"), "a start must say the job may exist: {message}");
+        server.finish();
+
+        // A poll is retried on a 5xx, and `Retry-After: 0` keeps that instant;
+        // it is the last of the three answers the caller is left holding.
+        let page = || {
+            Reply::status(502, "<html><body>Bad Gateway</body></html>").with_header("Retry-After", "0")
+        };
+        let server = serve(vec![page(), page(), page()]);
+        let error = wired(&server).poll("915468728228253726").err().expect("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("502"), "{message}");
+        assert!(!message.contains("expected value"), "{message}");
+        assert!(
+            error.downcast_ref::<crate::video::TerminalFailure>().is_none(),
+            "a gateway error retired the operation: {message}"
+        );
+        server.finish();
+    }
+
+    /// A 4xx or a non-zero `code` is Kling saying no, so the job was not queued
+    /// and the message must not suggest it might have been.
+    #[test]
+    fn a_refused_start_does_not_claim_the_job_may_exist() {
+        let server = serve(vec![Reply::status(400, r#"{"code":1201,"message":"bad parameter"}"#)]);
+        let error = wired(&server).start(&text_to_video()).expect_err("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("400") && message.contains("bad parameter"), "{message}");
+        assert!(!message.contains("queued"), "{message}");
+        server.finish();
+    }
+
+    /// A 200 that is not JSON is as ambiguous as a 502 — the status is success.
+    #[test]
+    fn a_success_status_with_a_body_that_is_not_json_is_reported_as_such() {
+        let server = serve(vec![Reply::bytes("text/html", b"<html>maintenance</html>")]);
+        let error = wired(&server).start(&text_to_video()).expect_err("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("200") && message.contains("not JSON"), "{message}");
+        assert!(message.contains("queued"), "{message}");
+        server.finish();
+    }
+
+    /// The download's send failing says the render was billed and where to
+    /// fetch it; the body read failing a moment later is the same situation and
+    /// used to say only "reading video bytes".
+    #[test]
+    fn a_download_that_dies_mid_body_still_says_where_to_fetch_it() {
+        let server = serve(vec![
+            Reply::json(
+                r#"{"code":0,"data":{"task_status":"succeed","task_result":{"videos":[{"url":"{{server}}/cdn/out.mp4"}]}}}"#,
+            ),
+            Reply::bytes("video/mp4", b"mp4-by").truncated(1000),
+        ]);
+        let url = format!("{}/cdn/out.mp4", server.url());
+        let error = wired(&server).poll("915468728228253726").err().expect("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("The render was billed"), "{message}");
+        assert!(message.contains("fetch it by hand") && message.contains(&url), "{message}");
         server.finish();
     }
 }

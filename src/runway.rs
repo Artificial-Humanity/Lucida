@@ -421,6 +421,12 @@ fn nearest_ratio(requested: Option<Aspect>, accepted: &[&str]) -> String {
 impl VideoProvider for Client {
     fn start(&self, req: &VideoRequest) -> Result<String> {
         let model = resolve_model(&req.model);
+
+        // The front ends check this before a client exists; checked again here,
+        // as `generate` does, so that a fronted model is refused whichever of
+        // them forgot to ask — before a request that bills.
+        capabilities(&model).check(req)?;
+
         let (endpoint, body) = self.body(req, &model)?;
 
         // Deliberately not retried (see `retry`): this is the call that starts
@@ -626,10 +632,7 @@ impl Client {
             self.http.get(url)
         })
         .with_context(|| {
-            format!(
-                "downloading the finished {what}. The render was billed; its URL \
-                 expires, so fetch it by hand while it lasts:\n\n  {url}"
-            )
+            format!("downloading the finished {what}. {}", recovery(url))
         })?;
 
         if !response.status().is_success() {
@@ -640,8 +643,21 @@ impl Client {
             );
         }
 
-        Ok(response.bytes().with_context(|| format!("reading {what} bytes"))?.to_vec())
+        // The body can fail after the status line arrived, and that is the same
+        // billed render with the same expiring URL — it gets the same advice.
+        Ok(response
+            .bytes()
+            .with_context(|| format!("reading the finished {what}. {}", recovery(url)))?
+            .to_vec())
     }
+}
+
+/// What to do when a render finished and billed but its file did not arrive.
+fn recovery(url: &str) -> String {
+    format!(
+        "The render was billed; its URL expires, so fetch it by hand while it \
+         lasts:\n\n  {url}"
+    )
 }
 
 /// Turns Runway's own error shape into something that names the fix.
@@ -1246,5 +1262,56 @@ mod tests {
         assert!(format!("{error:#}").contains("content moderation"), "{error:#}");
         assert!(entries.is_empty(), "a failed task was counted as abandoned: {entries:?}");
         server.finish();
+    }
+
+    /// See the matching Kling test: a body that dies after the status line
+    /// loses the billed-render recovery text unless the read carries it too.
+    /// An image render's download failure also stays an `abandoned` spend.
+    #[test]
+    fn a_download_that_dies_mid_body_still_says_where_to_fetch_it() {
+        let succeeded = r#"{"status":"SUCCEEDED","output":["{{server}}/signed/out.mp4"]}"#;
+        let server = serve(vec![
+            Reply::json(succeeded),
+            Reply::bytes("video/mp4", b"mp4-by").truncated(1000),
+        ]);
+        let url = format!("{}/signed/out.mp4", server.url());
+        let error = wired(&server)
+            .poll("4f1a2b3c-0000-4000-8000-000000000000")
+            .err()
+            .expect("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("The render was billed"), "{message}");
+        assert!(message.contains("fetch it by hand") && message.contains(&url), "{message}");
+        server.finish();
+
+        let server = serve(vec![
+            Reply::json(r#"{"id":"img-9"}"#),
+            Reply::json(succeeded),
+            Reply::bytes("image/png", b"png-by").truncated(1000),
+        ]);
+        let (error, entries) = billed_entries(&wired(&server), &lighthouse());
+        let message = format!("{error:#}");
+        assert!(message.contains("fetch it by hand"), "{message}");
+        assert_eq!(entries.len(), 1, "the marker was lost: {entries:?}");
+        assert_eq!(entries[0]["handle"], "img-9");
+        server.finish();
+    }
+
+    /// Image `generate` re-runs its capability check so a direct caller cannot
+    /// send what the front ends refuse; video `start` does the same, so a
+    /// fronted model is refused whichever front end forgot to ask — and before
+    /// any request leaves.
+    #[test]
+    fn video_start_refuses_a_fronted_model_before_any_request() {
+        let server = serve(vec![]);
+        let request = VideoRequest {
+            prompt: "a fox running".into(),
+            model: "veo3.1".into(),
+            ..Default::default()
+        };
+        let error = wired(&server).start(&request).expect_err("must be refused");
+        assert!(error.downcast_ref::<crate::out::Refused>().is_some(), "{error:#}");
+        assert!(format!("{error:#}").contains("veo3.1"), "{error:#}");
+        assert!(server.finish().is_empty(), "a refused start sent a request");
     }
 }

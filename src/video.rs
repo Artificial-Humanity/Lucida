@@ -239,8 +239,8 @@ impl Client {
     /// Digs the video out of a completed operation.
     ///
     /// The payload nests differently depending on model and API version, and it
-    /// may carry either a URL or inline bytes, so this searches the tree for
-    /// whichever turns up rather than hardcoding one path.
+    /// may carry either a URL or inline bytes, so this reads the documented
+    /// path and otherwise searches the tree for whichever turns up.
     pub(crate) fn fetch_video(&self, done: &Value) -> Result<Vec<u8>> {
         if let Some(encoded) = find_key(done, "bytesBase64Encoded").and_then(|v| v.as_str()) {
             return STANDARD
@@ -248,8 +248,7 @@ impl Client {
                 .context("decoding inline video bytes");
         }
 
-        let uri = find_key(done, "uri")
-            .and_then(|v| v.as_str())
+        let uri = video_uri(done)
             .ok_or_else(|| {
                 let message = format!(
                     "completed operation contained neither a video URI nor inline bytes: {done}"
@@ -315,6 +314,20 @@ fn was_filtered(done: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|reasons| !reasons.is_empty());
     counted || explained
+}
+
+/// Where a finished operation says the video is.
+///
+/// The documented location first — `response.generateVideoResponse.
+/// generatedSamples[0].video.uri`, the shape every recorded response here has.
+/// The search is only the fallback for a payload that nests differently: it
+/// walks keys alphabetically, so on its own it would take the first `uri`
+/// anywhere in the operation, and a metadata field sorting before `response`
+/// would be downloaded in place of the video.
+fn video_uri(done: &Value) -> Option<&str> {
+    done.pointer("/response/generateVideoResponse/generatedSamples/0/video/uri")
+        .and_then(Value::as_str)
+        .or_else(|| find_key(done, "uri").and_then(Value::as_str))
 }
 
 /// Depth-first search for the first value under `target`, at any depth.
@@ -498,5 +511,32 @@ mod tests {
             .expect("must be an error");
         assert!(!is_terminal(&error), "a 403 says nothing about the file: {error:#}");
         server.finish();
+    }
+
+    /// `find_key` walks keys alphabetically, so an unrelated `uri` under a key
+    /// that sorts before `response` — operation metadata, say — won over the
+    /// video's own. The documented path is read first.
+    #[test]
+    fn the_documented_video_path_wins_over_an_earlier_uri_elsewhere() {
+        let done: Value = serde_json::from_str(
+            r#"{"done":true,
+                "metadata":{"uri":"https://example.invalid/not-the-video"},
+                "response":{"generateVideoResponse":{
+                    "generatedSamples":[{"video":{"uri":"https://example.invalid/the-video"}}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(video_uri(&done), Some("https://example.invalid/the-video"));
+    }
+
+    /// The payload nests differently by model and API version, so a shape the
+    /// documented path does not describe still finds its `uri`.
+    #[test]
+    fn a_video_uri_off_the_documented_path_is_still_found() {
+        let done: Value = serde_json::from_str(
+            r#"{"done":true,"response":{"videos":[{"uri":"https://example.invalid/other-shape"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(video_uri(&done), Some("https://example.invalid/other-shape"));
+        assert_eq!(video_uri(&serde_json::json!({"done":true})), None);
     }
 }
