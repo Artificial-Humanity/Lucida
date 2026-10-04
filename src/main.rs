@@ -1749,8 +1749,8 @@ fn execute(
 /// Runs `render` once per image and collects what it returns.
 ///
 /// A failure at image k is an error that names images 1..k-1, because those were
-/// written and billed and nothing else would ever print their paths: stdout is
-/// only reached on success.
+/// written — and, on a paid provider, billed — and nothing else would ever print
+/// their paths: stdout is only reached on success.
 fn render_batch(
     out: &Path,
     count: usize,
@@ -2638,8 +2638,9 @@ mod tests {
         assert!(error.downcast_ref::<video::TerminalFailure>().is_some(), "retired renders must stay retirable");
     }
 
-    /// Images 1..k-1 of a batch that failed at k were written and billed, and
-    /// the error is the only thing that reaches the caller.
+    /// Images 1..k-1 of a batch that failed at k were written (and, on a paid
+    /// provider, billed), and the error is the only thing that reaches the
+    /// caller.
     #[test]
     fn a_batch_that_fails_partway_reports_what_it_wrote() {
         let mut calls = 0;

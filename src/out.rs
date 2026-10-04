@@ -53,7 +53,8 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-/// The files a batch had already written, and paid for, when it failed.
+/// The files a batch had already written — and, on a paid provider, paid
+/// for — when it failed.
 ///
 /// Attached with `.context(...)` so the error keeps its kind — a refusal stays
 /// a refusal, and [`code_for`] still sees through it — and recognised by
@@ -67,7 +68,8 @@ impl std::fmt::Display for Written {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} image(s) were written and billed before this failed:",
+            "{} image(s) were written (and, on a paid provider, billed) before \
+             this failed:",
             self.0.len()
         )?;
         for path in &self.0 {
@@ -180,6 +182,9 @@ mod tests {
         let prose = document["error"].as_str().unwrap();
         assert!(prose.contains("a-1.png") && prose.contains("a-2.png"), "{prose}");
         assert!(prose.contains("over budget"), "the cause was lost: {prose}");
+        // A ComfyUI batch writes the same sentence and bills nothing, so the
+        // charge is stated as conditional rather than as fact.
+        assert!(prose.contains("on a paid provider, billed"), "{prose}");
 
         let plain = error_document(&anyhow::anyhow!("boom"), ERROR);
         assert!(plain.get("written").is_none(), "an ordinary failure grew a field");
