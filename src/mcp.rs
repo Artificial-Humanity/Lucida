@@ -64,7 +64,8 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// unbounded, so a runaway client's hundred calls all still run, four at a
 /// time; this comment used to claim the pool bounded what such a client could
 /// spend, and it never did. What limits spend is the budget `spend` enforces
-/// on every render, and — once the client is gone — the hang-up handling at
+/// on every render — when `LUCIDA_BUDGET` is set; without one nothing here
+/// limits it at all — and, once the client is gone, the hang-up handling at
 /// the end of [`run`], which drops whatever is still queued.
 const WORKERS: usize = 4;
 
