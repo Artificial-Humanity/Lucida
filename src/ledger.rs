@@ -52,6 +52,10 @@ use std::path::PathBuf;
 /// anyone will read, and small enough to be beneath notice on any disk.
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
+/// The smallest share of the lines a prune must drop to be worth rewriting the
+/// file for, as a divisor: one in four.
+const MIN_PRUNE_SHARE: usize = 4;
+
 /// What a record is about.
 pub const IMAGE: &str = "image";
 pub const VIDEO: &str = "video";
@@ -183,17 +187,16 @@ fn done_entry(provider: &str, operation: &str, path: &str) -> Value {
 ///
 /// Without this a render that failed or expired stayed in `lucida ops` forever,
 /// listed as waiting to be collected and answering every `check` with the same
-/// error. The caller decides what counts as final — see
-/// [`note_failure`] — and this only writes it down.
-pub fn video_failed(provider: &str, operation: &str, error: &str) {
-    record(json!({
+/// error. [`note_failure`] decides what counts as final; this is the record.
+fn failed_entry(provider: &str, operation: &str, error: &str) -> Value {
+    json!({
         "at": clock::now(),
         "kind": VIDEO,
         "status": FAILED,
         "provider": provider,
         "operation": operation,
         "error": summarise(error),
-    }));
+    })
 }
 
 /// Retires `operation` if `error` is a failure the provider reported as final.
@@ -202,9 +205,17 @@ pub fn video_failed(provider: &str, operation: &str, error: &str) {
 /// deadline says nothing about the render, which may well still finish, and
 /// retiring it on one would hide a paid render that `lucida ops` exists to find.
 pub fn note_failure(provider: &str, operation: &str, error: &anyhow::Error) {
-    if let Some(failure) = error.downcast_ref::<crate::video::TerminalFailure>() {
-        video_failed(provider, operation, &failure.0);
+    if let Some(entry) = terminal_entry(provider, operation, error) {
+        record(entry);
     }
+}
+
+/// The `failed` record for `error`, or `None` when the error is not final.
+/// Split from [`note_failure`] so the decision can be tested without writing to
+/// the machine's real ledger.
+fn terminal_entry(provider: &str, operation: &str, error: &anyhow::Error) -> Option<Value> {
+    let failure = error.downcast_ref::<crate::video::TerminalFailure>()?;
+    Some(failed_entry(provider, operation, &failure.0))
 }
 
 /// The first line of an error, bounded: the ledger is read line by line and
@@ -289,8 +300,11 @@ fn append(path: &std::path::Path, entry: &Value) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Checked before the write rather than after, so the file is never larger
-    // than the cap plus one line.
+    // Checked before the write rather than after, so a prune that does free
+    // space frees it before this record lands. The cap is a target, not a
+    // guarantee: what may be dropped is limited to what the spend window and
+    // outstanding renders do not need, and when that is little the file stays
+    // over the cap (see `prune`).
     if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_BYTES) {
         prune(path);
     }
@@ -348,6 +362,14 @@ fn ends_mid_line(file: &mut std::fs::File) -> bool {
 /// still waiting to be collected. Now it drops, oldest first, only what neither
 /// of those needs; if that is less than half, or nothing, the file stays over
 /// the cap, which is best-effort as it always was.
+///
+/// A prune that could drop only a sliver is skipped too: [`append`] calls this
+/// on every write once the file is over the cap, so one that rewrote the whole
+/// file to shed a line or two would turn every later append into a full read,
+/// parse and atomic rewrite — and each rewrite is a window in which a concurrent
+/// append, perhaps a `started` operation id, is lost. A rewrite has to be worth
+/// that, so it happens only when it drops at least [`MIN_PRUNE_SHARE`] of the
+/// lines; until then the file simply runs over the cap.
 ///
 /// Written atomically, and best-effort: a concurrent append during the rewrite
 /// could be lost, which is a real race and an acceptable one — the alternative
@@ -414,7 +436,9 @@ fn prune_at(path: &std::path::Path, now: i64) {
         }
     }
 
-    if !drop.contains(&true) {
+    // Counted after the un-drop pass above, which can only shrink it.
+    let dropping = drop.iter().filter(|d| **d).count();
+    if dropping == 0 || dropping < lines.len() / MIN_PRUNE_SHARE {
         return;
     }
 
@@ -580,6 +604,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// What `note_failure` writes, against a temporary file: nothing for an error
+    /// that is not final, and exactly one record that retires the operation for
+    /// one that is — including when `check` has wrapped it in context on the way
+    /// up, as `poll` does.
+    #[test]
+    fn only_a_terminal_error_leaves_a_failed_record() {
+        use anyhow::Context;
+        let note = |path: &std::path::Path, error: &anyhow::Error| {
+            if let Some(entry) = terminal_entry("runway", "op-1", error) {
+                append(path, &entry).unwrap();
+            }
+        };
+
+        let path = temp();
+        let transport = anyhow::anyhow!("connection reset").context("polling the Runway task");
+        let deadline = anyhow::anyhow!("gave up after 15 minutes");
+        note(&path, &transport);
+        note(&path, &deadline);
+        assert!(read(&path).is_empty(), "a non-final error wrote a record");
+
+        let terminal: anyhow::Error = Err::<(), _>(crate::video::terminal("the render failed: moderation"))
+            .context("polling the render")
+            .unwrap_err();
+        note(&path, &terminal);
+
+        let written = read(&path);
+        assert_eq!(written.len(), 1, "{written:?}");
+        assert_eq!(written[0]["status"], FAILED);
+        assert_eq!(written[0]["provider"], "runway");
+        assert_eq!(written[0]["operation"], "op-1");
+        assert_eq!(written[0]["error"], "the render failed: moderation");
+
+        let open = outstanding_from(vec![
+            json!({ "kind": VIDEO, "status": STARTED, "operation": "op-1" }),
+            written[0].clone(),
+        ]);
+        assert!(open.is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
     /// The line is one `write`, and so lands whole however many writers there
     /// are. `writeln!` of the value streamed it token by token: four MCP workers
     /// finishing together spliced their lines into each other, both failed to
@@ -739,6 +803,35 @@ mod tests {
         let now = 10 * DAY;
         let entries: Vec<Value> = (0..6).map(|n| json!({ "at": now - n, "n": n })).collect();
         assert_eq!(pruned(&entries, now).len(), 6);
+    }
+
+    /// Over the cap with almost nothing old enough to drop, `append` calls this on
+    /// every write. A rewrite for one line would make each of those appends a
+    /// full read-parse-rewrite and a chance to lose a concurrent record, so the
+    /// file is left exactly as it is until a prune is worth doing.
+    #[test]
+    fn a_prune_that_could_drop_one_line_leaves_the_file_untouched() {
+        let now = 10 * DAY;
+        let path = temp();
+        let mut entries = vec![json!({ "at": now - 5 * DAY, "n": 0 })];
+        entries.extend((1..12).map(|n| json!({ "at": now - n, "n": n })));
+        let text: String = entries.iter().map(|e| format!("{e}\n")).collect();
+        std::fs::write(&path, &text).unwrap();
+
+        prune_at(&path, now);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The same file once enough of it has aged out does get rewritten.
+    #[test]
+    fn a_prune_that_drops_a_quarter_is_worth_the_rewrite() {
+        let now = 10 * DAY;
+        let mut entries: Vec<Value> =
+            (0..3).map(|n| json!({ "at": now - 5 * DAY + n, "n": n })).collect();
+        entries.extend((3..12).map(|n| json!({ "at": now - n, "n": n })));
+        assert_eq!(pruned(&entries, now).len(), 9);
     }
 
     #[cfg(unix)]

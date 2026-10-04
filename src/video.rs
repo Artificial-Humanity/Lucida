@@ -251,11 +251,16 @@ impl Client {
         let uri = find_key(done, "uri")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                // Done, and nothing to collect — a filtered render looks like
-                // this. Polling again returns the same payload.
-                terminal(format!(
+                let message = format!(
                     "completed operation contained neither a video URI nor inline bytes: {done}"
-                ))
+                );
+                // Final only when Veo says why: a render its safety filters
+                // removed is done with nothing to collect, and polling again
+                // returns the same payload. Any other shape with no video is a
+                // payload this code does not understand — a renamed field would
+                // look exactly like that — and retiring every Veo render on a
+                // guess would hide paid renders from `lucida ops`.
+                if was_filtered(done) { terminal(message) } else { anyhow!(message) }
             })?;
 
         // The download URL is itself authenticated.
@@ -294,6 +299,22 @@ pub fn resume_notice(operation: &str) -> String {
          If this command is interrupted, the render continues and can be \
          collected with:\n\n  lucida check {operation}\n"
     )
+}
+
+/// Whether a finished operation says Veo's filters removed the video:
+/// `raiMediaFilteredCount` above zero, or any `raiMediaFilteredReasons`.
+///
+/// The field names are Google's (the Gemini API and Vertex both document them
+/// under `generateVideoResponse`); no recorded response here carries them, so
+/// both are held by the unit test rather than a transcript.
+fn was_filtered(done: &Value) -> bool {
+    let counted = find_key(done, "raiMediaFilteredCount")
+        .and_then(Value::as_u64)
+        .is_some_and(|n| n > 0);
+    let explained = find_key(done, "raiMediaFilteredReasons")
+        .and_then(Value::as_array)
+        .is_some_and(|reasons| !reasons.is_empty());
+    counted || explained
 }
 
 /// Depth-first search for the first value under `target`, at any depth.
@@ -430,13 +451,35 @@ mod tests {
     /// better by asking again. A download that merely failed (403, 5xx) might.
     #[test]
     fn a_finished_operation_whose_file_is_gone_is_terminal() {
-        let server = serve(vec![Reply::json(r#"{"done":true,"response":{}}"#)]);
-        let error = Client::recorded(server.url())
-            .poll_video("operations/xyz")
-            .err()
-            .expect("must be an error");
-        assert!(is_terminal(&error), "{error:#}");
-        server.finish();
+        // Filtered: Veo says so, in either of its two ways.
+        for response in [
+            r#"{"generateVideoResponse":{"raiMediaFilteredCount":1}}"#,
+            r#"{"generateVideoResponse":{"raiMediaFilteredReasons":["blocked"]}}"#,
+        ] {
+            let server = serve(vec![Reply::json(&format!(r#"{{"done":true,"response":{response}}}"#))]);
+            let error = Client::recorded(server.url())
+                .poll_video("operations/xyz")
+                .err()
+                .expect("must be an error");
+            assert!(is_terminal(&error), "{response}: {error:#}");
+            server.finish();
+        }
+
+        // No video and no reason: a payload nobody here understands — a renamed
+        // field looks the same — so it must stay an ordinary, retryable error.
+        for response in [
+            r#"{}"#,
+            r#"{"generateVideoResponse":{"generatedVideos":[{"video":{"fileUri":"x"}}]}}"#,
+            r#"{"generateVideoResponse":{"raiMediaFilteredCount":0,"raiMediaFilteredReasons":[]}}"#,
+        ] {
+            let server = serve(vec![Reply::json(&format!(r#"{{"done":true,"response":{response}}}"#))]);
+            let error = Client::recorded(server.url())
+                .poll_video("operations/xyz")
+                .err()
+                .expect("must be an error");
+            assert!(!is_terminal(&error), "{response} retired the operation: {error:#}");
+            server.finish();
+        }
 
         let done = r#"{"done":true,"response":{"generateVideoResponse":{
             "generatedSamples":[{"video":{"uri":"{{server}}/files/v1:download?alt=media"}}]}}}"#;
