@@ -72,6 +72,12 @@ pub const STARTED: &str = "started";
 /// written. Recorded rather than dropped, because the spend is real whether or
 /// not the bytes reached the disk, and the budget is summed from this file.
 pub const UNSAVED: &str = "unsaved";
+/// An image the provider billed for whose wait ended without it: cancelled,
+/// out of time, or a poll or download that failed. Recorded for the same reason
+/// as `unsaved` — the spend is real and the budget is summed from this file —
+/// and carrying no `operation`, so `lucida ops` never lists it: an image wait
+/// does not outlive the call that started it, and there is nothing to collect.
+pub const ABANDONED: &str = "abandoned";
 
 /// The ledger file, or `None` if it is switched off or has nowhere to live.
 ///
@@ -152,6 +158,45 @@ fn image_entry(
         entry["error"] = json!(summarise(&format!("{error:#}")));
     }
     entry
+}
+
+/// An image billed and never returned, from the marker its provider put on the
+/// error.
+///
+/// Without it a BFL or Runway render whose wait was cancelled or ran out wrote
+/// nothing: an MCP client that hung up mid-render and retried was billed twice
+/// and counted once.
+pub fn abandoned_image(
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    abandoned: &crate::provider::Abandoned,
+    estimated_usd: f64,
+) {
+    record(abandoned_entry(provider, model, prompt, abandoned, estimated_usd));
+}
+
+pub(crate) fn abandoned_entry(
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    abandoned: &crate::provider::Abandoned,
+    estimated_usd: f64,
+) -> Value {
+    json!({
+        "at": clock::now(),
+        "kind": IMAGE,
+        "status": ABANDONED,
+        "provider": provider,
+        "model": model,
+        "prompt": prompt,
+        // BFL's polling URL or Runway's task id — the one handle on what was
+        // paid for. Deliberately not `operation`: that field is what `ops`
+        // lists and what `done` retires, and an image has neither.
+        "handle": abandoned.handle,
+        "estimated_usd": estimated_usd,
+        "error": summarise(&abandoned.to_string()),
+    })
 }
 
 /// A video render that has been started and not yet collected.
@@ -574,6 +619,21 @@ mod tests {
     /// A render the provider reported as finally failed has nothing left to
     /// collect, so it leaves the list exactly as a collected one does. It used
     /// to stay there forever, answering every `check` with the same error.
+    /// An abandoned image carries no `operation`, so `ops` has nothing to list:
+    /// an image wait does not outlive its call, and nothing is left to collect.
+    #[test]
+    fn an_abandoned_image_is_never_outstanding() {
+        let abandoned = json!({
+            "kind": IMAGE, "status": ABANDONED, "handle": "img-7", "estimated_usd": 0.08,
+        });
+        let open = outstanding_from(vec![
+            abandoned,
+            json!({ "kind": VIDEO, "status": STARTED, "operation": "operations/a" }),
+        ]);
+        assert_eq!(open.len(), 1, "{open:?}");
+        assert_eq!(open[0]["operation"], "operations/a");
+    }
+
     #[test]
     fn a_failed_render_is_no_longer_outstanding() {
         let open = outstanding_from(vec![

@@ -288,8 +288,15 @@ pub fn budget() -> Option<f64> {
 
 /// Estimated dollars spent in the last [`WINDOW_SECONDS`], from the ledger.
 pub fn spent_recently() -> f64 {
-    let since = clock::now() - WINDOW_SECONDS;
-    let total: f64 = crate::ledger::entries()
+    spent_since(&crate::ledger::entries(), clock::now() - WINDOW_SECONDS)
+}
+
+/// The estimates of every entry at or after `since`, whatever its status — a
+/// `started`, `unsaved` or `abandoned` entry was billed just as a `done` one
+/// was. Split from [`spent_recently`] so the sum can be tested without the
+/// machine's real ledger.
+fn spent_since(entries: &[serde_json::Value], since: i64) -> f64 {
+    let total: f64 = entries
         .iter()
         .filter(|e| e["at"].as_i64().unwrap_or(0) >= since)
         .filter_map(|e| e["estimated_usd"].as_f64())
@@ -840,6 +847,21 @@ mod tests {
         assert!(reserve(&TABLE, Price::Free, 1, "render", Budget::Cap(5.0), true, || 0.0).is_ok());
         // And with no budget at all, the ledger being off is nobody's business here.
         assert!(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Unset, true, || 0.0).is_ok());
+    }
+
+    /// An image whose wait was abandoned was billed all the same, so the window
+    /// counts it — and only inside the window.
+    #[test]
+    fn an_abandoned_image_counts_against_the_window() {
+        let entries = vec![
+            serde_json::json!({ "at": 100, "kind": "image", "status": "done", "estimated_usd": 0.06 }),
+            serde_json::json!({
+                "at": 200, "kind": "image", "status": crate::ledger::ABANDONED,
+                "handle": "img-7", "estimated_usd": 0.08,
+            }),
+            serde_json::json!({ "at": 10, "kind": "image", "status": "abandoned", "estimated_usd": 5.0 }),
+        ];
+        assert!((spent_since(&entries, 50) - 0.14).abs() < 1e-9, "{}", spent_since(&entries, 50));
     }
 
     /// The video refusal states its assumption in the same words as the image

@@ -25,7 +25,7 @@
 
 use crate::provider::{
     AspectSupport, Capabilities, GeneratedImage, ImageProvider, ImageRequest, MaskSupport,
-    Provenance,
+    Provenance, abandoned,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -242,11 +242,18 @@ impl Client {
     }
 
     /// Polls until the job resolves, then downloads the result.
+    ///
+    /// The submit has been billed by the time this runs, so every way out of
+    /// the *wait* — a cancellation, the deadline, a poll or download that
+    /// failed — is marked [`abandoned`], and the caller records the spend. The
+    /// provider's own terminal answers below are not: moderation and `Error`
+    /// are BFL's verdicts on the render, and whether they bill is not known.
     fn await_image(&self, polling_url: &str) -> Result<Vec<u8>> {
         let started = Instant::now();
         let deadline = Duration::from_secs(600);
         let mut interval = Duration::from_millis(1000);
         let mut announced = String::new();
+        let billed = |error: anyhow::Error| abandoned(polling_url, error);
 
         loop {
             // Checked before the first poll as well as between the rest, so a
@@ -256,15 +263,15 @@ impl Client {
             // the one handle left on what was paid for. It used to return
             // `cancel::check`'s bare message, which named nothing.
             crate::cancel::check().map_err(|e| {
-                anyhow!("{e} Its polling URL was {polling_url}")
+                billed(anyhow!("{e} Its polling URL was {polling_url}"))
             })?;
 
             if started.elapsed() > deadline {
-                bail!(
+                return Err(billed(anyhow!(
                     "gave up after {} minutes. The job may still complete; its \
                      polling URL was {polling_url}",
                     deadline.as_secs() / 60
-                );
+                )));
             }
 
             std::thread::sleep(interval);
@@ -275,7 +282,8 @@ impl Client {
             let response = crate::retry::send_idempotent("polling the render", || {
                 self.http.get(polling_url).header("x-key", &self.key)
             })
-            .context("polling the render")?;
+            .context("polling the render")
+            .map_err(billed)?;
 
             let status = response.status();
             if !status.is_success() {
@@ -284,23 +292,29 @@ impl Client {
                 // about model endpoints and suggests `lucida models`, which is
                 // misleading advice for a job that has simply expired.
                 if status.as_u16() == 404 {
-                    bail!(
+                    return Err(billed(anyhow!(
                         "the render is no longer available at its polling URL — \
                          results expire shortly after completion. Submit the \
                          render again.\n\nOriginal message: {}",
                         text.trim()
-                    );
+                    )));
                 }
-                bail!("{}", explain_error(status.as_u16(), &text, "get_result"));
+                return Err(billed(anyhow!(
+                    "{}",
+                    explain_error(status.as_u16(), &text, "get_result")
+                )));
             }
 
-            let payload: Value = response.json().context("parsing the poll response")?;
+            let payload: Value = response
+                .json()
+                .context("parsing the poll response")
+                .map_err(billed)?;
             let state = payload["status"].as_str().unwrap_or_default();
 
             match state {
                 "Ready" => {
                     eprintln!("Render finished in {}s.", started.elapsed().as_secs());
-                    return self.download(&payload);
+                    return self.download(&payload).map_err(billed);
                 }
                 // Both moderation outcomes are terminal, and the distinction is
                 // worth keeping: one rejected what was asked for, the other
@@ -736,7 +750,11 @@ mod tests {
             model: "flux-2-pro".into(),
             ..Default::default()
         };
-        let error = wired(&server).generate(&request).unwrap_err().to_string();
+        let error = wired(&server).generate(&request).unwrap_err();
+        // BFL's own verdict, not a wait that ended: it says nothing was
+        // charged, so it must not be counted as an abandoned render.
+        assert!(error.downcast_ref::<crate::provider::Abandoned>().is_none(), "{error:#}");
+        let error = error.to_string();
         assert!(error.contains("content moderation"), "{error}");
         assert!(error.contains("Nothing was charged"));
         assert_eq!(server.finish().len(), 2, "no further polling after a terminal state");
@@ -778,5 +796,71 @@ mod tests {
         let error = wired(&server).generate(&request).unwrap_err().to_string();
         assert!(error.contains("out of credits"), "{error}");
         assert!(error.contains("dashboard.bfl.ai"));
+    }
+
+    /// Renders `request` the way both image call sites do — through
+    /// `generate_billed` — and returns the error with the ledger entries that
+    /// would follow it. Built in memory rather than written: a test must not
+    /// append to the ledger of the machine running the suite.
+    fn billed_entries(client: &Client, request: &ImageRequest) -> (anyhow::Error, Vec<Value>) {
+        let mut entries = Vec::new();
+        let error = crate::generate_billed(client, request, |abandoned| {
+            entries.push(crate::ledger::abandoned_entry(
+                "bfl",
+                &request.model,
+                &request.prompt,
+                abandoned,
+                0.06,
+            ));
+        })
+        .expect_err("the render was meant to fail");
+        (error, entries)
+    }
+
+    /// A wait cancelled after the submit was billed leaves exactly one
+    /// `abandoned` entry carrying the estimate and the polling URL. It left
+    /// none, so an MCP client that hung up and retried was billed twice and
+    /// counted once.
+    #[test]
+    fn a_cancelled_wait_is_recorded_as_spend() {
+        let submit = r#"{"id":"abc","polling_url":"{{server}}/v1/get_result?id=abc"}"#;
+        let server = serve(vec![Reply::json(submit)]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+
+        let token = crate::cancel::Token::new();
+        token.cancel();
+        let client = wired(&server);
+        let (error, entries) = crate::cancel::with(token, || billed_entries(&client, &request));
+
+        assert!(format!("{error:#}").contains("cancelled"), "the message changed: {error:#}");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["status"], crate::ledger::ABANDONED);
+        assert_eq!(entries[0]["estimated_usd"], 0.06);
+        assert_eq!(entries[0]["provider"], "bfl");
+        assert!(
+            entries[0]["handle"].as_str().unwrap().ends_with("/v1/get_result?id=abc"),
+            "{entries:?}"
+        );
+        assert!(entries[0].get("operation").is_none(), "`ops` would list it: {entries:?}");
+        server.finish();
+    }
+
+    /// A submit that failed was never billed, so it leaves nothing to count.
+    #[test]
+    fn a_failed_submit_is_not_recorded_as_spend() {
+        let server = serve(vec![Reply::status(402, r#"{"detail":"Not enough credits"}"#)]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+        let (error, entries) = billed_entries(&wired(&server), &request);
+        assert!(format!("{error:#}").contains("out of credits"), "{error:#}");
+        assert!(entries.is_empty(), "an unbilled submit was counted: {entries:?}");
+        server.finish();
     }
 }

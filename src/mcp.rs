@@ -1134,12 +1134,22 @@ fn generate_image(args: &Value) -> Result<String> {
 
     // Held, not just checked: workers run calls concurrently, and the cost
     // stays reserved until the ledger entry below exists. Every early return —
-    // a provider error, a cancellation — drops it.
+    // a provider error, a cancellation — drops it, and one that comes after a
+    // billed submit is recorded as `abandoned` before it does, because a client
+    // that hangs up cancels this call and may well ask again.
     let price = crate::spend::price_for(backend, &request.model, request.size);
     let reservation = crate::spend::check(price, "render")?;
 
     let provider = open(backend)?;
-    let image = provider.generate(&request)?;
+    let image = crate::generate_billed(provider.as_ref(), &request, |abandoned| {
+        crate::ledger::abandoned_image(
+            caps.provider,
+            &request.model,
+            &request.prompt,
+            abandoned,
+            price.against_budget(),
+        );
+    })?;
 
     // Providers pick the output format themselves, so the requested extension may
     // not match the bytes. Correct it and say so, rather than handing back a file

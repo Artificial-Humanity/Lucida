@@ -876,6 +876,7 @@ fn show_history(count: usize) -> Result<()> {
             entry["path"]
                 .as_str()
                 .or_else(|| entry["operation"].as_str())
+                .or_else(|| entry["handle"].as_str())
                 .unwrap_or("?"),
         );
         let prompt = entry["prompt"].as_str().unwrap_or("");
@@ -1806,7 +1807,15 @@ fn render_one(
     };
     eprintln!("{verb} via {}…", caps.provider);
 
-    let image = provider.generate(&request)?;
+    let image = generate_billed(provider.as_ref(), &request, |abandoned| {
+        ledger::abandoned_image(
+            caps.provider,
+            &request.model,
+            &request.prompt,
+            abandoned,
+            price.against_budget(),
+        );
+    })?;
 
     let destination = correct_extension(&out, &image.mime_type);
     if destination != out {
@@ -2075,6 +2084,27 @@ fn staging_path(path: &Path) -> PathBuf {
         ".{name}.lucida-{}-{nonce}",
         std::process::id()
     ))
+}
+
+/// Asks `provider` for an image, and hands `record` the marker when the
+/// provider billed for one it never returned.
+///
+/// The twin of [`write_billed`], one step earlier. A BFL or Runway wait that is
+/// cancelled or runs out comes back as an error after the submit was billed,
+/// and both image call sites used to let it go by `?` with no ledger entry — so
+/// the budget never counted it. Routing both through here means the marker
+/// cannot be missed at one of them. Only a [`provider::Abandoned`] error is
+/// passed on; every other error, a failed submit among them, records nothing.
+pub fn generate_billed(
+    provider: &dyn ImageProvider,
+    request: &ImageRequest,
+    record: impl FnOnce(&provider::Abandoned),
+) -> Result<provider::GeneratedImage> {
+    provider.generate(request).inspect_err(|error| {
+        if let Some(abandoned) = error.downcast_ref::<provider::Abandoned>() {
+            record(abandoned);
+        }
+    })
 }
 
 /// Writes a render the provider has already billed, recording it whether or not

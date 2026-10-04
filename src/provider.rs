@@ -1058,6 +1058,49 @@ pub trait ImageProvider {
     fn list_models(&self) -> Result<Vec<String>>;
 }
 
+/// An image the provider has billed for and that never came back.
+///
+/// BFL and Runway render asynchronously: the submit is the billed call, and a
+/// poll loop waits for the result. An error from that wait — a cancellation, the
+/// deadline, a poll or download that failed — used to travel up like any other,
+/// the reservation dropped, and no ledger entry was written. An MCP client that
+/// hangs up mid-render cancels the call by design, so one that hung up and
+/// retried was billed twice and counted once. Both image call sites look for
+/// this marker and record the spend as `abandoned`.
+///
+/// Set **only** on an error that follows a successful submit. A submit that
+/// failed was not billed, and counting it would refuse renders over money never
+/// spent. The provider's own terminal answers — moderated, failed — are left
+/// unmarked too: whether they bill is not known here, and the marker claims a
+/// charge.
+///
+/// A marker on an ordinary error, in the shape of
+/// [`crate::video::TerminalFailure`], so every caller still sees the same
+/// message and only the ledger looks for the type. It lives here rather than
+/// beside that one or `out::Written` because it is part of what
+/// [`ImageProvider::generate`] can say: video has its own, and `Written` is
+/// about the CLI's batch, not a provider. Its text is the wrapped error's whole
+/// chain, so wrapping changes no message anyone reads.
+#[derive(Debug)]
+pub struct Abandoned {
+    /// What finds the render again: BFL's polling URL, Runway's task id.
+    pub handle: String,
+    error: anyhow::Error,
+}
+
+impl std::fmt::Display for Abandoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+
+impl std::error::Error for Abandoned {}
+
+/// Marks `error` as the end of a wait whose render was already billed.
+pub fn abandoned(handle: &str, error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(Abandoned { handle: handle.to_string(), error })
+}
+
 /// What a backend supports for a given model, without constructing one.
 ///
 /// This is what lets `--seed` against Google report "google has no concept of a

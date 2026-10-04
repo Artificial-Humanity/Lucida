@@ -745,6 +745,33 @@ fn ops_names_the_provider_that_started_each_render() {
         .never_says(failed);
 }
 
+/// An image whose wait was abandoned after it was billed is spend `history`
+/// counts and a render `ops` never lists: there is nothing to collect.
+#[test]
+fn an_abandoned_image_is_counted_and_never_listed() {
+    let sandbox = Sandbox::new("ledger-abandoned");
+    sandbox.write_config("");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let entry = serde_json::json!({
+        "at": now, "kind": "image", "status": "abandoned", "provider": "runway",
+        "model": "gen4_image", "prompt": "p", "handle": "img-7", "estimated_usd": 0.08,
+        "error": "gave up after 10 minutes",
+    });
+    fs::write(sandbox.config_file().with_file_name("renders.jsonl"), format!("{entry}\n")).unwrap();
+
+    let history = run(lucida(&sandbox).args(["--json", "history"]));
+    let document: serde_json::Value = serde_json::from_str(history.stdout.trim()).unwrap();
+    assert_eq!(document["estimated_usd_24h"], 0.08, "{document}");
+
+    run(lucida(&sandbox).arg("history")).says("abandoned").says("img-7");
+    run(lucida(&sandbox).arg("ops"))
+        .says("No video renders are waiting")
+        .never_says("img-7");
+}
+
 #[test]
 fn config_names_the_ledger_and_it_can_be_switched_off() {
     let sandbox = Sandbox::new("ledger-visible");
