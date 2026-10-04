@@ -45,6 +45,33 @@ const DEFAULT_DIMENSIONS: (u32, u32) = (1024, 1024);
 /// at four, so this is a ceiling rather than a promise.
 const MAX_REFERENCES: usize = 8;
 
+/// The ratios offered on the endpoints that take an `aspect_ratio` string and
+/// no pixel dimensions.
+///
+/// BFL documents a *range* for these, 21:9 to 9:21 (the Kontext pages spell the
+/// same bounds 7:3 and 3:7), not a list. `AspectSupport::Named` can only say
+/// "these exact strings", so this is the conventional set inside that range,
+/// written the way the OpenAPI spells its bounds. A ratio inside the range that
+/// is not named here is refused rather than passed on: an offer cannot claim
+/// more than the table can hold, and the other BFL models still take any ratio.
+///
+/// Read 2026-10-04 from `https://api.bfl.ai/openapi.json`, schemas
+/// `FluxKontextProInputs` (`/v1/flux-kontext-pro` and `/v1/flux-kontext-max`)
+/// and `FluxUltraInput` (`/v1/flux-pro-1.1-ultra`), where `aspect_ratio` is
+/// "Aspect ratio of the image between 21:9 and 9:21" and `width`/`height` do not
+/// exist.
+const RATIO_ONLY_ASPECTS: &[&str] = &[
+    "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21",
+];
+
+/// Whether the endpoint takes an `aspect_ratio` string in place of `width` and
+/// `height`. Sending the pixel fields there is not an error from BFL: they are
+/// simply not part of the schema, so the render comes back at the model's own
+/// shape and the geometry that was asked for is lost without a word.
+fn takes_aspect_ratio_only(id: &str) -> bool {
+    id.starts_with("flux-kontext") || id == "flux-pro-1.1-ultra"
+}
+
 /// Friendly names for the endpoints, which are the model ids here.
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("bfl", "flux-2-pro"),
@@ -87,13 +114,21 @@ pub fn capabilities(model: &str) -> Capabilities {
     // quietly became a loosely-inspired generation.
     let edits = id.starts_with("flux-2") || id.starts_with("flux-kontext");
 
+    // The same per-model disagreement, for geometry: the FLUX.2 and FLUX.1.1
+    // endpoints take pixels, Kontext and Ultra take only a ratio.
+    let ratio_only = takes_aspect_ratio_only(&id);
+
     Capabilities {
         provider: "bfl",
-        tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone.",
-        aspect: AspectSupport::Free {
-            multiple_of: PIXEL_GRID,
+        tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone, and flux-kontext-* and flux-pro-1.1-ultra take a ratio from a short list instead of a size.",
+        aspect: if ratio_only {
+            AspectSupport::Named(RATIO_ONLY_ASPECTS)
+        } else {
+            AspectSupport::Free {
+                multiple_of: PIXEL_GRID,
+            }
         },
-        size: true,
+        size: !ratio_only,
         seed: true,
         // Measured, not assumed: no FLUX endpoint takes one.
         negative_prompt: false,
@@ -187,8 +222,25 @@ impl Client {
         // reframed the picture to square: the edit itself was right and the
         // composition was destroyed. Omitting the fields lets the API derive
         // them from the input image, which is what its `default: 0` means.
+        //
+        // Kontext and Ultra have no pixel fields at all, only `aspect_ratio`, so
+        // for them the same rule is spelled with the ratio: stated, or the
+        // square default when there is no source to take a shape from. Kontext
+        // is 1:1 by BFL's own default; Ultra's is 16:9, which would break the
+        // square every other lane renders, so it is always sent. `check` has
+        // already refused a `--size` and any ratio outside the list, so what
+        // arrives here is passed on as written.
         let asked_for_dimensions = req.aspect.is_some() || req.size.is_some();
-        if asked_for_dimensions || req.references.is_empty() {
+        if takes_aspect_ratio_only(model) {
+            let ratio = match req.aspect {
+                Some(aspect) => Some(aspect.to_string()),
+                None if req.references.is_empty() => Some("1:1".to_string()),
+                None => None,
+            };
+            if let Some(ratio) = ratio {
+                body.insert("aspect_ratio".into(), json!(ratio));
+            }
+        } else if asked_for_dimensions || req.references.is_empty() {
             let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
             body.insert("width".into(), json!(width));
             body.insert("height".into(), json!(height));
@@ -441,7 +493,13 @@ impl ImageProvider for Client {
         let model = resolve_model(&req.model);
 
         let stated = req.aspect.is_some() || req.size.is_some();
-        let shape = if stated || req.references.is_empty() {
+        let shape = if takes_aspect_ratio_only(&model)
+            && (req.aspect.is_some() || req.references.is_empty())
+        {
+            // No pixel count to print: the endpoint takes a ratio and chooses
+            // the size itself.
+            req.aspect.map_or_else(|| "1:1".to_string(), |a| a.to_string())
+        } else if stated || req.references.is_empty() {
             let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
             format!("{width}x{height}")
         } else {
@@ -673,6 +731,104 @@ mod tests {
         // Generation always carries dimensions; there is no source to infer from.
         let fresh = ImageRequest::default();
         assert_eq!(client.body(&fresh, "flux-2-pro").unwrap()["width"], 1024);
+    }
+
+    /// BFL's OpenAPI gives `flux-kontext-*` and `flux-pro-1.1-ultra` an
+    /// `aspect_ratio` string and no `width`/`height`. They used to be declared
+    /// free-form and sent pixels the endpoint does not read, so a requested
+    /// shape came back as the model's own, with nothing said.
+    #[test]
+    fn kontext_and_ultra_take_a_ratio_and_no_size() {
+        for model in ["flux-kontext-pro", "flux-kontext-max", "flux-pro-1.1-ultra"] {
+            let caps = capabilities(model);
+            assert!(!caps.size, "{model} has no pixel fields");
+            let AspectSupport::Named(ratios) = caps.aspect else {
+                panic!("{model} must offer named ratios");
+            };
+            assert!(ratios.contains(&"16:9") && ratios.contains(&"21:9") && ratios.contains(&"9:21"));
+        }
+        // Every other endpoint, pixels included, is unchanged.
+        for model in ["flux-2-pro", "flux-2-flex", "flux-pro-1.1", "flux-dev"] {
+            let caps = capabilities(model);
+            assert!(caps.size, "{model}");
+            assert!(matches!(caps.aspect, AspectSupport::Free { .. }), "{model}");
+        }
+    }
+
+    #[test]
+    fn kontext_and_ultra_send_aspect_ratio_instead_of_pixels() {
+        let client = Client {
+            key: "x".into(),
+            http: reqwest::blocking::Client::new(),
+            base: API_ROOT.into(),
+        };
+        for model in ["flux-kontext-pro", "flux-kontext-max", "flux-pro-1.1-ultra"] {
+            let asked = ImageRequest {
+                aspect: Some(Aspect::parse("16:9").unwrap()),
+                ..Default::default()
+            };
+            let body = client.body(&asked, model).unwrap();
+            assert_eq!(body["aspect_ratio"], "16:9", "{model}");
+            assert!(body.get("width").is_none() && body.get("height").is_none(), "{model}");
+
+            // Nothing stated, nothing to take a shape from: the square default,
+            // sent explicitly because Ultra would otherwise choose 16:9.
+            let fresh = client.body(&ImageRequest::default(), model).unwrap();
+            assert_eq!(fresh["aspect_ratio"], "1:1", "{model}");
+            assert!(fresh.get("width").is_none(), "{model}");
+        }
+
+        // An edit with no stated shape keeps its source's, as on the pixel models.
+        let edit = ImageRequest {
+            references: vec!["https://example.com/a.png".into()],
+            ..Default::default()
+        };
+        let body = client.body(&edit, "flux-kontext-pro").unwrap();
+        assert!(body.get("aspect_ratio").is_none() && body.get("width").is_none());
+        assert_eq!(body["input_image"], "https://example.com/a.png");
+
+        // The pixel models are untouched.
+        let body = client.body(&ImageRequest::default(), "flux-2-pro").unwrap();
+        assert_eq!(body["width"], 1024);
+        assert!(body.get("aspect_ratio").is_none());
+    }
+
+    #[test]
+    fn what_kontext_and_ultra_cannot_take_is_refused() {
+        for model in ["flux-kontext-pro", "flux-pro-1.1-ultra"] {
+            let caps = capabilities(model);
+            let sized = ImageRequest {
+                size: Some(crate::provider::Size(2048)),
+                model: model.into(),
+                ..Default::default()
+            };
+            let error = caps.check(&sized).unwrap_err().to_string();
+            assert!(error.contains("--size"), "{model}: {error}");
+
+            // Inside BFL's range, but not a ratio the table names.
+            let odd = ImageRequest {
+                aspect: Some(Aspect::parse("17:10").unwrap()),
+                model: model.into(),
+                ..Default::default()
+            };
+            assert!(caps.check(&odd).is_err(), "{model}");
+
+            let fine = ImageRequest {
+                aspect: Some(Aspect::parse("3:2").unwrap()),
+                model: model.into(),
+                ..Default::default()
+            };
+            caps.check(&fine).unwrap();
+        }
+        // The pixel models still take a size and any ratio.
+        let caps = capabilities("flux-2-pro");
+        caps.check(&ImageRequest {
+            size: Some(crate::provider::Size(2048)),
+            aspect: Some(Aspect::parse("17:10").unwrap()),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        })
+        .unwrap();
     }
 
     #[test]
