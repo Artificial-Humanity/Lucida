@@ -1657,10 +1657,12 @@ fn bfl_model_notes(model: &str) -> Vec<String> {
     if per_model.steps {
         notes.push("steps + guidance".to_string());
     }
-    notes.push(if per_model.references {
-        "edits".to_string()
-    } else {
-        "generate only".to_string()
+    // The ceiling is said here because the over-ceiling refusal points here
+    // for a model that takes more.
+    notes.push(match (per_model.references, per_model.max_references) {
+        (true, Some(most)) => format!("edits, up to {most} references"),
+        (true, None) => "edits".to_string(),
+        (false, _) => "generate only".to_string(),
     });
     // Geometry differs per model too: Kontext and Ultra take a ratio from a
     // list and no `--size`.
@@ -2273,6 +2275,10 @@ mod tests {
         // The notes that were already there survive.
         assert!(bfl_model_notes("flux-2-flex").join("; ").contains("steps + guidance"));
         assert!(bfl_model_notes("flux-dev").contains(&"generate only".to_string()));
+        // And each edit model's reference ceiling, which the over-ceiling
+        // refusal sends a caller here to compare.
+        assert!(bfl_model_notes("flux-kontext-pro").join("; ").contains("up to 4 references"));
+        assert!(bfl_model_notes("flux-2-pro").join("; ").contains("up to 8 references"));
     }
 
     /// A suffix that is not a format is part of the name, so two renders that

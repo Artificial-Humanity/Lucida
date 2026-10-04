@@ -182,6 +182,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     // Veo takes one; the image models do not.
     negative_prompt: false,
     references: true,
+    // No ceiling recorded here.
+    max_references: None,
     mask: MaskSupport::No,
     workflow: false,
     steps: false,

@@ -41,9 +41,30 @@ pub const DEFAULT_MODEL: &str = "flux-2-pro";
 const PIXEL_GRID: u32 = 32;
 const DEFAULT_DIMENSIONS: (u32, u32) = (1024, 1024);
 
-/// The most reference images any FLUX.2 endpoint takes. The klein variants stop
-/// at four, so this is a ceiling rather than a promise.
-const MAX_REFERENCES: usize = 8;
+/// The most reference images an edit model takes, per model.
+///
+/// One ceiling of 8 used to cover the family, with a note that klein stopped at
+/// four — and the body builder numbered fields up to `input_image_8` for every
+/// model. Kontext and klein have no field past `input_image_4`, so the extra
+/// images were dropped by BFL without an error and the edit came back as a
+/// success built from half of what was asked for.
+///
+/// Read 2026-10-04 from `https://api.bfl.ai/openapi.json`: `Flux2Inputs`
+/// (`/v1/flux-2-pro`, `/v1/flux-2-max`) and `Flux2FlexInputs` (`/v1/flux-2-flex`)
+/// define `input_image` through `input_image_8`; `Flux2KleinInputs`
+/// (`/v1/flux-2-klein-9b`, `/v1/flux-2-klein-4b`) and `FluxKontextProInputs`
+/// (`/v1/flux-kontext-pro`, `/v1/flux-kontext-max`) stop at `input_image_4`.
+/// `None` for a model that takes no reference images at all, and for an
+/// unknown `flux-2-*` id, which keeps the family's largest figure.
+fn reference_ceiling(id: &str) -> Option<usize> {
+    if id.starts_with("flux-kontext") || id.starts_with("flux-2-klein") {
+        Some(4)
+    } else if id.starts_with("flux-2") {
+        Some(8)
+    } else {
+        None
+    }
+}
 
 /// The ratios offered on the endpoints that take an `aspect_ratio` string and
 /// no pixel dimensions.
@@ -145,6 +166,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         // Measured, not assumed: no FLUX endpoint takes one.
         negative_prompt: false,
         references: edits,
+        max_references: reference_ceiling(&id),
         mask: MaskSupport::No,
         workflow: false,
         steps: tunable,
@@ -271,20 +293,21 @@ impl Client {
             body.insert("guidance".into(), json!(guidance));
         }
 
-        // Checked before the loop, not after: base64-encoding nine images and
-        // then rejecting the request would read every file for nothing.
-        if req.references.len() > MAX_REFERENCES {
-            bail!(
-                "`{model}` accepts at most {MAX_REFERENCES} reference images; {} were \
-                 given.\n\n\
-                 Note the FLUX.2 klein endpoints accept only 4, so a request the \
-                 limit here allows may still be rejected by those.",
-                req.references.len()
-            );
+        // `Capabilities::check` has already refused a count over this model's
+        // ceiling, as exit 2. Held here too because a field past the ceiling is
+        // not an error at BFL — it is ignored — so a path that skipped the check
+        // must still never number one. Before the loop, so nothing is read.
+        if let Some(most) = reference_ceiling(model) {
+            if req.references.len() > most {
+                bail!(
+                    "`{model}` accepts at most {most} reference images; {} were given.",
+                    req.references.len()
+                );
+            }
         }
 
         // Reference images are numbered fields rather than an array:
-        // input_image, input_image_2, … input_image_8.
+        // input_image, input_image_2, … up to the model's ceiling.
         for (index, reference) in req.references.iter().enumerate() {
             let field = match index {
                 0 => "input_image".to_string(),
@@ -858,6 +881,51 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+    }
+
+    /// Each edit model's reference ceiling is its own, and a request over it is
+    /// refused before anything is read or sent.
+    ///
+    /// One ceiling of 8 covered the family, and the body builder numbered
+    /// fields up to `input_image_8` for every model — but Kontext and klein
+    /// have no field past `input_image_4`, so images five to eight were dropped
+    /// by BFL without a word and the edit came back as a success built from
+    /// half of what was asked for. The figures are BFL's schemas, read from
+    /// `https://api.bfl.ai/openapi.json`.
+    #[test]
+    fn each_edit_model_refuses_references_past_its_own_ceiling() {
+        let refs = |n: usize| -> Vec<String> {
+            (0..n).map(|i| format!("https://example.com/{i}.png")).collect()
+        };
+        for (model, most) in [
+            ("flux-2-pro", 8),
+            ("flux-2-max", 8),
+            ("flux-2-flex", 8),
+            ("flux-2-klein-9b", 4),
+            ("flux-2-klein-4b", 4),
+            ("flux-kontext-pro", 4),
+            ("flux-kontext-max", 4),
+        ] {
+            let caps = capabilities(model);
+            caps.check(&ImageRequest {
+                references: refs(most),
+                model: model.into(),
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{model} refused {most}: {e:#}"));
+
+            let error = caps
+                .check(&ImageRequest {
+                    references: refs(most + 1),
+                    model: model.into(),
+                    ..Default::default()
+                })
+                .expect_err(&format!("{model} accepted {} references", most + 1));
+            assert_eq!(crate::out::code_for(&error), crate::out::REFUSED, "{model}");
+            let text = format!("{error:#}");
+            assert!(text.contains(&format!("at most {most} reference")), "{model}: {text}");
+            assert!(text.contains(model), "{model}: {text}");
+        }
     }
 
     #[test]

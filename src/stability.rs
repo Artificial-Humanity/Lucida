@@ -119,6 +119,7 @@ pub fn capabilities(_model: &str) -> Capabilities {
         // a *mask* — which `ImageRequest` cannot express. Claiming support here
         // would silently turn an edit into a fresh generation.
         references: false,
+        max_references: None,
     mask: MaskSupport::No,
     workflow: false,
         // Not exposed on core/ultra/sd3.

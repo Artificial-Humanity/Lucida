@@ -810,6 +810,14 @@ pub struct Capabilities {
     pub seed: bool,
     pub negative_prompt: bool,
     pub references: bool,
+    /// The most reference images this model takes, when Lucida knows a figure.
+    ///
+    /// Per model because BFL's endpoints disagree: FLUX.2 pro, max and flex
+    /// take eight, while Kontext and klein have no field past the fourth. A
+    /// body that numbered fields up to eight for all of them had BFL drop the
+    /// rest silently and return the edit as a success. `None` means no ceiling
+    /// is recorded here, not that there is none.
+    pub max_references: Option<usize>,
     /// Whether the provider accepts a mask naming where to concentrate an edit,
     /// and what that mask guarantees.
     ///
@@ -990,6 +998,21 @@ impl Capabilities {
                  Generate from a prompt instead, or edit with one of: {}.",
                 editors.join(", ")
             );
+        }
+
+        if let Some(most) = self.max_references {
+            if req.references.len() > most {
+                bail!(
+                    "`{model}` on `{me}` accepts at most {most} reference images; {given} \
+                     were given.\n\n\
+                     The ones past {most} would not be sent anywhere the model reads, \
+                     so the edit would come back built from part of what was asked \
+                     for. Send at most {most}, or use a model that takes more \
+                     (`lucida models` lists them).",
+                    model = req.model,
+                    given = req.references.len()
+                );
+            }
         }
 
         if let (Some(aspect), AspectSupport::Named(allowed)) = (req.aspect, self.aspect) {

@@ -803,6 +803,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     seed: true,
     negative_prompt: true,
     references: true,
+    // No ceiling recorded here.
+    max_references: None,
     // The only binding mask anywhere here, and it is binding because Lucida
     // builds this graph: `graph_for` composites the render back through the mask
     // rather than trusting the sampler to stay inside it. Measured at 0.00/255

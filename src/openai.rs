@@ -148,6 +148,8 @@ pub fn capabilities(model: &str) -> Capabilities {
         // Likewise "Unknown parameter: 'negative_prompt'".
         negative_prompt: false,
         references: true,
+        // No ceiling recorded here.
+        max_references: None,
         // Advisory on every model in the family, and the numbers differ only in
         // degree: gpt-image-2 concentrates 4.5x, gpt-image-1.5 twice, and both
         // regenerate the rest of the picture. Nothing here builds the graph, so

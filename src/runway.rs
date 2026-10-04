@@ -222,6 +222,9 @@ pub fn image_capabilities(model: &str) -> Capabilities {
         // `referenceImages`: at most three, each `https://`, `runway://` or
         // `data:image/`.
         references: true,
+        // Not enforced here yet: the three above is from Runway's documentation
+        // and has not been measured against what the endpoint does with a fourth.
+        max_references: None,
         mask: MaskSupport::No,
         workflow: false,
         steps: false,

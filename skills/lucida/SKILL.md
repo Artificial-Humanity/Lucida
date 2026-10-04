@@ -173,6 +173,9 @@ than hidden, so read what comes back rather than assuming the request was met.
   A mask is a PNG or WebP whose *transparent* pixels mark what to change; a
   provider that reads it from the alpha channel refuses a mask with none, and one
   that keeps the source's shape refuses `--aspect` / `--size` alongside a mask.
+- **How many reference images an edit takes can differ per model.** More than
+  the model takes is refused before anything is sent, naming its ceiling,
+  rather than trimmed into an edit built from part of what you gave.
 - **A local render can take minutes and reports elapsed time while it works.**
   It has not hung.
 - **A slow render does not block the server.** Other tool calls run alongside it
