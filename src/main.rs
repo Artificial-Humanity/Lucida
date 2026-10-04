@@ -846,6 +846,13 @@ fn show_history(count: usize) -> Result<()> {
             "entries": recent,
             "estimated_usd_24h": spend::spent_recently(),
             "budget_usd": spend::budget(),
+            // Beside `budget_usd` rather than folded into it, because that
+            // field is `null` both for no budget and for one that cannot be
+            // read, and the two mean opposite things: the first refuses
+            // nothing, the second refuses every paid render. This is non-null
+            // exactly when the setting is there and unreadable, worded as
+            // `lucida config` words it.
+            "budget_problem": spend::budget_setting().problem(),
             "exit_code": out::OK,
         }));
         return Ok(());

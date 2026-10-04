@@ -643,6 +643,35 @@ fn config_flags_an_unreadable_budget() {
         .says("such as `5`");
 }
 
+/// `budget_usd` is `null` for an unreadable budget as well as for none, and
+/// read alone that says "no cap" while every paid render is refused. The
+/// problem field is what tells the two apart.
+#[test]
+fn history_json_names_an_unreadable_budget() {
+    let history = |budget: Option<&str>| {
+        let sandbox = Sandbox::new("budget-history");
+        let mut cmd = lucida(&sandbox);
+        if let Some(budget) = budget {
+            cmd.env("LUCIDA_BUDGET", budget);
+        }
+        let out = run(cmd.args(["--json", "history"]));
+        out.exits(0);
+        serde_json::from_str::<serde_json::Value>(out.stdout.trim()).unwrap()
+    };
+
+    let unreadable = history(Some("$5"));
+    assert!(unreadable["budget_usd"].is_null(), "{unreadable}");
+    let problem = unreadable["budget_problem"].as_str().unwrap_or_default();
+    assert!(problem.contains("`$5`") && problem.contains("such as `5`"), "{unreadable}");
+
+    let readable = history(Some("5"));
+    assert_eq!(readable["budget_usd"], 5.0);
+    assert!(readable["budget_problem"].is_null(), "{readable}");
+
+    let unset = history(None);
+    assert!(unset["budget_usd"].is_null() && unset["budget_problem"].is_null(), "{unset}");
+}
+
 #[test]
 fn a_budget_with_the_ledger_off_refuses_a_paid_render() {
     // The budget is counted from the ledger, so with the ledger off nothing
