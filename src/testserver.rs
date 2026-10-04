@@ -153,10 +153,10 @@ pub fn serve(replies: Vec<Reply>) -> Server {
     let replies: Vec<Reply> = replies
         .into_iter()
         .map(|mut reply| {
-            if let Ok(text) = std::str::from_utf8(&reply.body)
-                && text.contains("{{server}}")
-            {
-                reply.body = text.replace("{{server}}", &url).into_bytes();
+            if let Ok(text) = std::str::from_utf8(&reply.body) {
+                if text.contains("{{server}}") {
+                    reply.body = text.replace("{{server}}", &url).into_bytes();
+                }
             }
             reply
         })

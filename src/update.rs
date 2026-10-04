@@ -592,10 +592,10 @@ fn install_kind_under(exe: &Path, cargo_home: Option<PathBuf>) -> Install {
     // cargo installs elsewhere, and looking only at CARGO_HOME classed those as
     // downloads and wrote over them. Cargo keeps a record in every install
     // root, beside `bin`; if it lists this binary, cargo put it there.
-    if let Some(root) = exe.parent().filter(|bin| bin.ends_with("bin")).and_then(Path::parent)
-        && cargo_recorded(root, exe)
-    {
-        return Install::Cargo { root: without_verbatim_prefix(root) };
+    if let Some(root) = exe.parent().filter(|bin| bin.ends_with("bin")).and_then(Path::parent) {
+        if cargo_recorded(root, exe) {
+            return Install::Cargo { root: without_verbatim_prefix(root) };
+        }
     }
 
     Install::Standalone

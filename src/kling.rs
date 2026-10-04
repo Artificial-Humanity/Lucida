@@ -353,11 +353,10 @@ fn task_payload(response: reqwest::blocking::Response, submitting: bool) -> Resu
     let refused = parsed
         .as_ref()
         .is_some_and(|payload| payload["code"].as_i64().unwrap_or(0) != 0);
-    if let Some(payload) = &parsed
-        && status.is_success()
-        && !refused
-    {
-        return Ok(payload.clone());
+    if let Some(payload) = &parsed {
+        if status.is_success() && !refused {
+            return Ok(payload.clone());
+        }
     }
 
     // Definite is a 4xx, whatever its body, or a success status carrying a

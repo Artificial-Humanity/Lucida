@@ -325,7 +325,7 @@ fn spent_since(entries: &[serde_json::Value], since: i64) -> f64 {
 /// **In-process only.** Two separate `lucida` processes — two shells, or a
 /// shell and the MCP server — each have their own, and can still both pass
 /// against the same ledger. Closing that needs a file lock, and
-/// `std::fs::File::lock` is newer than this crate's MSRV of 1.85; a locking
+/// `std::fs::File::lock` is newer than this crate's MSRV of 1.86; a locking
 /// crate would be a new dependency. So the gap is stated rather than closed.
 struct Held(Mutex<f64>);
 

@@ -1433,10 +1433,10 @@ fn generate_image(args: &Value) -> Result<String> {
     if price != crate::spend::Price::Free {
         text.push_str(&format!("\n\nCost: {}.", price.describe()));
     }
-    if let Some(commentary) = &image.commentary
-        && !commentary.is_empty()
-    {
-        text.push_str(&format!("\n\nModel commentary: {commentary}"));
+    if let Some(commentary) = &image.commentary {
+        if !commentary.is_empty() {
+            text.push_str(&format!("\n\nModel commentary: {commentary}"));
+        }
     }
     Ok(text)
 }

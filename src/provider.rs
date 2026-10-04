@@ -509,13 +509,13 @@ impl VideoCapabilities {
             );
         }
 
-        if let Some(seconds) = req.duration
-            && !self.duration.accepts(seconds)
-        {
-            bail!(
-                "`{me}` cannot render {seconds} seconds. It offers {}.",
-                self.duration.describe()
-            );
+        if let Some(seconds) = req.duration {
+            if !self.duration.accepts(seconds) {
+                bail!(
+                    "`{me}` cannot render {seconds} seconds. It offers {}.",
+                    self.duration.describe()
+                );
+            }
         }
 
         if req.negative_prompt.is_some() && !self.negative_prompt {
@@ -1004,16 +1004,16 @@ impl Capabilities {
             }
         }
 
-        if let (Some(aspect), AspectSupport::Pixels(pairs)) = (req.aspect, self.aspect)
-            && !pixel_pair_matches(pairs, aspect)
-        {
-            bail!(
-                "`{me}` offers only these shapes, as pixel pairs: {}.\n\n\
-                 None of them is {aspect}. A ratio such as `16:9` is accepted \
-                 wherever one of these has that shape. Pick one of them, or use \
-                 the `comfyui` provider, which takes free dimensions.",
-                pairs.join(", ")
-            );
+        if let (Some(aspect), AspectSupport::Pixels(pairs)) = (req.aspect, self.aspect) {
+            if !pixel_pair_matches(pairs, aspect) {
+                bail!(
+                    "`{me}` offers only these shapes, as pixel pairs: {}.\n\n\
+                     None of them is {aspect}. A ratio such as `16:9` is accepted \
+                     wherever one of these has that shape. Pick one of them, or use \
+                     the `comfyui` provider, which takes free dimensions.",
+                    pairs.join(", ")
+                );
+            }
         }
 
         Ok(())

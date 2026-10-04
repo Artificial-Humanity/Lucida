@@ -1899,10 +1899,10 @@ fn render_one(
         );
     })?;
 
-    if let Some(commentary) = &image.commentary
-        && !commentary.is_empty()
-    {
-        eprintln!("{commentary}");
+    if let Some(commentary) = &image.commentary {
+        if !commentary.is_empty() {
+            eprintln!("{commentary}");
+        }
     }
     if let Some(seed) = image.seed {
         eprintln!("Seed {seed} — pass `--seed {seed}` to render this again.");
@@ -2228,11 +2228,11 @@ pub fn write_billed(
 pub fn write_image(path: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
     let path = path.as_ref();
 
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
     }
 
     write_atomically(path, bytes, false)?;
@@ -2468,11 +2468,11 @@ mod tests {
             }
             // An explicit id wins, and is how a duplicate heading name is made
             // linkable at all.
-            if let Some(at) = line.find("<h")
-                && let Some(start) = line[at..].find("id=\"")
-            {
-                let rest = &line[at + start + 4..];
-                anchors.push(rest[..rest.find('"').unwrap()].to_string());
+            if let Some(at) = line.find("<h") {
+                if let Some(start) = line[at..].find("id=\"") {
+                    let rest = &line[at + start + 4..];
+                    anchors.push(rest[..rest.find('"').unwrap()].to_string());
+                }
             }
         }
 

@@ -2,11 +2,16 @@
 name = "lucida"
 version = "1.2.0"
 edition = "2024"
-# Edition 2024 needs 1.85. Stated so cargo refuses with "requires rustc 1.85 or
-# newer" rather than handing an older toolchain a wall of syntax errors — which
-# is what `cargo install --git`, the update path for anyone who did not take a
-# release binary, does today.
-rust-version = "1.85"
+# The true minimum, not the edition's: edition 2024 needs 1.85, but the locked
+# `icu_*` and `idna_adapter` crates (reached through `url`) declare 1.86, so 1.85
+# stops at "not supported by the following packages" before it compiles a line.
+# The source stays free of let-chains, which are stable only from 1.88; one slipping
+# in would pass a stable toolchain and break this floor. CI runs `cargo check` on
+# exactly this version, read from this line. Stated so cargo refuses with
+# "requires rustc 1.86 or newer" rather than handing an older toolchain a wall of
+# syntax errors — which is what `cargo install --git`, the update path for anyone
+# who did not take a release binary, does today.
+rust-version = "1.86"
 description = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, FLUX, Stability AI or OpenAI — a CLI and an MCP server"
 license = "Apache-2.0"
 

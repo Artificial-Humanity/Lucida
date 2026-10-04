@@ -293,17 +293,17 @@ fn no_key() -> anyhow::Error {
     // Someone holding the old name has a key that is present and correct, so
     // "no API key found" would send them to check the one thing that is not
     // wrong. Diagnose the rename instead, and say nothing about shells.
-    if let Some(replacement) = crate::config::replacement_for("GOOGLE_API_KEY")
-        && crate::config::origin("GOOGLE_API_KEY").is_some()
-    {
-        return anyhow!(
-            "GOOGLE_API_KEY is set, but Lucida no longer reads it — the setting \
-             was renamed to {replacement}.\n\n\
-             Rename it in your shell profile, or file it with:\n  \
-             lucida config --set {replacement}\n\n\
-             Everything Lucida reaches on Google is the Gemini API, so one name \
-             covers images and Veo alike."
-        );
+    if let Some(replacement) = crate::config::replacement_for("GOOGLE_API_KEY") {
+        if crate::config::origin("GOOGLE_API_KEY").is_some() {
+            return anyhow!(
+                "GOOGLE_API_KEY is set, but Lucida no longer reads it — the setting \
+                 was renamed to {replacement}.\n\n\
+                 Rename it in your shell profile, or file it with:\n  \
+                 lucida config --set {replacement}\n\n\
+                 Everything Lucida reaches on Google is the Gemini API, so one name \
+                 covers images and Veo alike."
+            );
+        }
     }
 
     anyhow!(
