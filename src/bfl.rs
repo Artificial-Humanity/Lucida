@@ -249,10 +249,15 @@ impl Client {
         let mut announced = String::new();
 
         loop {
-            // Between polls only. The render is submitted and billed by this
-            // point, so a cancellation stops the *waiting*, not the charge —
-            // which is what `cancel::check`'s message says out loud.
-            crate::cancel::check()?;
+            // Checked before the first poll as well as between the rest, so a
+            // client that has gone stops costing a poll at once. The render is
+            // submitted and billed by this point, so a cancellation stops the
+            // *waiting*, not the charge — and the error carries the polling URL,
+            // the one handle left on what was paid for. It used to return
+            // `cancel::check`'s bare message, which named nothing.
+            crate::cancel::check().map_err(|e| {
+                anyhow!("{e} Its polling URL was {polling_url}")
+            })?;
 
             if started.elapsed() > deadline {
                 bail!(
@@ -735,6 +740,29 @@ mod tests {
         assert!(error.contains("content moderation"), "{error}");
         assert!(error.contains("Nothing was charged"));
         assert_eq!(server.finish().len(), 2, "no further polling after a terminal state");
+    }
+
+    /// A cancellation that lands after the submit has been billed still names
+    /// the polling URL. It used to return `cancel::check`'s bare message, which
+    /// says a render may complete and be billed but gives no way to find it.
+    #[test]
+    fn a_cancellation_after_the_submit_names_the_polling_url() {
+        let submit = r#"{"id":"abc","polling_url":"{{server}}/v1/get_result?id=abc"}"#;
+        let server = serve(vec![Reply::json(submit)]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+        let token = crate::cancel::Token::new();
+        token.cancel();
+        let error = crate::cancel::with(token, || wired(&server).generate(&request))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(error.contains("/v1/get_result?id=abc"), "must name the polling URL: {error}");
+        assert_eq!(server.finish().len(), 1, "a cancelled wait must not poll");
     }
 
     /// An HTTP failure on submit flows through `explain_error` with the real

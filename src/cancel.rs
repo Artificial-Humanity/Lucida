@@ -97,9 +97,13 @@ pub fn cancelled() -> bool {
     })
 }
 
-/// Stops the work if it has been cancelled. Call between polls, never between
-/// a submit and its first poll — the render exists by then, and abandoning it
-/// without reporting the id would lose something already paid for.
+/// Stops the work if it has been cancelled.
+///
+/// Its message cannot name a render, because it does not know one. So once a
+/// submit has succeeded, a poll loop must not return this error bare: the render
+/// exists and is paid for, and abandoning it without reporting its id or
+/// polling URL loses something already billed. Such a loop adds the id to the
+/// error on the way out, the way its deadline error already does.
 pub fn check() -> Result<()> {
     if cancelled() {
         bail!(

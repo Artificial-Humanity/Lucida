@@ -539,9 +539,14 @@ impl Client {
         let started = Instant::now();
         let mut interval = Duration::from_millis(500);
         loop {
-            // Between polls only: the render is billed by now, so a cancellation
-            // stops the waiting, not the charge.
-            crate::cancel::check()?;
+            // Checked before the first poll as well, so a client that has gone
+            // stops costing a poll at once. The render is billed by now, so a
+            // cancellation stops the waiting, not the charge — and the error
+            // carries the task id, as the deadline's below does. It used to
+            // return `cancel::check`'s bare message, which named nothing.
+            crate::cancel::check().map_err(|e| {
+                anyhow!("{e} Its Runway task id is {id}.")
+            })?;
             if started.elapsed() > IMAGE_DEADLINE {
                 bail!(
                     "gave up after {} minutes. The render may still complete; its \
@@ -866,6 +871,27 @@ mod tests {
         assert_eq!(requests[2].path, "/tasks/img-1");
         assert_eq!(requests[3].path, "/signed/out.png");
         assert_eq!(requests[3].header("authorization"), None, "the key went to object storage");
+    }
+
+    /// A cancellation that lands after the submit has been billed still names
+    /// the task id, the way the deadline error does. It used to return
+    /// `cancel::check`'s bare message, which gave no way to find the render.
+    #[test]
+    fn a_cancellation_after_the_submit_names_the_task_id() {
+        let server = serve(vec![Reply::json(r#"{"id":"img-9"}"#)]);
+        let request = ImageRequest {
+            prompt: "a lighthouse at dusk".into(),
+            model: "gen4_image".into(),
+            ..Default::default()
+        };
+        let token = crate::cancel::Token::new();
+        token.cancel();
+        let error = crate::cancel::with(token, || wired(&server).generate(&request))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(error.contains("img-9"), "must name the task id: {error}");
+        assert_eq!(server.finish().len(), 1, "a cancelled wait must not poll");
     }
 
     /// A local reference file travels as a data URI — the endpoint takes
