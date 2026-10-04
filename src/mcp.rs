@@ -45,7 +45,9 @@ use crate::cancel;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -54,10 +56,16 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// How many tool calls can be in flight at once.
 ///
 /// Four rather than one, which is what this server effectively had, and rather
-/// than unbounded, which would let a client with a loop in it start a hundred
-/// paid renders. Four is enough that an agent generating a set of assets is not
-/// serialised, and small enough that the bill for a runaway client is bounded by
-/// something other than its own good behaviour.
+/// than unbounded, which would let a client with a loop in it have a hundred
+/// paid renders running at once. Four is enough that an agent generating a set
+/// of assets is not serialised.
+///
+/// It bounds concurrency, not the bill. The queue in front of the pool is
+/// unbounded, so a runaway client's hundred calls all still run, four at a
+/// time; this comment used to claim the pool bounded what such a client could
+/// spend, and it never did. What limits spend is the budget `spend` enforces
+/// on every render, and — once the client is gone — the hang-up handling at
+/// the end of [`run`], which drops whatever is still queued.
 const WORKERS: usize = 4;
 
 /// Requests currently being worked on, so a cancellation can find one.
@@ -126,6 +134,12 @@ where
     F: Fn(&Value) -> Result<Value> + Send + Clone + 'static,
 {
     let in_flight: InFlight = Arc::new(Mutex::new(HashMap::new()));
+    // Set once stdin closes. Read and written only under the `in_flight` lock,
+    // so a worker deciding whether to start a job and the reader deciding the
+    // client has gone cannot interleave: every job is either started before
+    // the hang-up, and cancelled with the rest of the running ones, or found
+    // queued after it and dropped.
+    let hung_up = Arc::new(AtomicBool::new(false));
 
     let (sender, receiver) = mpsc::channel::<Job>();
     let receiver = Arc::new(Mutex::new(receiver));
@@ -135,6 +149,7 @@ where
             let receiver = Arc::clone(&receiver);
             let out = Arc::clone(&out);
             let in_flight = Arc::clone(&in_flight);
+            let hung_up = Arc::clone(&hung_up);
             let handle = handle.clone();
             std::thread::spawn(move || {
                 loop {
@@ -154,7 +169,33 @@ where
                     let Ok(job) = job else { break };
 
                     let key = job.id.to_string();
-                    let result = cancel::with(job.token, || guarded(&handle, &job.params));
+
+                    // Decided before the handler is entered, because once it is
+                    // the token is only advisory: a provider that renders inside
+                    // one blocking request never looks at it. The worker used to
+                    // go straight to the handler, so a call cancelled while it
+                    // sat in the queue still rendered, and billed, the moment a
+                    // worker came free.
+                    let cancelled_while_queued = {
+                        let mut in_flight = in_flight.lock().unwrap();
+                        if hung_up.load(Ordering::Relaxed) {
+                            // The client has gone, so nobody will read a reply.
+                            // None is written: it would go to a closed pipe,
+                            // where all a write can do is fail with EPIPE.
+                            in_flight.remove(&key);
+                            continue;
+                        }
+                        job.token.is_cancelled()
+                    };
+
+                    let result = if cancelled_while_queued {
+                        Err(anyhow::anyhow!(
+                            "cancelled at the client's request before it started. \
+                             Nothing was submitted to a provider, so nothing was billed."
+                        ))
+                    } else {
+                        cancel::with(job.token, || guarded(&handle, &job.params))
+                    };
                     in_flight.lock().unwrap().remove(&key);
                     respond(&out, &job.id, result);
                 }
@@ -202,10 +243,32 @@ where
 
         if method == "tools/call" {
             let token = cancel::Token::new();
-            in_flight
-                .lock()
-                .unwrap()
-                .insert(id.to_string(), token.clone());
+            // A reused id is refused rather than queued. Inserting it replaced
+            // the first call's token, so a cancellation naming that id reached
+            // only the newer call, and the older one — possibly already
+            // rendering — could not be stopped by anything short of a hang-up.
+            // JSON-RPC requires ids to be unique among outstanding requests, so
+            // this is the client's error, and -32600 (invalid request) says so.
+            let admitted = match in_flight.lock().unwrap().entry(id.to_string()) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(slot) => {
+                    slot.insert(token.clone());
+                    true
+                }
+            };
+            if !admitted {
+                respond_error(
+                    &out,
+                    &id,
+                    -32600,
+                    &format!(
+                        "request id {id} belongs to a tools/call that has not finished yet. \
+                         JSON-RPC ids must be unique among outstanding requests. This call \
+                         was not started; send it again with an id not already in use."
+                    ),
+                );
+                continue;
+            }
             // Send cannot fail while a worker is alive, and if the pool has gone
             // the process is on its way down anyway.
             let _ = sender.send(Job { id, params, token });
@@ -215,13 +278,22 @@ where
         respond(&out, &id, dispatch(method, &params));
     }
 
-    // Stdin closed: the client has gone. Ask everything in flight to stop, then
-    // let the workers finish the line they are writing. Cancellation is
+    // Stdin closed: the client has gone. Calls still queued are dropped unrun —
+    // the workers see `hung_up` and discard them unanswered — and the ones
+    // already running are asked to stop. Draining the queue used to run every
+    // call the departed client had left in it, each a paid render that nobody
+    // would collect.
+    //
+    // Then the workers finish the line they are writing. Cancellation is
     // cooperative, so this is quick for anything in a poll loop — and for a
     // single blocking render it waits, which is right: that call is already paid
     // for and its result may still be worth writing to disk.
-    for token in in_flight.lock().unwrap().values() {
-        token.cancel();
+    {
+        let in_flight = in_flight.lock().unwrap();
+        hung_up.store(true, Ordering::Relaxed);
+        for token in in_flight.values() {
+            token.cancel();
+        }
     }
     drop(sender);
     for worker in workers {
@@ -256,24 +328,27 @@ where
 
 /// Writes one JSON-RPC reply, whole, under the output lock.
 fn respond<W: Write>(out: &Out<W>, id: &Value, result: Result<Value>) {
-    let response = match result {
-        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+    match result {
+        Ok(result) => write_reply(out, json!({ "jsonrpc": "2.0", "id": id, "result": result })),
         Err(e) => {
             // -32601 is "method not found", which clients may probe for
             // (resources/list, prompts/list); everything else is -32603.
-            let code = if e.to_string().starts_with("unknown method") {
-                -32601
-            } else {
-                -32603
-            };
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": code, "message": e.to_string() }
-            })
+            let message = e.to_string();
+            let code = if message.starts_with("unknown method") { -32601 } else { -32603 };
+            respond_error(out, id, code, &message);
         }
-    };
+    }
+}
 
+/// Writes one JSON-RPC error reply with a code chosen by the caller.
+fn respond_error<W: Write>(out: &Out<W>, id: &Value, code: i64, message: &str) {
+    write_reply(
+        out,
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+    );
+}
+
+fn write_reply<W: Write>(out: &Out<W>, response: Value) {
     let mut out = out.lock().unwrap();
     // A failed write means the client's pipe is gone. Nothing useful is left to
     // do about it here, and panicking on a worker would take the process down
@@ -1506,19 +1581,48 @@ mod tests {
         assert!(error.contains("model"));
     }
 
-    /// Drives the server over a scripted transcript and returns the replies, in
-    /// the order they were written.
-    fn drive<F>(script: &str, handle: F) -> Vec<Value>
+    /// A scripted client's side of stdin. `at_end` runs once, when the server
+    /// asks for more input after the last line, and end of input is reported
+    /// only after it returns.
+    ///
+    /// A plain `Cursor` reported end of input the instant the script was read,
+    /// which is a client that sends its requests and hangs up at once. That was
+    /// harmless while the server ran every queued call regardless; now that a
+    /// hang-up discards calls not yet started, each test has to say when its
+    /// client leaves. By the time `at_end` runs, every line has been acted on:
+    /// `BufReader` asks its inner reader for more only once the lines already
+    /// buffered have been handed out, and the loop handles each line before it
+    /// asks for the next.
+    struct Transcript<F: FnOnce()> {
+        lines: std::io::Cursor<Vec<u8>>,
+        at_end: Option<F>,
+    }
+
+    impl<F: FnOnce()> std::io::Read for Transcript<F> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.lines.read(buf)?;
+            if read == 0 {
+                if let Some(at_end) = self.at_end.take() {
+                    at_end();
+                }
+            }
+            Ok(read)
+        }
+    }
+
+    /// Runs the server over `script`, writing into `out`, and calls `at_end`
+    /// once every line has been acted on, hanging up when it returns. Returns
+    /// the replies in the order they were written.
+    fn converse<F, E>(script: &str, handle: F, out: Out<Vec<u8>>, at_end: E) -> Vec<Value>
     where
         F: Fn(&Value) -> Result<Value> + Send + Clone + 'static,
+        E: FnOnce(),
     {
-        let out = Arc::new(Mutex::new(Vec::new()));
-        run(
-            std::io::Cursor::new(script.to_string()),
-            Arc::clone(&out),
-            handle,
-        )
-        .unwrap();
+        let transcript = Transcript {
+            lines: std::io::Cursor::new(script.as_bytes().to_vec()),
+            at_end: Some(at_end),
+        };
+        run(std::io::BufReader::new(transcript), Arc::clone(&out), handle).unwrap();
 
         let written = out.lock().unwrap().clone();
         String::from_utf8(written)
@@ -1526,6 +1630,44 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("a reply was not whole JSON"))
             .collect()
+    }
+
+    /// Drives the server as a well-behaved client: it sends the script, runs
+    /// `at_end`, then waits for an answer to every request before hanging up.
+    fn drive_until<F, E>(script: &str, handle: F, at_end: E) -> Vec<Value>
+    where
+        F: Fn(&Value) -> Result<Value> + Send + Clone + 'static,
+        E: FnOnce(),
+    {
+        let expected = script
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|message| message.get("id").is_some())
+            .count();
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let written = Arc::clone(&out);
+
+        converse(script, handle, out, move || {
+            at_end();
+            // Bounded, so a missing reply fails the test's assertions rather
+            // than hanging it. Ten seconds is far beyond anything these
+            // in-memory handlers take.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                let replies = written.lock().unwrap().iter().filter(|b| **b == b'\n').count();
+                if replies >= expected {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+    }
+
+    fn drive<F>(script: &str, handle: F) -> Vec<Value>
+    where
+        F: Fn(&Value) -> Result<Value> + Send + Clone + 'static,
+    {
+        drive_until(script, handle, || {})
     }
 
     fn request(id: u64, method: &str, params: Value) -> String {
@@ -1603,6 +1745,154 @@ mod tests {
         assert_eq!(replies[0]["id"], 7);
         let message = replies[0]["error"]["message"].as_str().unwrap_or_default();
         assert!(message.contains("cancelled"), "{message}");
+    }
+
+    /// One `tools/call` line per `(id, n)`, with `n` in the arguments so a
+    /// handler can tell which call it was entered for.
+    fn calls_of(script: impl Iterator<Item = (u64, u64)>) -> String {
+        script
+            .map(|(id, n)| {
+                request(id, "tools/call", json!({ "name": "generate_image", "arguments": { "n": n } }))
+                    + "\n"
+            })
+            .collect()
+    }
+
+    fn cancellation(id: u64) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id }
+        })
+        .to_string()
+            + "\n"
+    }
+
+    /// A call cancelled while it waited for a worker is answered without ever
+    /// reaching the handler. The worker used to install the cancelled token and
+    /// call the handler anyway, and a provider that renders inside one blocking
+    /// request never looks at the token — so the render the user had cancelled
+    /// ran, and billed, once a worker came free.
+    ///
+    /// Every worker is held on a gate that opens only after the whole script —
+    /// the cancellation included — has been read, so the fifth call is still in
+    /// the queue when its cancellation arrives.
+    #[test]
+    fn a_call_cancelled_while_queued_never_reaches_the_handler() {
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opener = Arc::clone(&gate);
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&entered);
+
+        let queued = WORKERS as u64 + 1;
+        let script = calls_of((1..=queued).map(|n| (n, n))) + &cancellation(queued);
+
+        let replies = drive_until(
+            &script,
+            move |params| {
+                let n = params["arguments"]["n"].as_u64().unwrap();
+                entered.lock().unwrap().push(n);
+                while !gate.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(json!({ "content": [] }))
+            },
+            move || opener.store(true, std::sync::atomic::Ordering::SeqCst),
+        );
+
+        assert!(
+            !seen.lock().unwrap().contains(&queued),
+            "the cancelled call reached the handler: {:?}",
+            seen.lock().unwrap()
+        );
+        assert_eq!(replies.len(), WORKERS + 1);
+        let reply = replies
+            .iter()
+            .find(|r| r["id"] == json!(queued))
+            .expect("the cancelled call got no reply");
+        let message = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("cancelled"), "{reply}");
+        assert!(message.contains("Nothing was submitted"), "must say nothing was spent: {reply}");
+    }
+
+    /// When the client hangs up, calls still waiting for a worker are dropped
+    /// rather than run. Stdin closing used to cancel the running calls and then
+    /// let the workers drain the queue — running every call the departed client
+    /// had left in it, each one a paid render nobody would ever collect.
+    ///
+    /// Calls already running behave as they did: their tokens are cancelled and
+    /// they answer. Queued ones get no answer at all, because nobody is left to
+    /// read one.
+    #[test]
+    fn calls_still_queued_when_the_client_hangs_up_are_never_run() {
+        let started = Arc::new(Mutex::new(0usize));
+        let running = Arc::clone(&started);
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&entered);
+
+        let total = WORKERS as u64 + 3;
+        let script = calls_of((1..=total).map(|n| (n, n)));
+
+        let replies = converse(
+            &script,
+            move |params| {
+                entered.lock().unwrap().push(params["arguments"]["n"].as_u64().unwrap());
+                *started.lock().unwrap() += 1;
+                loop {
+                    cancel::check()?;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            },
+            Arc::new(Mutex::new(Vec::new())),
+            // Hangs up only once every worker is inside a call, so exactly the
+            // last three are still queued — and bounded, so a pool that never
+            // fills fails the assertions below instead of hanging the test.
+            move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while *running.lock().unwrap() < WORKERS && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            },
+        );
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (1..=WORKERS as u64).collect::<Vec<_>>(), "queued calls ran after the hang-up");
+        assert_eq!(replies.len(), WORKERS, "{replies:?}");
+        for reply in &replies {
+            assert!(reply["id"].as_u64().unwrap() <= WORKERS as u64, "{reply}");
+            let message = reply["error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains("cancelled"), "{reply}");
+        }
+    }
+
+    /// A `tools/call` reusing the id of one still in flight is refused, and the
+    /// first keeps its token. The second used to overwrite the first's entry, so
+    /// a cancellation naming that id reached only the newer call, and the older
+    /// one — already rendering — could no longer be stopped at all.
+    #[test]
+    fn a_call_reusing_an_id_still_in_flight_is_refused() {
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&entered);
+
+        let script = calls_of([(5, 1), (5, 2)].into_iter()) + &cancellation(5);
+        let replies = drive(&script, move |params| {
+            entered.lock().unwrap().push(params["arguments"]["n"].as_u64().unwrap());
+            loop {
+                cancel::check()?;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        // The first call may or may not have reached a worker before its
+        // cancellation did — either way the duplicate must never run.
+        assert!(!seen.lock().unwrap().contains(&2), "the duplicate was run: {:?}", seen.lock().unwrap());
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0]["id"], 5);
+        assert_eq!(replies[0]["error"]["code"], -32600, "{}", replies[0]);
+        assert_eq!(replies[1]["id"], 5);
+        let message = replies[1]["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("cancelled"), "the first call lost its token: {}", replies[1]);
     }
 
     /// Four workers, so four renders overlap rather than queueing. The handler
