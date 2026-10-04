@@ -17,8 +17,8 @@
 //! with a Ctrl-C.
 //!
 //! So the token is ambient to the thread doing the work. The MCP worker installs
-//! one for the duration of a tool call, and the poll loops ask [`check`] between
-//! sleeps. Nothing else in the program has to know cancellation exists.
+//! one for the duration of a tool call, and the poll loops ask [`check`] (or,
+//! on the free local lane, [`cancelled`]) between sleeps. Nothing else in the program has to know cancellation exists.
 //!
 //! # What it cannot do
 //!
@@ -104,6 +104,10 @@ pub fn cancelled() -> bool {
 /// exists and is paid for, and abandoning it without reporting its id or
 /// polling URL loses something already billed. Such a loop adds the id to the
 /// error on the way out, the way its deadline error already does.
+///
+/// Its "will still be billed" is about the paid lanes. ComfyUI's poll reads
+/// [`cancelled`] and words its own error instead, because there the sentence
+/// would be false.
 pub fn check() -> Result<()> {
     if cancelled() {
         bail!(

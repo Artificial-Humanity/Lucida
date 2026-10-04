@@ -703,15 +703,19 @@ impl Client {
             // prompt is queued by now, so a cancellation stops the *waiting*,
             // not the job — and the error carries the prompt id, the one handle
             // left on what would otherwise sit on someone's GPU. It used to
-            // return `cancel::check`'s bare message, which named nothing.
-            crate::cancel::check().map_err(|e| {
-                anyhow!(
-                    "{e} Its ComfyUI prompt id is {prompt_id}; it may still be \
-                     queued or running — remove it from the queue at {} (or \
-                     interrupt it) to stop it.",
+            // return `cancel::check`'s bare message, which named nothing, and
+            // then appended to it — which kept that message's "will still be
+            // billed", false on the one lane that bills nothing. So the
+            // flag is read here and the sentence is this lane's own.
+            if crate::cancel::cancelled() {
+                bail!(
+                    "cancelled at the client's request. Its ComfyUI prompt id is \
+                     {prompt_id}; it may still be queued or running — remove it \
+                     from the queue at {} (or interrupt it) to stop it. This lane \
+                     is free, so nothing is billed.",
                     self.base
-                )
-            })?;
+                );
+            }
 
             if started.elapsed() > deadline {
                 bail!(
@@ -1798,6 +1802,11 @@ mod tests {
         assert!(error.contains("cancelled"), "{error}");
         assert!(error.contains("p1"), "must name the prompt id: {error}");
         assert!(error.contains(server.url()), "must say where its queue is: {error}");
+        // The local lane bills nothing, so the shared message's "will still be
+        // billed" was false here and pointed a reader at a charge that does
+        // not exist.
+        assert!(!error.contains("will still be billed"), "{error}");
+        assert!(error.contains("nothing is billed"), "{error}");
         let requests = server.finish();
         assert_eq!(requests.len(), 4, "a cancelled wait must not poll");
         assert_eq!(requests[3].path, "/prompt");
