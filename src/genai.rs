@@ -380,6 +380,14 @@ fn extract_image(payload: &Value) -> Result<GeneratedImage> {
 
     let mut commentary = None;
     for part in parts {
+        // A thinking model interleaves its reasoning with the answer: thought
+        // parts carry `"thought": true`, and their `inlineData` is a *draft*
+        // image the model is still working on. Taking the first inlineData
+        // returned the draft as the result, and their text became the
+        // commentary. Only the non-thought parts are the answer.
+        if part["thought"].as_bool() == Some(true) {
+            continue;
+        }
         if let Some(text) = part["text"].as_str() {
             commentary = Some(text.trim().to_string());
         }
@@ -532,5 +540,37 @@ mod tests {
         });
         let error = extract_image(&payload).unwrap_err().to_string();
         assert!(error.contains("I can't draw that."));
+    }
+
+    /// A thought part's image is a draft, and its text is reasoning: neither is
+    /// the answer, wherever they fall among the parts.
+    #[test]
+    fn thought_parts_are_neither_the_image_nor_the_commentary() {
+        let payload = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "text": "Considering the composition", "thought": true },
+                { "inlineData": { "mimeType": "image/png",
+                                  "data": STANDARD.encode(b"draft") }, "thought": true },
+                { "text": "Here you go" },
+                { "inlineData": { "mimeType": "image/jpeg",
+                                  "data": STANDARD.encode(b"final") } }
+            ]}}]
+        });
+        let image = extract_image(&payload).unwrap();
+        assert_eq!(image.bytes, b"final");
+        assert_eq!(image.mime_type, "image/jpeg");
+        assert_eq!(image.commentary.as_deref(), Some("Here you go"));
+
+        // Nothing but thoughts is not an image, and the reasoning is not offered
+        // as the model's reply.
+        let only_thoughts = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "text": "hmm", "thought": true },
+                { "inlineData": { "mimeType": "image/png",
+                                  "data": STANDARD.encode(b"draft") }, "thought": true }
+            ]}}]
+        });
+        let error = extract_image(&only_thoughts).unwrap_err().to_string();
+        assert!(error.contains("no image data"), "{error}");
     }
 }
