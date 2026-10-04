@@ -38,10 +38,11 @@
 //!
 //! A `LUCIDA_BUDGET` that does not parse used to read as no budget at all, and
 //! so did one set beside `LUCIDA_NO_LEDGER`, whose ledger is the only place
-//! spend is counted. Both removed the cap without a word, which is the one
-//! failure a spend guard cannot have: whoever set it believes it is holding.
-//! Both now refuse every render that costs money and name the way out. Free
-//! renders are never refused, so the local lane stays the answer.
+//! spend is counted — or set where the ledger has nowhere to live, with no
+//! home or config directory to put it in. Each removed the cap without a word,
+//! which is the one failure a spend guard cannot have: whoever set it believes
+//! it is holding. All now refuse every render that costs money and name the
+//! way out. Free renders are never refused, so the local lane stays the answer.
 
 use crate::clock;
 use crate::provider::{Backend, Size};
@@ -396,9 +397,34 @@ pub fn check_batch(price: Price, count: usize, what: &str) -> Result<Reservation
         count,
         what,
         budget_setting(),
-        crate::ledger::disabled(),
+        Ledger::current(),
         spent_recently,
     )
+}
+
+/// Whether there is a ledger for spend to be counted in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ledger {
+    Kept,
+    /// `LUCIDA_NO_LEDGER` is set.
+    SwitchedOff,
+    /// Not switched off, but with nowhere to live: no `LUCIDA_CONFIG`, no
+    /// `XDG_CONFIG_HOME`, no home directory. Every write is skipped, so to the
+    /// budget it is the same as switched off — and it used to pass everything,
+    /// because only the switch was checked.
+    Nowhere,
+}
+
+impl Ledger {
+    fn current() -> Ledger {
+        if crate::ledger::disabled() {
+            Ledger::SwitchedOff
+        } else if crate::ledger::path().is_none() {
+            Ledger::Nowhere
+        } else {
+            Ledger::Kept
+        }
+    }
 }
 
 /// [`check_batch`] with its inputs passed in, so the arithmetic can be tested
@@ -409,7 +435,7 @@ fn reserve(
     count: usize,
     what: &str,
     budget: Budget,
-    ledger_off: bool,
+    ledger: Ledger,
     spent: impl FnOnce() -> f64,
 ) -> Result<Reservation> {
     let nothing = || Reservation { usd: 0.0, held };
@@ -446,19 +472,35 @@ fn reserve(
         }
     };
 
-    // The budget is counted from the ledger, so with the ledger off nothing
-    // spent is ever counted and the cap could never be reached. It used to
-    // allow everything, forever, without saying so.
-    if ledger_off {
-        return refuse(format!(
-            "LUCIDA_BUDGET is set (${budget:.2}), and so is LUCIDA_NO_LEDGER. The \
-             budget is counted from the render ledger, so with the ledger off \
-             nothing spent is ever counted and the cap cannot hold — this {what} \
-             is refused rather than sent unmetered.\n\n\
-             Unset LUCIDA_NO_LEDGER to keep the budget (the ledger records your \
-             prompts), or unset LUCIDA_BUDGET to run without a cap. comfyui \
-             renders locally, costs nothing, and is never refused."
-        ));
+    // The budget is counted from the ledger, so with no ledger nothing spent
+    // is ever counted and the cap could never be reached. It used to allow
+    // everything, forever, without saying so.
+    match ledger {
+        Ledger::Kept => {}
+        Ledger::SwitchedOff => {
+            return refuse(format!(
+                "LUCIDA_BUDGET is set (${budget:.2}), and so is LUCIDA_NO_LEDGER. \
+                 The budget is counted from the render ledger, so with the ledger \
+                 off nothing spent is ever counted and the cap cannot hold — this \
+                 {what} is refused rather than sent unmetered.\n\n\
+                 Unset LUCIDA_NO_LEDGER to keep the budget (the ledger records your \
+                 prompts), or unset LUCIDA_BUDGET to run without a cap. comfyui \
+                 renders locally, costs nothing, and is never refused."
+            ));
+        }
+        Ledger::Nowhere => {
+            return refuse(format!(
+                "LUCIDA_BUDGET is set (${budget:.2}), but the render ledger has \
+                 nowhere to live: none of HOME, USERPROFILE, XDG_CONFIG_HOME or \
+                 LUCIDA_CONFIG is set (nor APPDATA, on Windows), so there is no \
+                 config directory to keep it in. The budget is counted from the ledger, so nothing spent would \
+                 ever be counted and the cap cannot hold — this {what} is refused \
+                 rather than sent unmetered.\n\n\
+                 Set HOME, or LUCIDA_CONFIG to a config file whose directory can \
+                 hold the ledger, or unset LUCIDA_BUDGET to run without a cap. \
+                 comfyui renders locally, costs nothing, and is never refused."
+            ));
+        }
     }
 
     // One lock across the read, the decision and the reservation: anything
@@ -770,10 +812,10 @@ mod tests {
         let veo = Price::PerSecond { usd: 0.40, verified: "2026-08-09", seconds: 8 };
         let budget = || Budget::Cap(5.0);
 
-        let first = reserve(&TABLE, veo, 1, "video render", budget(), false, || 0.0);
+        let first = reserve(&TABLE, veo, 1, "video render", budget(), Ledger::Kept, || 0.0);
         assert!(first.is_ok(), "$3.20 fits a $5.00 budget");
 
-        let second = reserve(&TABLE, veo, 1, "video render", budget(), false, || 0.0);
+        let second = reserve(&TABLE, veo, 1, "video render", budget(), Ledger::Kept, || 0.0);
         let message = refusal(second);
         assert!(message.contains("hold another $3.20"), "{message}");
 
@@ -781,7 +823,7 @@ mod tests {
         // being written looks like from here.
         drop(first);
         assert_eq!(*TABLE.lock(), 0.0);
-        assert!(reserve(&TABLE, veo, 1, "video render", budget(), false, || 0.0).is_ok());
+        assert!(reserve(&TABLE, veo, 1, "video render", budget(), Ledger::Kept, || 0.0).is_ok());
     }
 
     /// The reservation is released on every way out, a panic included — or one
@@ -793,7 +835,7 @@ mod tests {
         let price = Price::PerImage { usd: 0.134, verified: "2026-08-09" };
 
         let unwound = std::panic::catch_unwind(|| {
-            let _held = reserve(&TABLE, price, 1, "render", Budget::Cap(1.0), false, || 0.0)
+            let _held = reserve(&TABLE, price, 1, "render", Budget::Cap(1.0), Ledger::Kept, || 0.0)
                 .expect("fits");
             panic!("the provider call blew up");
         });
@@ -824,10 +866,10 @@ mod tests {
         static TABLE: Held = Held::new();
         let unreadable = || Budget::Unreadable("$5".to_string());
 
-        let message = refusal(reserve(&TABLE, Price::Unverified, 1, "render", unreadable(), false, || 0.0));
+        let message = refusal(reserve(&TABLE, Price::Unverified, 1, "render", unreadable(), Ledger::Kept, || 0.0));
         assert!(message.contains("`$5`") && message.contains("such as `5`"), "{message}");
 
-        assert!(reserve(&TABLE, Price::Free, 1, "render", unreadable(), false, || 0.0).is_ok());
+        assert!(reserve(&TABLE, Price::Free, 1, "render", unreadable(), Ledger::Kept, || 0.0).is_ok());
     }
 
     /// The ledger is where spend is counted, so a budget beside
@@ -836,7 +878,7 @@ mod tests {
     fn a_budget_with_no_ledger_refuses_a_paid_render() {
         static TABLE: Held = Held::new();
 
-        let result = reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(5.0), true, || 0.0);
+        let result = reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(5.0), Ledger::SwitchedOff, || 0.0);
         assert!(is_refusal(&result));
         let message = refusal(result);
         assert!(
@@ -844,9 +886,9 @@ mod tests {
             "{message}"
         );
 
-        assert!(reserve(&TABLE, Price::Free, 1, "render", Budget::Cap(5.0), true, || 0.0).is_ok());
+        assert!(reserve(&TABLE, Price::Free, 1, "render", Budget::Cap(5.0), Ledger::SwitchedOff, || 0.0).is_ok());
         // And with no budget at all, the ledger being off is nobody's business here.
-        assert!(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Unset, true, || 0.0).is_ok());
+        assert!(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Unset, Ledger::SwitchedOff, || 0.0).is_ok());
     }
 
     /// An image whose wait was abandoned was billed all the same, so the window
@@ -864,6 +906,23 @@ mod tests {
         assert!((spent_since(&entries, 50) - 0.14).abs() < 1e-9, "{}", spent_since(&entries, 50));
     }
 
+    /// A ledger with nowhere to live counts nothing, exactly as one switched
+    /// off does, and is refused the same way — naming the actual cause, since
+    /// telling someone to unset a `LUCIDA_NO_LEDGER` they never set is no help.
+    #[test]
+    fn a_budget_with_nowhere_to_keep_the_ledger_refuses_a_paid_render() {
+        static TABLE: Held = Held::new();
+
+        let result = reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(5.0), Ledger::Nowhere, || 0.0);
+        assert!(is_refusal(&result));
+        let message = refusal(result);
+        assert!(message.contains("nowhere to live") && message.contains("HOME"), "{message}");
+        assert!(!message.contains("LUCIDA_NO_LEDGER"), "names a setting nobody set: {message}");
+
+        assert!(reserve(&TABLE, Price::Free, 1, "render", Budget::Cap(5.0), Ledger::Nowhere, || 0.0).is_ok());
+        assert!(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Unset, Ledger::Nowhere, || 0.0).is_ok());
+    }
+
     /// The video refusal states its assumption in the same words as the image
     /// one: an assumed upper bound, not a price.
     #[test]
@@ -871,7 +930,7 @@ mod tests {
         static TABLE: Held = Held::new();
         let clip = Price::UnverifiedVideo { seconds: 10 };
 
-        let message = refusal(reserve(&TABLE, clip, 1, "video render", Budget::Cap(1.0), false, || 0.0));
+        let message = refusal(reserve(&TABLE, clip, 1, "video render", Budget::Cap(1.0), Ledger::Kept, || 0.0));
         assert!(message.contains("$0.50 a second for 10s"), "{message}");
         assert!(message.contains("assumed upper bound"), "{message}");
     }

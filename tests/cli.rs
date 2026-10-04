@@ -692,6 +692,25 @@ fn a_budget_with_the_ledger_off_refuses_a_paid_render() {
     .exits(0);
 }
 
+/// With no home directory the ledger has nowhere to live, so nothing spent is
+/// counted — the same hole as `LUCIDA_NO_LEDGER`, refused the same way, and
+/// named for what it is.
+#[test]
+fn a_budget_with_nowhere_to_keep_the_ledger_refuses_a_paid_render() {
+    let sandbox = Sandbox::new("budget-homeless");
+    let homeless = || {
+        let mut cmd = lucida(&sandbox);
+        cmd.env_remove("HOME").env_remove("USERPROFILE").env("LUCIDA_BUDGET", "5");
+        cmd
+    };
+    run(homeless().args(["generate", "x", "--provider", "google", "--dry-run"]))
+        .exits(2)
+        .says("nowhere to live")
+        .never_says("LUCIDA_NO_LEDGER");
+
+    run(homeless().args(["generate", "x", "--provider", "comfyui", "--dry-run"])).exits(0);
+}
+
 // --- the render ledger ------------------------------------------------------
 //
 // Checked out of a real process because the ledger's location is resolved at
