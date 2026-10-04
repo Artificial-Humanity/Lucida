@@ -439,6 +439,27 @@ fn area_dimensions(req: &ImageRequest, target: u32) -> (u32, u32) {
     (round(width), round(height))
 }
 
+/// What a file actually is, falling back to what it is called.
+///
+/// The bytes decide, as in `genai`: the extension is a claim by whoever named
+/// the file, and this value is declared to OpenAI as the part's content type. A
+/// JPEG saved as `.png` was declared PNG. The name answers only for a file whose
+/// signature `sniff_mime` does not know, and PNG is the last resort because it is
+/// what Lucida writes.
+fn mime_of(name: &str, bytes: &[u8]) -> &'static str {
+    if let Some(sniffed) = crate::sniff_mime(bytes) {
+        return sniffed;
+    }
+    let name = name.to_ascii_lowercase();
+    if name.ends_with(".webp") {
+        "image/webp"
+    } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "image/png"
+    }
+}
+
 fn file_part(path: &str) -> Result<reqwest::blocking::multipart::Part> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {path}"))?;
     let name = Path::new(path)
@@ -446,15 +467,7 @@ fn file_part(path: &str) -> Result<reqwest::blocking::multipart::Part> {
         .and_then(|n| n.to_str())
         .unwrap_or("image.png")
         .to_string();
-    let mime = if name.to_ascii_lowercase().ends_with(".webp") {
-        "image/webp"
-    } else if name.to_ascii_lowercase().ends_with(".jpg")
-        || name.to_ascii_lowercase().ends_with(".jpeg")
-    {
-        "image/jpeg"
-    } else {
-        "image/png"
-    };
+    let mime = mime_of(&name, &bytes);
     reqwest::blocking::multipart::Part::bytes(bytes)
         .file_name(name)
         .mime_str(mime)
@@ -845,5 +858,41 @@ mod tests {
         let requests = server.finish();
         assert_eq!(requests[1].path, "/dl/img.png");
         assert_eq!(requests[1].header("authorization"), None);
+    }
+
+    #[test]
+    fn an_input_file_is_typed_by_its_bytes_before_its_name() {
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0];
+        let png = [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(mime_of("screenshot.png", &jpeg), "image/jpeg");
+        assert_eq!(mime_of("mislabelled.jpg", &png), "image/png");
+        // The name is the fallback for what the sniffer does not know.
+        assert_eq!(mime_of("unknown.webp", b"\x00\x01"), "image/webp");
+        assert_eq!(mime_of("unknown.JPEG", b"\x00\x01"), "image/jpeg");
+        assert_eq!(mime_of("unknown.dat", b"\x00\x01"), "image/png");
+    }
+
+    /// On the wire: the part's declared content type is what OpenAI validates the
+    /// upload against.
+    #[test]
+    fn a_jpeg_named_png_is_declared_as_a_jpeg() {
+        let dir = std::env::temp_dir().join(format!("lucida-openai-mime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("shot.png");
+        std::fs::write(&source, [0xFFu8, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]).unwrap();
+
+        let server = serve(vec![Reply::json(&b64_reply(b"edited"))]);
+        let request = ImageRequest {
+            prompt: "make it night".into(),
+            model: "gpt-image-1.5".into(),
+            references: vec![source.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        wired(&server).generate(&request).unwrap();
+
+        let body = server.finish()[0].body_text().to_ascii_lowercase();
+        assert!(body.contains("content-type: image/jpeg"), "{body}");
+        assert!(!body.contains("content-type: image/png"), "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
