@@ -141,8 +141,8 @@ lucida config                           # displays active configuration sources
 | `LUCIDA_COMFYUI_URL` | URL | ComfyUI base URL (default: `http://127.0.0.1:8188`) |
 | `LUCIDA_COMFYUI_AUTH` | credentials | ComfyUI authentication (`user:password`, `Bearer …`, or `Basic …`) |
 | `LUCIDA_COMFYUI_CA` | path | Path to PEM file for a private CA |
-| `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`). Set but naming no provider (`,`) is refused, not read as unset |
-| `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`). Set but naming no provider is refused, not read as unset |
+| `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`). An empty or whitespace-only value counts as unset. Set but naming no provider (`,`), naming an unknown one, or listing none you hold a key for is refused (exit 2), never read as unset |
+| `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`). An empty or whitespace-only value counts as unset. Set but naming no provider (`,`), naming an unknown one, or listing none you hold a key for is refused (exit 2), never read as unset |
 | `LUCIDA_NO_UPDATE_CHECK` | flag | Set to any non-empty value to disable daily update notices |
 | `LUCIDA_NO_LEDGER` | flag | Set to any non-empty value to disable recording renders in the ledger |
 | `LUCIDA_BUDGET` | USD | Rolling 24-hour spending cap in USD (refuses renders exceeding limit) |

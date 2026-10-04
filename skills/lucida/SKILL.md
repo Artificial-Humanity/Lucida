@@ -66,7 +66,10 @@ and naming a provider without a model gets that provider's own default. Naming
 neither consults the user's ordered preference, if they set one, and takes the
 first provider they hold a credential for — **a preference, never a fallback**:
 if that provider then refuses a parameter, the answer is the refusal, not a
-quiet hop to the next name on the list.
+quiet hop to the next name on the list. A preference that names no provider,
+names one that does not exist, or lists none the user holds a key for is
+refused (exit 2) rather than falling back to the built-in default; the fix is
+the user's setting, not a retry.
 
 ## Ask the user which one, when the choice is theirs to make
 

@@ -742,13 +742,19 @@ fn video_modes() -> String {
 /// The setting and the fallback both come from the `Preferred` impl that
 /// `resolve_default` itself reads. A `model` that is given decides on its own,
 /// before any of that, and is said first because it is the case an agent meets.
+///
+/// All three ways a set preference can fail are `out::Refused` in
+/// `provider::preference_list` and `resolve_default`. Two of them were plain
+/// errors (exit 1) while this sentence called them refused, so the word was
+/// true of one case in three.
 fn default_provider_note<T: crate::provider::Preferred>() -> String {
     format!(
         "Inferred from `model` when one is given. With neither, the first provider \
          in {setting} that is usable (its credential is configured, or it needs \
-         none), or {built_in} when that setting is unset. If the setting is set \
-         but none of its providers is usable, or it names one that does not \
-         exist, the call is refused rather than falling back to {built_in}.",
+         none), or {built_in} when that setting is unset or blank. If the setting \
+         is set but names no provider at all (only commas), names one that does \
+         not exist, or none of its providers is usable, the call is refused \
+         (exit 2, nothing spent) rather than falling back to {built_in}.",
         setting = T::SETTING,
         built_in = T::BUILT_IN.provider_name()
     )
@@ -1936,10 +1942,12 @@ mod tests {
             // order, never a fallback chain, so a setting nothing satisfies
             // refuses instead of quietly reaching the built-in provider. Without
             // this sentence a reader would take the built-in for a safety net.
-            assert!(
-                text.contains("the call is refused rather than falling back to"),
-                "{text}"
-            );
+            assert!(text.contains("the call is refused"), "{text}");
+            assert!(text.contains("rather than falling back to"), "{text}");
+            // All three refusals are named, the empty list among them.
+            assert!(text.contains("names no provider at all"), "{text}");
+            assert!(text.contains("does not exist"), "{text}");
+            assert!(text.contains("none of its providers is usable"), "{text}");
             // ComfyUI needs no credential and is usable without one.
             assert!(text.contains("or it needs none"), "{text}");
         }

@@ -1426,14 +1426,16 @@ fn preference_list<T: Preferred>() -> Result<Option<Vec<T>>> {
         if entry.is_empty() {
             continue;
         }
+        // A refusal (exit 2) rather than an error: nothing has been sent, and a
+        // retry cannot succeed until the list changes.
         let parsed = T::parse_name(entry).map_err(|e| {
-            anyhow::anyhow!(
+            anyhow::Error::new(crate::out::Refused(format!(
                 "{setting} lists `{entry}`, which is not a provider.\n\n{e}\n\n\
                  Fix the list rather than leaving it: a name nothing recognises \
                  would otherwise hand the render to whichever provider came \
                  next, which is not what you wrote down.",
                 setting = T::SETTING,
-            )
+            )))
         })?;
         chain.push(parsed);
     }
@@ -1492,7 +1494,8 @@ pub fn resolve_default<T: Preferred>() -> Result<(T, DefaultSource)> {
 
     // Every entry named, none usable. Falling through to the built-in here
     // would route to a provider the user deliberately left off their list, so
-    // this refuses and says exactly which credential would settle it.
+    // this refuses — exit 2, since nothing was sent and only a key or the list
+    // can change the answer — and says exactly which credential would settle it.
     let missing = chain
         .iter()
         .map(|c| match c.credential_setting() {
@@ -1521,13 +1524,13 @@ pub fn resolve_default<T: Preferred>() -> Result<(T, DefaultSource)> {
         )
     };
 
-    bail!(
+    Err(anyhow::Error::new(crate::out::Refused(format!(
         "no provider in {setting} has a credential configured.\n\n{missing}{aside}\n\n\
          Set one of those keys, name a provider explicitly, or clear {setting} to \
          return to the built-in default ({built_in}).",
         setting = T::SETTING,
         built_in = T::BUILT_IN.provider_name(),
-    )
+    ))))
 }
 
 #[cfg(test)]
@@ -1588,6 +1591,37 @@ mod tests {
             assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{raw:?}");
             assert!(format!("{video:#}").contains("LUCIDA_VIDEO_PROVIDERS"), "{video:#}");
         }
+    }
+
+    /// The other two ways a set preference can fail are refusals too.
+    ///
+    /// Both used to leave as plain errors (exit 1) while the generated schema
+    /// prose called them refused. A wrapper retries on 1, and a retry cannot
+    /// succeed here: nothing was sent, and the list or a key has to change
+    /// first — which is exactly what exit 2 says.
+    #[test]
+    fn an_unknown_name_or_an_unusable_list_is_refused() {
+        fn refusal<T: Preferred + std::fmt::Debug>(raw: &str) -> anyhow::Error {
+            crate::config::with_injected(&[(T::SETTING, raw)], || {
+                resolve_default::<T>().expect_err("the preference was accepted")
+            })
+        }
+
+        // A name nothing recognises.
+        let image = refusal::<Backend>("bflx,comfyui");
+        assert_eq!(crate::out::code_for(&image), crate::out::REFUSED, "{image:#}");
+        assert!(format!("{image:#}").contains("lists `bflx`"), "{image:#}");
+        let video = refusal::<VideoBackend>("veox,runway");
+        assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{video:#}");
+        assert!(format!("{video:#}").contains("lists `veox`"), "{video:#}");
+
+        // Every name real, none usable: nothing is injected, so no key is held.
+        let image = refusal::<Backend>("openai,stability");
+        assert_eq!(crate::out::code_for(&image), crate::out::REFUSED, "{image:#}");
+        assert!(format!("{image:#}").contains("has a credential configured"), "{image:#}");
+        let video = refusal::<VideoBackend>("runway,kling");
+        assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{video:#}");
+        assert!(format!("{video:#}").contains("has a credential configured"), "{video:#}");
     }
 
     /// An unset preference is the built-in default, and says so — the sentence

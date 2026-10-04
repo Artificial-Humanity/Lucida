@@ -1298,23 +1298,30 @@ fn a_preference_refuses_rather_than_falling_back_to_an_unlisted_provider() {
         .says("You do have credentials for google")
         // and did not quietly render there.
         .never_says("\"provider\":\"google\"");
-    assert_ne!(out.code, 0, "an unusable preference must not exit 0");
+    // A refusal, not a failure: nothing was sent, and retrying cannot succeed
+    // until the configuration changes — which is what exit 2 tells a wrapper.
+    out.exits(2);
 }
 
 #[test]
 fn an_unknown_name_in_the_preference_refuses_rather_than_being_skipped() {
-    let sandbox = Sandbox::new("pref-typo");
-    let out = run(lucida(&sandbox)
-        .env("BFL_API_KEY", "k")
-        .env("LUCIDA_IMAGE_PROVIDERS", "bflx,bfl")
-        .args(["generate", "x", "--dry-run"]));
-
     // Skipping a typo would hand the render to whatever came next — which here
-    // is a real provider, so it would have looked like it worked.
-    out.says("LUCIDA_IMAGE_PROVIDERS lists `bflx`")
-        .says("not a provider")
-        .never_says("\"provider\":\"bfl\"");
-    assert_ne!(out.code, 0, "an unparseable preference must not exit 0");
+    // is a real provider, so it would have looked like it worked. Exit 2,
+    // because nothing was sent and the list has to change before a retry can
+    // succeed; both media share the function, so both are driven.
+    for (setting, key, list, command) in [
+        ("LUCIDA_IMAGE_PROVIDERS", "BFL_API_KEY", "bflx,bfl", &["generate", "x", "--dry-run", "--json"][..]),
+        ("LUCIDA_VIDEO_PROVIDERS", "RUNWAY_API_KEY", "runwayx,runway", &["video", "x", "--dry-run", "--json"][..]),
+    ] {
+        let sandbox = Sandbox::new("pref-typo");
+        let out = run(lucida(&sandbox).env(key, "k").env(setting, list).args(command));
+        let typo = list.split(',').next().unwrap();
+        out.exits(2)
+            .says(&format!("{setting} lists `{typo}`"))
+            .says("not a provider")
+            .never_says("\"provider\":\"bfl\"")
+            .never_says("\"provider\":\"runway\"");
+    }
 }
 
 #[test]
@@ -1329,6 +1336,24 @@ fn a_preference_with_no_entries_is_refused_rather_than_read_as_unset() {
         let sandbox = Sandbox::new("pref-empty");
         let out = run(lucida(&sandbox).env(setting, ", ,").args(command));
         out.exits(2).says(setting).says("no provider").never_says("no preference set");
+    }
+}
+
+/// Blank is unset, and only blank: the line between this and the refusal above.
+///
+/// `config::var` drops an empty or whitespace-only value before the preference
+/// is ever parsed, so `"  "` is the built-in default and says so. `", ,"` is
+/// not blank — it holds commas — and is refused. A change to either side moves
+/// the line, which is why both are pinned here and in README.md.
+#[test]
+fn a_blank_preference_counts_as_unset() {
+    for (setting, key, command) in [
+        ("LUCIDA_IMAGE_PROVIDERS", "GEMINI_API_KEY", &["generate", "x", "--dry-run"][..]),
+        ("LUCIDA_VIDEO_PROVIDERS", "GEMINI_API_KEY", &["video", "x", "--dry-run"][..]),
+    ] {
+        let sandbox = Sandbox::new("pref-blank");
+        let out = run(lucida(&sandbox).env(key, "g").env(setting, "  ").args(command));
+        out.exits(0).says("no preference set");
     }
 }
 
