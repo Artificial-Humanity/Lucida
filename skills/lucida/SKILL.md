@@ -167,6 +167,9 @@ than hidden, so read what comes back rather than assuming the request was met.
   remedy in the first case and a way to degrade an exact render in the second —
   so check rather than assume. The mask entry in the capability report states
   which kind you have.
+  A mask is a PNG or WebP whose *transparent* pixels mark what to change; a
+  provider that reads it from the alpha channel refuses a mask with none, and one
+  that keeps the source's shape refuses `--aspect` / `--size` alongside a mask.
 - **A local render can take minutes and reports elapsed time while it works.**
   It has not hung.
 - **A slow render does not block the server.** Other tool calls run alongside it

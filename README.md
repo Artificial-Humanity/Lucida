@@ -166,7 +166,7 @@ Values defined in a configuration file take precedence over environment variable
 
 * **Provider resolution:** Selected with `--provider <name>`. If omitted, Lucida infers the provider from `--model` or falls back to the order defined in `LUCIDA_IMAGE_PROVIDERS` / `LUCIDA_VIDEO_PROVIDERS`.
 * **Capability inspection:** Run `lucida models --provider <name>` to view accessible models, supported parameters, and remaining account balances.
-* **Mask handling:** `comfyui` performs pixel-binding compositing (unmasked pixels remain byte-identical). `openai` treats masks as advisory guidance.
+* **Mask handling:** `comfyui` performs pixel-binding compositing (unmasked pixels remain byte-identical). `openai` treats masks as advisory guidance. On both, transparent pixels mark the region to change; `comfyui` reads the mask's alpha channel and refuses a PNG, WebP or JPEG without one (it would select nothing), and refuses `--aspect` / `--size` together with a mask, because a masked edit keeps the source's shape.
 
 ## Commands
 
@@ -223,6 +223,8 @@ Workflows use parameter replacement tokens:
 | `%seed%`, `%steps%`, `%cfg%` | `--seed`, `--steps`, `--guidance` |
 
 Tokens must exist in the workflow file for corresponding CLI flags to be applied.
+
+A workflow with no `%seed%` renders with the seed its own graph names, so Lucida reports and records no seed for it.
 
 ## MCP server
 
