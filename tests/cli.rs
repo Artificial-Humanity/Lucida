@@ -778,6 +778,9 @@ fn the_server_never_emits_a_carriage_return() {
     let sandbox = Sandbox::new("mcp-lf");
     let out = mcp(&sandbox, &format!("{TOOLS_LIST}\n"));
 
+    // A server that never started has no CR in its output either. Require the
+    // response, and a clean exit, so there is something for the check to see.
+    out.exits(0).says("generate_image");
     assert!(
         !out.stdout.contains('\r'),
         "the server emitted CR in its output"
@@ -786,17 +789,44 @@ fn the_server_never_emits_a_carriage_return() {
 
 #[test]
 fn a_notification_draws_no_response() {
+    // An empty stdout is also what a server that failed to start produces. So a
+    // `ping` follows the notification: its answer proves the server was reading,
+    // and, being the only line, that the notification before it drew none.
     let sandbox = Sandbox::new("mcp-notify");
     let out = mcp(
         &sandbox,
-        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\
+         {\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n",
     );
 
-    assert!(
-        out.stdout.trim().is_empty(),
-        "replied to a notification:\n{}",
+    out.exits(0);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected only the ping's reply, so the notification drew none:\n{}",
         out.stdout
     );
+    let reply: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("the one reply must be a JSON document");
+    assert_eq!(reply["id"], 7, "the reply is not the ping's: {reply}");
+}
+
+#[test]
+fn lucida_config_names_the_file_in_use() {
+    // The process-level half of the `src/config.rs` unit test for the same
+    // rule: that unit test cannot set the variable without racing its
+    // neighbours, so the proof that it is read at all lives here, where each
+    // run has an environment of its own.
+    let sandbox = Sandbox::new("config-explicit");
+    let file = sandbox.dir.join("elsewhere.env");
+    fs::write(&file, "OPENAI_API_KEY=sk-not-a-real-key\n").unwrap();
+
+    let out = run(lucida(&sandbox).env("LUCIDA_CONFIG", &file).arg("config"));
+
+    out.exits(0)
+        .says(&format!("Config file: {}", file.display()))
+        .says("set (config file)");
 }
 
 // --- the file this replaced -------------------------------------------------
@@ -1016,5 +1046,12 @@ fn a_current_video_model_carries_no_such_warning() {
     let sandbox = Sandbox::new("veo-current");
     let out = run(lucida(&sandbox).args(["video", "x", "--model", "veo-fast", "--dry-run"]));
 
-    out.never_says("retired").never_says("expect this to fail");
+    // The warning's absence means nothing from a command that did not run, so
+    // require the dry run's own output first: it exits 0 and names the model
+    // that `veo-fast` resolves to.
+    out.exits(0)
+        .says("Dry run")
+        .says("veo-3.1-fast-generate-preview")
+        .never_says("retired")
+        .never_says("expect this to fail");
 }
