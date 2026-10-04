@@ -72,6 +72,18 @@ fn takes_aspect_ratio_only(id: &str) -> bool {
     id.starts_with("flux-kontext") || id == "flux-pro-1.1-ultra"
 }
 
+/// The known models that take only a ratio from a short list and no size, read
+/// off [`capabilities`] so that every sentence naming them (the MCP schema, the
+/// `--size` refusal, `lucida models`) is generated and cannot drift from it.
+pub fn ratio_only_models() -> Vec<&'static str> {
+    KNOWN_MODELS.iter().copied().filter(|m| !capabilities(m).size).collect()
+}
+
+/// The known models that take pixel dimensions: any ratio, and `--size`.
+pub fn sized_models() -> Vec<&'static str> {
+    KNOWN_MODELS.iter().copied().filter(|m| capabilities(m).size).collect()
+}
+
 /// Friendly names for the endpoints, which are the model ids here.
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("bfl", "flux-2-pro"),
@@ -755,6 +767,17 @@ mod tests {
         }
     }
 
+    /// The partition the MCP schema, `lucida models` and the `--size` refusal
+    /// are generated from.
+    #[test]
+    fn the_known_models_partition_by_whether_they_take_a_size() {
+        let ratio_only = ratio_only_models();
+        let sized = sized_models();
+        assert_eq!(ratio_only, ["flux-pro-1.1-ultra", "flux-kontext-pro", "flux-kontext-max"]);
+        assert_eq!(ratio_only.len() + sized.len(), KNOWN_MODELS.len());
+        assert!(sized.contains(&"flux-2-pro") && sized.contains(&"flux-dev"));
+    }
+
     #[test]
     fn kontext_and_ultra_send_aspect_ratio_instead_of_pixels() {
         let client = Client {
@@ -804,6 +827,12 @@ mod tests {
             };
             let error = caps.check(&sized).unwrap_err().to_string();
             assert!(error.contains("--size"), "{model}: {error}");
+            // It points at the BFL models that do take a size, not at "bfl"
+            // wholesale, which is where this refusal came from.
+            for sized in sized_models() {
+                assert!(error.contains(sized), "{model}: {error}");
+            }
+            assert!(!error.contains("`bfl` if"), "{model}: {error}");
 
             // Inside BFL's range, but not a ratio the table names.
             let odd = ImageRequest {

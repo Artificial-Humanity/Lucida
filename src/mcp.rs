@@ -582,12 +582,15 @@ fn image_schema() -> Value {
                     // disagree about which, and the others take any ratio at all.
                     "description": format!(
                         "W:H, e.g. 16:9. google accepts only: {}. stability accepts a \
-                         DIFFERENT nine: {}. comfyui and bfl accept any ratio; on \
+                         DIFFERENT nine: {}. comfyui accepts any ratio, and so does bfl \
+                         except {}, which take only: {}. On \
                          openai, gpt-image-2 takes any ratio and its siblings only \
                          1:1, 2:3 and 3:2. runway names its shapes as pixel pairs, \
                          which are also the output size: {}.",
                         genai::ASPECT_RATIOS.join(", "),
                         crate::stability::ASPECT_RATIOS.join(", "),
+                        crate::provider::join_and(&crate::bfl::ratio_only_models()),
+                        ratio_only_bfl_ratios(),
                         describe_aspect(
                             capabilities_for(Backend::Runway, crate::runway::DEFAULT_IMAGE_MODEL).aspect
                         )
@@ -595,7 +598,16 @@ fn image_schema() -> Value {
                 },
                 "size": {
                     "type": "string",
-                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number; openai's gpt-image-2 scales its pixel budget by it. NOT supported by stability, runway (whose pixel-pair aspect ratio is the size) or the other openai models, which render fixed sizes — passing it there is an error."
+                    "description": format!(
+                        "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a \
+                         tier; comfyui and bfl ({}) use the number; openai's gpt-image-2 \
+                         scales its pixel budget by it. NOT supported by stability, runway \
+                         (whose pixel-pair aspect ratio is the size), bfl's {} (which take \
+                         an aspect ratio from a list instead) or the other openai models, \
+                         which render fixed sizes — passing it there is an error.",
+                        crate::provider::join_and(&crate::bfl::sized_models()),
+                        crate::provider::join_and(&crate::bfl::ratio_only_models())
+                    )
                 },
                 "negative_prompt": {
                     "type": "string",
@@ -879,6 +891,14 @@ fn start_video_schema() -> Value {
 }
 
 /// One line describing an aspect-ratio capability, shared by both schemas.
+/// The ratios BFL's ratio-only models offer, from their capabilities.
+fn ratio_only_bfl_ratios() -> String {
+    crate::bfl::ratio_only_models()
+        .first()
+        .map(|m| describe_aspect(capabilities_for(Backend::Bfl, m).aspect))
+        .unwrap_or_default()
+}
+
 fn describe_aspect(support: AspectSupport) -> String {
     match support {
         AspectSupport::Named(ratios) => ratios.join(", "),
@@ -1666,6 +1686,44 @@ mod tests {
                 assert!(line.contains(caps.mask.kind()), "{line}");
             }
         }
+    }
+
+    /// BFL's endpoints disagree about geometry: FLUX.2, FLUX.1.1 and dev take
+    /// pixels, Kontext and Ultra take an `aspect_ratio` from a list and no size.
+    /// The schema said "comfyui and bfl accept any ratio" and "use the number"
+    /// of the provider as a whole, which sent an agent to `--size` on a model
+    /// that refuses it. Both clauses are generated from the per-model
+    /// capabilities; this holds each model named on the right side of each.
+    #[test]
+    fn the_schema_says_which_bfl_models_take_a_size() {
+        let schema = image_schema();
+        let props = &schema["inputSchema"]["properties"];
+        let aspect = props["aspect_ratio"]["description"].as_str().unwrap();
+        let size = props["size"]["description"].as_str().unwrap();
+
+        let ratio_only = crate::bfl::ratio_only_models();
+        let sized = crate::bfl::sized_models();
+        assert!(!ratio_only.is_empty() && !sized.is_empty());
+        for model in &ratio_only {
+            assert!(aspect.contains(model), "`{model}` is missing from aspect_ratio: {aspect}");
+            assert!(size.contains(model), "`{model}` is missing from size: {size}");
+        }
+        for model in &sized {
+            assert!(size.contains(model), "`{model}` is missing from size: {size}");
+            assert!(
+                !aspect.contains(&format!("{model},")) && !aspect.contains(&format!("{model} and")),
+                "`{model}` takes any ratio and must not be listed as ratio-only: {aspect}"
+            );
+        }
+        // The ratio list is the one the ratio-only models themselves offer.
+        let AspectSupport::Named(ratios) =
+            capabilities_for(Backend::Bfl, ratio_only[0]).aspect
+        else {
+            panic!("ratio-only models name their ratios");
+        };
+        assert!(aspect.contains(&ratios.join(", ")), "{aspect}");
+        // And the old blanket claim about the provider is gone.
+        assert!(!aspect.contains("comfyui and bfl accept any ratio"), "{aspect}");
     }
 
     /// The schema must not re-acquire a hard enum on a parameter whose legal

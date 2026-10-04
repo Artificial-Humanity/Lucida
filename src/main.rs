@@ -1605,15 +1605,7 @@ fn list_models(backend: Backend) -> Result<()> {
             // listed per model rather than once for the provider. Anything else
             // would send someone to the wrong endpoint for `--steps`.
             if backend == Backend::Bfl {
-                let per_model = provider::capabilities_for(backend, model);
-                if per_model.steps {
-                    notes.push("steps + guidance".into());
-                }
-                notes.push(if per_model.references {
-                    "edits".into()
-                } else {
-                    "generate only".into()
-                });
+                notes.extend(bfl_model_notes(model));
             }
             let suffix = if notes.is_empty() {
                 String::new()
@@ -1655,6 +1647,27 @@ fn list_models(backend: Backend) -> Result<()> {
     println!("  output carries  {}", caps.provenance.describe());
 
     Ok(())
+}
+
+/// What differs per BFL model, as the notes beside it in `lucida models`.
+/// Generated from the capabilities, so a note cannot outlive the table.
+fn bfl_model_notes(model: &str) -> Vec<String> {
+    let per_model = provider::capabilities_for(Backend::Bfl, model);
+    let mut notes = Vec::new();
+    if per_model.steps {
+        notes.push("steps + guidance".to_string());
+    }
+    notes.push(if per_model.references {
+        "edits".to_string()
+    } else {
+        "generate only".to_string()
+    });
+    // Geometry differs per model too: Kontext and Ultra take a ratio from a
+    // list and no `--size`.
+    if !per_model.size {
+        notes.push("aspect ratio from a list, no --size".to_string());
+    }
+    notes
 }
 
 fn yes_no(supported: bool) -> &'static str {
@@ -2249,6 +2262,23 @@ mod tests {
     /// differ only in it must not land on one file.
     ///
     /// This was `with_extension`, which replaces whatever follows the last dot:
+    /// `lucida models --provider bfl` annotated Kontext and Ultra exactly like
+    /// the pixel models, though they take a ratio from a list and no `--size`.
+    #[test]
+    fn bfl_models_are_annotated_with_their_geometry() {
+        for model in bfl::ratio_only_models() {
+            let notes = bfl_model_notes(model).join("; ");
+            assert!(notes.contains("no --size"), "{model}: {notes}");
+        }
+        for model in bfl::sized_models() {
+            let notes = bfl_model_notes(model).join("; ");
+            assert!(!notes.contains("--size"), "{model}: {notes}");
+        }
+        // The notes that were already there survive.
+        assert!(bfl_model_notes("flux-2-flex").join("; ").contains("steps + guidance"));
+        assert!(bfl_model_notes("flux-dev").contains(&"generate only".to_string()));
+    }
+
     /// `hero.v1` and `hero.v2` both became `hero.png`, and the second render
     /// overwrote the first without a word.
     #[test]

@@ -895,8 +895,9 @@ impl Capabilities {
                  The size is fixed by the provider and follows from the shape you \
                  ask for — `--aspect 16:9` on stability returns 2016x1152, for \
                  instance. Use `--aspect` to control the shape, and `comfyui` or \
-                 `bfl` if the pixel count itself matters. Lucida reports the size \
-                 it actually wrote."
+                 one of bfl's {} if the pixel count itself matters. Lucida reports \
+                 the size it actually wrote.",
+                join_and(&crate::bfl::sized_models())
             );
         }
 
