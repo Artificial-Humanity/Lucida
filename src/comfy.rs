@@ -75,8 +75,20 @@ impl Client {
         // Read through `config`, not the environment directly, so a GUI-launched
         // MCP server can be pointed at a remote ComfyUI too — the same problem
         // that made the Google key invisible applies to every setting here.
-        let configured =
-            crate::config::var("LUCIDA_COMFYUI_URL").unwrap_or_else(|| DEFAULT_URL.to_string());
+        //
+        // Except that under `cfg(test)` there is no default. Every setting is
+        // sealed from unit tests (see `config::var`), and on the machine this is
+        // developed on the default is not a placeholder: a real ComfyUI answers
+        // there, so falling back to it would let a test reach a real provider
+        // exactly as the sealed keys now cannot.
+        let configured = match crate::config::var("LUCIDA_COMFYUI_URL") {
+            Some(url) => url,
+            None if cfg!(test) => bail!(
+                "no LUCIDA_COMFYUI_URL injected, and a unit test does not fall back to \
+                 {DEFAULT_URL} — on a developer's machine a real ComfyUI may be there"
+            ),
+            None => DEFAULT_URL.to_string(),
+        };
         let (base, url_credentials) = split_credentials(configured.trim_end_matches('/'));
 
         // An explicit variable beats credentials embedded in the URL, which are

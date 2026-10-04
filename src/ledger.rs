@@ -84,8 +84,13 @@ pub const ABANDONED: &str = "abandoned";
 /// Beside the config file rather than in a directory of its own: `LUCIDA_CONFIG`
 /// may name a file anywhere, and putting the ledger next to whichever config is
 /// actually in use keeps "where does Lucida keep its state" a single answer.
+///
+/// Never under `cfg(test)`. The config path a unit test resolves is the
+/// developer's real one, so a render a test reached — and one did, billed —
+/// landed in the real ledger and counted against the real budget. Tests of the
+/// file itself pass their own path to [`append`] and its neighbours.
 pub fn path() -> Option<PathBuf> {
-    if disabled() {
+    if cfg!(test) || disabled() {
         return None;
     }
     let config = crate::config::preferred_path()?;

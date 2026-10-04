@@ -183,11 +183,75 @@ static LOADED: OnceLock<Loaded> = OnceLock::new();
 /// real value produces an authentication error instead of a useful one. `parse`
 /// drops empty file values for the same reason.
 pub fn var(name: &str) -> Option<String> {
-    if let Some(value) = loaded().values.get(name) {
-        return Some(value.clone());
+    from_file(name).or_else(|| from_environment(name))
+}
+
+/// A setting's value in the config file in use.
+///
+/// Under `cfg(test)` the file is never read (see [`files_to_load`]), and the
+/// only values are the ones a test injected with [`with_injected`].
+fn from_file(name: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(value) = injected(name) {
+        return Some(value);
+    }
+
+    loaded().values.get(name).cloned()
+}
+
+/// A setting's value in the process environment, empty counting as absent.
+///
+/// **Never under `cfg(test)`.** A unit test once rendered and billed a real
+/// image: it called `generate_image`, the build machine's shell exported every
+/// provider key and its `config.env` held them all, and nothing between the
+/// test and the provider said no. `tests/cli.rs` was never exposed, because it
+/// runs the binary with a cleared environment and a private `HOME`; a unit test
+/// runs inside the developer's own process, so the seal has to be here, where
+/// every key is read. A test that needs a value injects it, and a thread the
+/// code under test spawns sees nothing — the safe way round for a render.
+fn from_environment(name: &str) -> Option<String> {
+    if cfg!(test) {
+        return None;
     }
 
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+fn injected(name: &str) -> Option<String> {
+    INJECTED.with(|values| values.borrow().get(name).cloned())
+}
+
+/// Runs `body` with `values` readable through [`var`], as if the config file
+/// held them — the only way a unit test can give Lucida a setting.
+///
+/// Scoped to the calling thread and to `body`, so one test's key cannot leak
+/// into another running beside it, and put back even if `body` panics.
+#[cfg(test)]
+pub(crate) fn with_injected<R>(values: &[(&str, &str)], body: impl FnOnce() -> R) -> R {
+    struct Restore(HashMap<String, String>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let before = std::mem::take(&mut self.0);
+            INJECTED.with(|values| *values.borrow_mut() = before);
+        }
+    }
+
+    let _restore = Restore(INJECTED.with(|current| {
+        let mut current = current.borrow_mut();
+        let before = current.clone();
+        current.extend(values.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        before
+    }));
+
+    body()
 }
 
 /// Where a setting's value is coming from.
@@ -208,18 +272,16 @@ pub enum Origin {
 
 /// Which source is supplying `name`, if any.
 pub fn origin(name: &str) -> Option<Origin> {
-    origin_of(
-        loaded().values.contains_key(name),
-        std::env::var(name).is_ok_and(|v| !v.trim().is_empty()),
-    )
+    origin_of(from_file(name).is_some(), from_environment(name).is_some())
 }
 
 /// The precedence table itself, separated from where the two answers come from.
 ///
-/// Pulled out because `loaded()` is a process-wide `OnceLock` — the first test
-/// to touch it fixes it for every other — so the resolution rule would otherwise
-/// only be checkable from `scripts/smoke.sh`, in a fresh process. It is checked
-/// there too, end to end; this pins the table itself.
+/// Pulled out because a unit test cannot reach either real source — the file
+/// and the environment are both sealed under `cfg(test)`, see
+/// [`from_environment`] — so the resolution rule would otherwise only be
+/// checkable from `scripts/smoke.sh`, in a fresh process. It is checked there
+/// too, end to end; this pins the table itself.
 fn origin_of(in_file: bool, in_env: bool) -> Option<Origin> {
     match (in_file, in_env) {
         (true, true) => Some(Origin::FileOverridingEnvironment),
@@ -231,7 +293,7 @@ fn origin_of(in_file: bool, in_env: bool) -> Option<Origin> {
 
 fn loaded() -> &'static Loaded {
     LOADED.get_or_init(|| {
-        for path in search_paths() {
+        for path in files_to_load() {
             if path.is_file() {
                 let values = match std::fs::read_to_string(&path) {
                     Ok(text) => parse(&text),
@@ -255,6 +317,22 @@ fn loaded() -> &'static Loaded {
             values: HashMap::new(),
         }
     })
+}
+
+/// The config files [`loaded`] may read: [`search_paths`], or none at all
+/// under `cfg(test)`.
+///
+/// None, rather than a path of the test's choosing, because the search lands
+/// in the developer's real `~/.config/lucida/config.env` — the file that held
+/// the key behind the render [`from_environment`] describes. A test that needs
+/// a setting injects it with [`with_injected`]; a test of the search itself
+/// calls [`search_paths`], which still answers truthfully.
+fn files_to_load() -> Vec<PathBuf> {
+    if cfg!(test) {
+        Vec::new()
+    } else {
+        search_paths()
+    }
 }
 
 /// The file actually in use, if any.
@@ -795,13 +873,130 @@ mod tests {
         );
     }
 
+    /// A unit test once rendered and billed a real image, because under
+    /// `cargo test` this module read the developer's real `config.env` and
+    /// environment, which on the build machine held every provider key. So a
+    /// key in both places, where the loader looks, must still not reach `var`.
+    #[test]
+    fn a_unit_test_never_sees_the_real_config_or_environment() {
+        let _env = env_lock();
+
+        // A home that looks like a real one: a config file holding a key, at the
+        // path the loader searches, and the same key exported in the process.
+        let home = std::env::temp_dir().join(format!("lucida-sealed-{}", std::process::id()));
+        let planted = home.join(".config").join("lucida").join("config.env");
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        write_replacing(&planted, "GEMINI_API_KEY=from-the-file\n", true).unwrap();
+
+        let saved = EnvVars::set(&[
+            ("HOME", Some(home.as_os_str())),
+            ("XDG_CONFIG_HOME", None),
+            ("LUCIDA_CONFIG", None),
+            ("GEMINI_API_KEY", Some("from-the-environment".as_ref())),
+        ]);
+
+        // Not vacuous: the planted file is the first place the loader would look,
+        // and the process really does hold the key.
+        let searched = search_paths();
+        let exported = std::env::var("GEMINI_API_KEY").ok();
+        let seen = var("GEMINI_API_KEY");
+        let seen_origin = origin("GEMINI_API_KEY");
+        let file_in_use = source().map(Path::to_path_buf);
+        let ledger = crate::ledger::path();
+
+        drop(saved);
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(searched.first(), Some(&planted));
+        assert_eq!(exported.as_deref(), Some("from-the-environment"));
+
+        assert_eq!(seen, None, "a unit test resolved a real provider key");
+        assert_eq!(seen_origin, None);
+        assert_eq!(file_in_use, None, "a unit test read a config file");
+        assert_eq!(ledger, None, "a unit test resolved a ledger path");
+        let would_load = files_to_load();
+        assert!(
+            would_load.is_empty(),
+            "a unit test would load {would_load:?}"
+        );
+
+        // The one way in is explicit, and it does not outlive its scope.
+        with_injected(&[("GEMINI_API_KEY", "injected")], || {
+            assert_eq!(var("GEMINI_API_KEY").as_deref(), Some("injected"));
+            assert_eq!(origin("GEMINI_API_KEY"), Some(Origin::File));
+        });
+        assert_eq!(var("GEMINI_API_KEY"), None);
+    }
+
+    /// An injected value stays on the thread that injected it, so a test running
+    /// beside another — or a worker thread the code under test spawns — never
+    /// picks up a key it was not given.
+    #[test]
+    fn an_injected_value_stays_on_its_own_thread() {
+        with_injected(&[("BFL_API_KEY", "this-thread-only")], || {
+            assert_eq!(var("BFL_API_KEY").as_deref(), Some("this-thread-only"));
+            let elsewhere = std::thread::spawn(|| var("BFL_API_KEY")).join().unwrap();
+            assert_eq!(elsewhere, None);
+        });
+    }
+
     #[test]
     fn an_explicit_config_path_wins_outright() {
-        // Uses the real environment, so pick a name nothing else sets.
-        unsafe { std::env::set_var("LUCIDA_CONFIG", "/tmp/lucida-test-config.env") };
+        let _env = env_lock();
+        let saved = EnvVars::set(&[(
+            "LUCIDA_CONFIG",
+            Some("/tmp/lucida-test-config.env".as_ref()),
+        )]);
         let paths = search_paths();
-        unsafe { std::env::remove_var("LUCIDA_CONFIG") };
+        drop(saved);
 
         assert_eq!(paths, vec![PathBuf::from("/tmp/lucida-test-config.env")]);
+    }
+
+    /// Held by every test in this module that changes the process environment.
+    ///
+    /// The environment is one table shared by every test thread, so two tests
+    /// that each set and restore `LUCIDA_CONFIG` can interleave and leave it
+    /// pointing at the other's value — or gone, when the suite was started with
+    /// one set.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`ENV_LOCK`], still usable after a test holding it failed.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Variables changed for the life of the value, and put back as they were
+    /// when it drops — including on a failed assertion.
+    struct EnvVars(Vec<(&'static str, Option<OsString>)>);
+
+    impl EnvVars {
+        fn set(changes: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+            let saved = changes
+                .iter()
+                .map(|(name, value)| {
+                    let before = std::env::var_os(name);
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                    (*name, before)
+                })
+                .collect();
+            EnvVars(saved)
+        }
+    }
+
+    impl Drop for EnvVars {
+        fn drop(&mut self) {
+            for (name, before) in &self.0 {
+                match before {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
     }
 }

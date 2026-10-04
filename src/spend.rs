@@ -770,11 +770,11 @@ mod tests {
     /// tool that started declining renders on upgrade would be a bad surprise.
     #[test]
     fn no_budget_means_no_refusal() {
-        // `budget()` reads the environment, which the suite must not mutate; this
-        // asserts the branch that matters through the public shape instead.
-        if budget().is_none() {
-            assert!(check(Price::Unverified, "render").is_ok());
-        }
+        // Unconditional now that a unit test cannot see a budget it was not
+        // given. This read the developer's real environment and config file,
+        // and skipped itself wherever a budget happened to be set.
+        assert_eq!(budget(), None);
+        assert!(check(Price::Unverified, "render").is_ok());
     }
 
     /// A free render is never refused, whatever has already been spent — and the
