@@ -1175,6 +1175,9 @@ fn find_image(value: &Value) -> Option<&Value> {
 /// - **PNG**: colour type 4 (grey+alpha) or 6 (RGBA), or a `tRNS` chunk, which
 ///   gives an otherwise opaque grey, RGB or palette image transparent entries.
 ///   Chunks are walked up to the first `IDAT`, since `tRNS` must precede it.
+///   `tRNS` on colour types 0 and 2 counting as alpha is a claim about
+///   ComfyUI's decoder, not about PNG: PyAV promotes it to an alpha channel, and
+///   an older Pillow-only `LoadImage` would not.
 /// - **WebP**: a `VP8X` header with the alpha flag, or a `VP8L` header with the
 ///   alpha hint. A bare lossy `VP8 ` image has no alpha.
 /// - **JPEG**: never.
@@ -1191,8 +1194,8 @@ fn has_alpha(bytes: &[u8]) -> Option<bool> {
             if matches!(colour_type, 4 | 6) {
                 return Some(true);
             }
-            let mut at = 8;
-            while let Some(header) = bytes.get(at..at + 8) {
+            let mut at: usize = 8;
+            while let Some(header) = bytes.get(at..at.checked_add(8)?) {
                 let length = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
                 match &header[4..8] {
                     b"tRNS" => return Some(true),
@@ -1912,8 +1915,7 @@ mod tests {
             out.extend(data);
             out.extend([0, 0, 0, 0]); // CRC: never read
         };
-        let mut ihdr = vec![0, 0, 0, 4, 0, 0, 0, 4, 8, colour_type, 0, 0, 0];
-        ihdr.truncate(13);
+        let ihdr = vec![0, 0, 0, 4, 0, 0, 0, 4, 8, colour_type, 0, 0, 0];
         chunk(b"IHDR", &ihdr);
         for (kind, data) in chunks {
             chunk(kind, data);

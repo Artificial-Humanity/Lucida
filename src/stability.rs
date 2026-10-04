@@ -569,5 +569,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(wired(&server).generate(&request).unwrap().bytes, b"fine");
+        server.finish();
     }
 }

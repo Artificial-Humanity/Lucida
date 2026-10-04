@@ -931,10 +931,20 @@ mod tests {
 
     /// The key is never sent to a host the submit response invented, and the
     /// refusal is still an abandoned render — it was billed — naming the URL.
+    ///
+    /// The "foreign" host is a second local server on another port: a different
+    /// origin, over plain http, which the check must reject. Local so that a
+    /// build with the check missing makes no outbound request — and so that the
+    /// request it *would* make is recorded and counted rather than lost to DNS.
     #[test]
     fn a_foreign_polling_url_is_never_sent_the_key() {
-        let submit = r#"{"id":"abc","polling_url":"https://evil.example/v1/get_result?id=abc"}"#;
-        let server = serve(vec![Reply::json(submit)]);
+        // Answers terminally if it is ever asked, so a missing check ends this
+        // test quickly instead of polling on.
+        let foreign = serve(vec![Reply::json(r#"{"status":"Request Moderated"}"#)]);
+        let polling_url = format!("{}/v1/get_result?id=abc", foreign.url());
+        let submit = format!(r#"{{"id":"abc","polling_url":"{polling_url}"}}"#);
+        let server = serve(vec![Reply::json(&submit)]);
+
         let request = ImageRequest {
             prompt: "a fox".into(),
             model: "flux-2-pro".into(),
@@ -944,8 +954,26 @@ mod tests {
         let abandoned = error
             .downcast_ref::<crate::provider::Abandoned>()
             .expect("a billed submit's failure is marked abandoned");
-        assert_eq!(abandoned.handle, "https://evil.example/v1/get_result?id=abc");
-        assert!(error.to_string().contains("https://evil.example/v1/get_result"), "{error:#}");
-        assert_eq!(server.finish().len(), 1, "nothing was polled");
+        assert_eq!(abandoned.handle, polling_url);
+        let message = error.to_string();
+        assert!(message.contains("will not send the key to"), "{message}");
+        assert!(message.contains(&polling_url), "{message}");
+
+        assert_eq!(server.finish().len(), 1, "nothing but the submit went to the API");
+
+        // The test server only stops listening once its script is used up, and
+        // would otherwise hold `finish` for its whole 15 s deadline. So the test
+        // makes the one request itself: what the foreign host recorded must be
+        // that probe and nothing before it.
+        use std::io::{Read, Write};
+        let addr = foreign.url().trim_start_matches("http://").to_string();
+        if let Ok(mut probe) = std::net::TcpStream::connect(&addr) {
+            let _ = probe.write_all(b"GET /probe HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            let _ = probe.read_to_end(&mut Vec::new());
+        }
+        let received = foreign.finish();
+        let paths: Vec<&str> = received.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["/probe"], "the foreign host was sent a request by the client");
+        assert_eq!(received[0].header("x-key"), None);
     }
 }
