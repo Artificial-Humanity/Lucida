@@ -339,9 +339,9 @@ impl Client {
 /// status alone is not the verdict: a check on `is_success()` by itself would
 /// read a refusal as a submission.
 ///
-/// `submitting` is the start, the one call that bills. A 4xx or a non-zero
-/// `code` is Kling saying no, so nothing was queued; a 5xx, or an answer that is
-/// not JSON, is silent on it, and the error says so rather than leaving a user
+/// `submitting` is the start, the one call that bills. A 4xx, or a success
+/// status with a non-zero `code`, is a no, so nothing was queued; a 5xx (whatever
+/// its body) or a success that is not JSON is silent on it, and the error says so rather than leaving a user
 /// to retry — and pay — twice.
 fn task_payload(response: reqwest::blocking::Response, submitting: bool) -> Result<Value> {
     let status = response.status();
@@ -360,8 +360,11 @@ fn task_payload(response: reqwest::blocking::Response, submitting: bool) -> Resu
         return Ok(payload.clone());
     }
 
-    // Kling's own refusal is definite; everything else is not.
-    let definite = parsed.is_some() && (status.is_client_error() || refused);
+    // Definite is a 4xx, whatever its body, or a success status carrying a
+    // non-zero `code`: both are a no. A 5xx is not, even with Kling's own JSON
+    // and `code` in it — a server that fell over mid-request has not said
+    // whether the job was queued first.
+    let definite = status.is_client_error() || (status.is_success() && refused);
     let shown = if parsed.is_some() { text.clone() } else { snippet(&text) };
     let message = if status.is_success() && parsed.is_none() {
         format!("Kling answered HTTP {} with a body that is not JSON: {shown}", status.as_u16())
@@ -407,6 +410,9 @@ fn explain_error(status: u16, body: &str) -> String {
             "Kling is rate limiting or the quota is exhausted: {message}\n\n\
              `lucida models --provider kling` reports the remaining balance."
         ),
+        // A 5xx may come from a proxy in front of Kling, so it is not worded as
+        // Kling having refused anything.
+        (500..=599, _) => format!("Kling's API answered HTTP {status}: {message}"),
         _ => format!("Kling refused the request (HTTP {status}): {message}"),
     };
 
@@ -629,6 +635,7 @@ mod tests {
         assert!(message.contains("502"), "{message}");
         assert!(message.contains("Bad Gateway"), "the page itself is the evidence: {message}");
         assert!(!message.contains("expected value"), "{message}");
+        assert!(!message.contains("refused"), "a proxy answered, not Kling: {message}");
         assert!(message.contains("queued"), "a start must say the job may exist: {message}");
         server.finish();
 
@@ -658,6 +665,40 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("400") && message.contains("bad parameter"), "{message}");
         assert!(!message.contains("queued"), "{message}");
+        server.finish();
+    }
+
+    /// A server error is silent on whether the job was queued even when its body
+    /// is Kling's own JSON with a non-zero `code` — the realistic shape of one.
+    /// Only a 4xx, or a success status carrying a `code`, is a definite no.
+    #[test]
+    fn a_server_error_with_a_kling_code_does_not_settle_whether_the_job_exists() {
+        for status in [500, 503] {
+            let server = serve(vec![Reply::status(
+                status,
+                r#"{"code":5000,"message":"internal error","request_id":"r1"}"#,
+            )]);
+            let error = wired(&server).start(&text_to_video()).expect_err("must be an error");
+            let message = format!("{error:#}");
+            assert!(message.contains(&status.to_string()), "{message}");
+            assert!(message.contains("queued"), "HTTP {status} must warn: {message}");
+            server.finish();
+        }
+
+        // A 200 with a `code` is Kling saying no, as the module's header says.
+        let server = serve(vec![Reply::json(r#"{"code":1201,"message":"bad parameter"}"#)]);
+        let error = wired(&server).start(&text_to_video()).expect_err("must be an error");
+        assert!(!format!("{error:#}").contains("queued"), "{error:#}");
+        server.finish();
+    }
+
+    /// Any 4xx was refused, whether or not a gateway's page said so in JSON.
+    #[test]
+    fn a_client_error_page_is_a_definite_refusal() {
+        let server = serve(vec![Reply::status(404, "<html>Not Found</html>")]);
+        let error = wired(&server).start(&text_to_video()).expect_err("must be an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("404") && !message.contains("queued"), "{message}");
         server.finish();
     }
 
