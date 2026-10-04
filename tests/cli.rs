@@ -307,6 +307,47 @@ fn the_canary_can_find_where_googles_video_half_starts() {
 }
 
 #[test]
+fn the_canary_can_find_which_credentials_are_set() {
+    // scripts/canary.sh decides which providers to probe by grepping
+    // `lucida config` for `^ +NAME +set`. Reworded or re-columned, the grep
+    // finds nothing, every keyed provider is skipped, and the canary used to
+    // report "no drift detected" having probed none of them. It now refuses a
+    // run that probed nothing, but a layout change should fail here first.
+    //
+    // Both directions are pinned: a key that is set must match, and one that is
+    // not must not — `not set` would otherwise read as set and send the canary
+    // after a provider it has no credential for.
+    let sandbox = Sandbox::new("canary-config-layout");
+    sandbox.write_config("GEMINI_API_KEY=cli-test-value\n");
+
+    let shown = run(lucida(&sandbox).arg("config"));
+    shown.exits(0);
+
+    // `^ +NAME +set`, by hand: this crate has no regex dependency.
+    let canary_sees_set = |name: &str| {
+        shown.stdout.lines().any(|line| {
+            let indented = line.trim_start_matches(' ');
+            line.len() > indented.len()
+                && indented
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    .is_some_and(|rest| rest.trim_start_matches(' ').starts_with("set"))
+        })
+    };
+
+    assert!(
+        canary_sees_set("GEMINI_API_KEY"),
+        "the canary's `^ +GEMINI_API_KEY +set` no longer matches a key that is set:\n{}",
+        shown.stdout
+    );
+    assert!(
+        !canary_sees_set("BFL_API_KEY"),
+        "the canary's `^ +BFL_API_KEY +set` now matches a key that is NOT set:\n{}",
+        shown.stdout
+    );
+}
+
+#[test]
 fn a_provider_of_both_media_lists_both() {
     // `runway` was a video provider only, and `lucida models --provider runway`
     // listed its video models. Now that it renders images too, the image lane
