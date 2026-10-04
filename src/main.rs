@@ -1856,9 +1856,27 @@ pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
 /// Staged in the target's own directory rather than a temp dir, because a rename
 /// across filesystems is a copy-and-delete and hands the guarantee straight back.
 ///
-/// `private` restricts the staged file *before* the rename: a file chmodded
-/// after the write is world-readable for the moment it first holds a secret.
+/// The target keeps its identity. Several callers write files that are not
+/// Lucida's — `config.env` and the desktop app's config are often symlinks into
+/// a dotfiles repo, and the latter is often `chmod 600` because it holds other
+/// servers' tokens — and a rename onto the link's own name replaces the link
+/// with a regular file, while a staged file made at the umask's mode replaces a
+/// private one with a readable one. So the write goes to the file the path
+/// *resolves* to, and the staged file is given the final mode before it holds a
+/// byte: `private` is 0600; otherwise the existing file's mode; otherwise the
+/// umask's, as for any new file.
+///
+/// The staged file is synced before the rename. Without it, a crash just after
+/// the rename can leave the new name pointing at data that never reached the
+/// disk — the zero-length file a truncating write was being avoided for.
 pub fn write_atomically(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    use std::io::Write;
+
+    // Only a file that exists can be resolved. A new file keeps its own path,
+    // and so does a dangling link: the rename replaces it, as it always did.
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = path.as_path();
+
     let staged = staging_path(path);
 
     let staged_then = |result: Result<()>| -> Result<()> {
@@ -1870,18 +1888,74 @@ pub fn write_atomically(path: &Path, bytes: &[u8], private: bool) -> Result<()> 
         result
     };
 
-    staged_then(
-        std::fs::write(&staged, bytes).with_context(|| format!("writing {}", staged.display())),
-    )?;
+    let mode = staged_mode(path, private);
 
-    if private {
-        staged_then(config::restrict_to_owner(&staged))?;
-    }
+    // `create_new`, so a staged file that is somehow already there is an error
+    // rather than something silently written through.
+    let mut file = create_staged(&staged, mode)
+        .with_context(|| format!("creating {}", staged.display()))?;
+
+    staged_then(
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("writing {}", staged.display())),
+    )?;
+    drop(file);
 
     staged_then(
         std::fs::rename(&staged, path)
             .with_context(|| format!("replacing {} with {}", path.display(), staged.display())),
     )
+}
+
+/// The mode a write to `path` should end with, or `None` for the umask's.
+#[cfg(unix)]
+fn staged_mode(path: &Path, private: bool) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if private {
+        return Some(0o600);
+    }
+    std::fs::metadata(path)
+        .ok()
+        .map(|existing| existing.permissions().mode() & 0o7777)
+}
+
+/// Windows has no mode to carry over; the file inherits its directory's ACL.
+#[cfg(not(unix))]
+fn staged_mode(_path: &Path, _private: bool) -> Option<u32> {
+    None
+}
+
+/// Creates the staged file already holding its final mode.
+///
+/// Passed to `open(2)` so the file never exists at a wider one, and then set
+/// again on the open handle because the creation mode is filtered through the
+/// umask — which would quietly clear bits of an existing file's mode (`0664`
+/// under the usual `022`). The second call can only widen the file back to what
+/// the target already was — never past it — and happens while the file is still
+/// empty.
+fn create_staged(staged: &Path, mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        options.mode(mode);
+        let file = options.open(staged)?;
+        if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(mode)) {
+            let _ = std::fs::remove_file(staged);
+            return Err(e);
+        }
+        return Ok(file);
+    }
+
+    #[cfg(not(unix))]
+    let _ = mode;
+
+    options.open(staged)
 }
 
 /// Where a pending write lives until it takes the target's name.
@@ -2079,6 +2153,145 @@ mod tests {
     fn concurrent_writes_do_not_share_a_staging_path() {
         let path = std::path::Path::new("image.png");
         assert_ne!(staging_path(path), staging_path(path));
+    }
+
+    /// A scratch directory per test, since these write real files and the
+    /// assertions are about modes and links, which a mock cannot show.
+    #[cfg(unix)]
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lucida-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// `config.env` and the desktop app's config are routinely symlinks into a
+    /// dotfiles repo. A rename onto the link's own name replaces the link with a
+    /// regular file, and the repo copy silently stops being the real one.
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_through_a_symlink_keeps_the_link() {
+        let dir = scratch("symlink");
+        let real = dir.join("dotfiles").join("config.env");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"old").unwrap();
+        let link = dir.join("config.env");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomically(&link, b"new", false).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the symlink was replaced by a regular file"
+        );
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+
+        // The staged file belongs beside the file actually replaced, so the
+        // rename stays inside one directory; neither directory may hold litter.
+        for listed in [&dir, real.parent().unwrap()] {
+            let names: Vec<String> = std::fs::read_dir(listed)
+                .unwrap()
+                .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+                .filter(|n| n.starts_with('.'))
+                .collect();
+            assert!(names.is_empty(), "a staging file survived: {names:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `setup` rewrites the desktop app's config with `private = false`, and that
+    /// file often holds other servers' tokens. "Not private" means Lucida adds no
+    /// restriction, not that it removes the user's.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_keeps_the_mode_the_user_set() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("keep-mode");
+
+        for mode in [0o600, 0o640, 0o664] {
+            let path = dir.join(format!("claude-{mode:o}.json"));
+            std::fs::write(&path, b"old").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+            write_atomically(&path, b"new", false).unwrap();
+
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            assert_eq!(mode_of(&path), mode, "mode {mode:o} was not preserved");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A private write to a file that was group-readable narrows it, and one to a
+    /// new file creates it narrow.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_write_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("private");
+
+        let fresh = dir.join("config.env");
+        write_atomically(&fresh, b"KEY=1", true).unwrap();
+        assert_eq!(mode_of(&fresh), 0o600);
+
+        let loose = dir.join("loose.env");
+        std::fs::write(&loose, b"old").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomically(&loose, b"KEY=2", true).unwrap();
+        assert_eq!(mode_of(&loose), 0o600);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The window `restrict_to_owner` left open: a file created at the umask's
+    /// mode and chmodded afterwards is readable by the group for as long as it
+    /// takes the secret to be written. Checked on the file as it exists the
+    /// moment it is created — empty, before a byte of it is written.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_file_is_never_wider_than_its_final_mode() {
+        let dir = scratch("staged-mode");
+
+        let private = dir.join("private");
+        let _held = create_staged(&private, Some(0o600)).unwrap();
+        assert_eq!(std::fs::metadata(&private).unwrap().len(), 0);
+        assert_eq!(mode_of(&private), 0o600);
+
+        // An existing target's mode wins over the umask, which would otherwise
+        // clear the bits it asked for.
+        let kept = dir.join("kept");
+        let _held = create_staged(&kept, Some(0o664)).unwrap();
+        assert_eq!(mode_of(&kept), 0o664);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A staged file left behind after a failed write is litter, and one holding
+    /// a key is worse. Forced here by making the rename fail: the target is a
+    /// directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_removes_its_staged_file() {
+        let dir = scratch("cleanup");
+        let target = dir.join("config.env");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(write_atomically(&target, b"KEY=1", true).is_err());
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(names, vec!["config.env"], "a staging file survived: {names:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `lucida edit` defaults its output to its own input, so the file being
