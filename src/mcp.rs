@@ -733,8 +733,10 @@ fn video_modes() -> String {
 fn default_provider_note<T: crate::provider::Preferred>() -> String {
     format!(
         "Inferred from `model` when one is given. With neither, the first provider \
-         in {setting} that has a credential configured, or {built_in} when that \
-         setting is unset.",
+         in {setting} that is usable (its credential is configured, or it needs \
+         none), or {built_in} when that setting is unset. If the setting is set \
+         but none of its providers is usable, or it names one that does not \
+         exist, the call is refused rather than falling back to {built_in}.",
         setting = T::SETTING,
         built_in = T::BUILT_IN.provider_name()
     )
@@ -1783,17 +1785,26 @@ mod tests {
             ("resolution", |c| c.resolution),
         ];
         for (field, honoured) in flags {
+            // The generated clause itself, not the description around it: the
+            // negative_prompt text names google again in its veo-lite sentence,
+            // so `contains` on the whole string could never fail for google.
+            // The clause must be exactly the providers that honour the
+            // parameter, and end where the list ends.
             let description = text(field);
-            for backend in VideoBackend::ALL {
-                let caps = video_capabilities_for(*backend, backend.default_model());
-                assert_eq!(
-                    description.contains(backend.name()),
-                    honoured(&caps),
-                    "`{field}` must name {} exactly when {} honours it: {description}",
-                    backend.name(),
-                    backend.name()
-                );
-            }
+            let honouring: Vec<&str> = VideoBackend::ALL
+                .iter()
+                .filter(|b| honoured(&video_capabilities_for(**b, b.default_model())))
+                .map(|b| b.name())
+                .collect();
+            let clause = format!("Supported by {}", crate::provider::join_and(&honouring));
+            let at = description
+                .find(&clause)
+                .unwrap_or_else(|| panic!("`{field}` must open its list with `{clause}`: {description}"));
+            let after = description[at + clause.len()..].chars().next();
+            assert!(
+                matches!(after, Some(',' | ';' | '.')),
+                "`{field}` names more providers than honour it (`{clause}` runs on): {description}"
+            );
         }
 
         // Quality tiers carry their own names, since the tier list is the thing
@@ -1863,6 +1874,16 @@ mod tests {
         // that is false.
         for text in [&image, &video] {
             assert!(!text.contains("defaulting to"), "{text}");
+            // The rule `resolve_default` is built around: a preference is an
+            // order, never a fallback chain, so a setting nothing satisfies
+            // refuses instead of quietly reaching the built-in provider. Without
+            // this sentence a reader would take the built-in for a safety net.
+            assert!(
+                text.contains("the call is refused rather than falling back to"),
+                "{text}"
+            );
+            // ComfyUI needs no credential and is usable without one.
+            assert!(text.contains("or it needs none"), "{text}");
         }
     }
 
