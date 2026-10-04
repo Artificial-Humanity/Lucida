@@ -47,8 +47,8 @@ use video::VideoRequest;
     version,
     about = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
-                  hosted FLUX from Black Forest Labs, Stability AI, or OpenAI, \
-                  and video with Veo, Runway or Kling.\n\n\
+                  hosted FLUX from Black Forest Labs, Stability AI, OpenAI or \
+                  Runway, and video with Veo, Runway or Kling.\n\n\
                   Google reads GEMINI_API_KEY — one key for both images and Veo \
                   video. Image generation requires billing to be enabled on the \
                   project behind the key; free-tier keys report a quota of \
@@ -59,6 +59,9 @@ use video::VideoRequest;
                   capabilities differ per model — run `lucida models --provider bfl`.\n\n\
                   Stability reads STABILITY_API_KEY; OpenAI reads OPENAI_API_KEY, \
                   and model access there is granted per project.\n\n\
+                  Runway reads RUNWAY_API_KEY, one key for both its images and \
+                  its video. Kling reads KLINGAI_API_KEY; every Kling render \
+                  costs credits.\n\n\
                   Any of these can live in a config file; see `lucida config`.",
     disable_version_flag = true
 )]
@@ -245,8 +248,8 @@ enum Command {
         #[arg(short, long)]
         model: Option<String>,
 
-        /// Which provider to use: google or runway. Inferred from the model when
-        /// omitted.
+        /// Which provider to use: google, runway or kling. Inferred from the model
+        /// when omitted.
         #[arg(long)]
         provider: Option<String>,
 
@@ -2206,6 +2209,71 @@ mod tests {
                     "`{name}` is missing from a surface someone reads before installing: {surface}"
                 );
             }
+        }
+    }
+
+    /// `--help` is the long form of the shopfront, and the one a person reads
+    /// when they are deciding which key to export — so it has to name every
+    /// provider and every credential, not only the ones that existed when it was
+    /// written. It named five of six image providers and no Runway or Kling key.
+    ///
+    /// Both lists come from the same tables the code routes by. A provider whose
+    /// credential is `None` (the local one) has nothing to name.
+    #[test]
+    fn the_long_help_names_every_provider_and_every_key() {
+        use clap::CommandFactory;
+
+        let long = Cli::command()
+            .get_long_about()
+            .map(|a| a.to_string())
+            .expect("the CLI has no long description");
+
+        for backend in Backend::ALL {
+            assert!(
+                long.contains(backend.product_name()),
+                "`{}` is missing from the long help: {long}",
+                backend.product_name()
+            );
+            if let Some(key) = backend.credential() {
+                assert!(long.contains(key), "{key} is missing from the long help: {long}");
+            }
+        }
+        for backend in provider::VideoBackend::ALL {
+            let name = Backend::video_product_name(*backend);
+            assert!(long.contains(name), "`{name}` is missing from the long help: {long}");
+            if let Some(key) = backend.credential() {
+                assert!(long.contains(key), "{key} is missing from the long help: {long}");
+            }
+        }
+    }
+
+    /// `video --provider` is a hand-written clap string, and it listed two of
+    /// three providers. The image flag's list is held against the MCP enum in
+    /// `tests/cli.rs`; this holds the video one against `VideoBackend::ALL`
+    /// directly, which is visible from here.
+    #[test]
+    fn the_video_provider_help_names_every_video_provider() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let video = command
+            .get_subcommands()
+            .find(|c| c.get_name() == "video")
+            .expect("no `video` subcommand");
+        let help = video
+            .get_arguments()
+            .find(|a| a.get_id() == "provider")
+            .expect("no `--provider` argument")
+            .get_help()
+            .expect("`video --provider` has no help")
+            .to_string();
+
+        for backend in provider::VideoBackend::ALL {
+            assert!(
+                help.contains(backend.name()),
+                "`{}` is a video provider but the `video --provider` help omits it: {help}",
+                backend.name()
+            );
         }
     }
 

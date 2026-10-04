@@ -562,7 +562,7 @@ fn image_schema() -> Value {
                 "provider": {
                     "type": "string",
                     "enum": provider_enum(),
-                    "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
+                    "description": format!("Which backend to use. {}", default_provider_note::<Backend>())
                 },
                 "model": {
                     "type": "string",
@@ -670,6 +670,76 @@ fn providers_schema() -> Value {
     })
 }
 
+/// The video providers for which `predicate` holds, as prose.
+///
+/// The video twin of [`providers_where`], over `VideoBackend::ALL`. It read each
+/// provider's *default* model's capabilities, which is the right question for a
+/// per-provider claim; the one model-level exception (`veo-lite` and negative
+/// prompts) is said beside the list that cannot carry it.
+fn video_providers_where(predicate: fn(&crate::provider::VideoCapabilities) -> bool) -> String {
+    let names: Vec<&str> = VideoBackend::ALL
+        .iter()
+        .filter(|b| predicate(&video_capabilities_for(**b, b.default_model())))
+        .map(|b| b.name())
+        .collect();
+    crate::provider::join_and(&names)
+}
+
+/// One clause per video provider, `name: what it offers`, from its own table.
+///
+/// For the parameters every provider takes but in a different shape — aspect
+/// ratio and duration — where a list of who supports it would say nothing. This
+/// is the shape the hand-written text had, covering two of three providers: it
+/// was true of google and runway and silent about kling.
+fn video_per_provider(
+    describe: fn(&crate::provider::VideoCapabilities) -> String,
+) -> String {
+    VideoBackend::ALL
+        .iter()
+        .map(|b| format!("{}: {}", b.name(), describe(&video_capabilities_for(*b, b.default_model()))))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The quality tiers each provider that has any offers, as `kling takes std, pro
+/// or master`. Empty tables are skipped, which is what "where the provider has
+/// one" means.
+fn video_modes() -> String {
+    let clauses: Vec<String> = VideoBackend::ALL
+        .iter()
+        .filter_map(|b| {
+            let modes = video_capabilities_for(*b, b.default_model()).modes;
+            // Empty means the provider has no tiers, and is skipped.
+            let (last, rest) = modes.split_last()?;
+            Some(if rest.is_empty() {
+                format!("{} takes {last}", b.name())
+            } else {
+                format!("{} takes {} or {last}", b.name(), rest.join(", "))
+            })
+        })
+        .collect();
+    if clauses.is_empty() { "none offers any".to_string() } else { clauses.join("; ") }
+}
+
+/// What `provider` does when it is omitted, as a sentence both schemas share.
+///
+/// This read "defaulting to google", which is the built-in fallback and not the
+/// behaviour: with neither `provider` nor `model` given, `resolve_default` walks
+/// the user's preference list first, so on a machine configured for another
+/// provider the schema said the wrong thing about the machine it was read on.
+/// The setting and the fallback both come from the `Preferred` impl that
+/// `resolve_default` itself reads. A `model` that is given decides on its own,
+/// before any of that, and is said first because it is the case an agent meets.
+fn default_provider_note<T: crate::provider::Preferred>() -> String {
+    format!(
+        "Inferred from `model` when one is given. With neither, the first provider \
+         in {setting} that has a credential configured, or {built_in} when that \
+         setting is unset.",
+        setting = T::SETTING,
+        built_in = T::BUILT_IN.provider_name()
+    )
+}
+
 /// Video is split into start and check because a Veo render takes minutes —
 /// long enough that a single blocking tool call would likely hit the client's
 /// timeout and lose a render that was already paid for.
@@ -735,36 +805,59 @@ fn start_video_schema() -> Value {
                 "provider": {
                     "type": "string",
                     "enum": video_provider_enum(),
-                    "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
+                    "description": format!("Which backend to use. {}", default_provider_note::<VideoBackend>())
                 },
                 "mode": {
                     "type": "string",
-                    "description": "Quality tier, where the provider has one. kling takes std, pro or master; the others have none and passing one there is an error."
+                    "description": format!(
+                        "Quality tier, where the provider has one: {}. The others have \
+                         none, and passing one there is an error.",
+                        video_modes()
+                    )
                 },
                 "aspect_ratio": {
                     "type": "string",
                     // Deliberately not an enum: google names `16:9`, runway
-                    // names the pixel pair `1280:720`, and both are accepted.
-                    "description": format!(
-                        "W:H. google accepts {}. runway names geometry in pixels — {} \
-                         — and a simplified ratio is mapped to the pair that is that \
-                         ratio, so 16:9 works on both.",
-                        describe_aspect(video_capabilities_for(VideoBackend::Google, "").aspect),
-                        describe_aspect(video_capabilities_for(VideoBackend::Runway, crate::runway::DEFAULT_MODEL).aspect)
-                    )
+                    // names the pixel pair `1280:720`, and each is accepted by
+                    // the provider that names it. Per provider, from the table.
+                    "description": format!("W:H. {}.", video_per_provider(|c| describe_aspect(c.aspect)))
                 },
                 "duration": {
                     "type": "integer",
                     "description": format!(
-                        "Seconds of output, and the parameter that decides the bill. \
-                         google: {}. runway: {}.",
-                        video_capabilities_for(VideoBackend::Google, "").duration.describe(),
-                        video_capabilities_for(VideoBackend::Runway, crate::runway::DEFAULT_MODEL).duration.describe()
+                        "Seconds of output, and the parameter that decides the bill. {}.",
+                        video_per_provider(|c| c.duration.describe())
                     )
                 },
-                "resolution": { "type": "string", "description": "e.g. 720p or 1080p. google only; on runway the aspect ratio decides the pixel count." },
-                "negative_prompt": { "type": "string", "description": "What to keep out of the shot. google only, and not on veo-lite." },
-                "seed": { "type": "integer", "description": "Renders the same video again. runway only; google exposes none." },
+                "resolution": {
+                    "type": "string",
+                    "description": format!(
+                        "e.g. 720p or 1080p. Supported by {}. Elsewhere the shape you ask \
+                         for decides the pixel count, and passing one is an error.",
+                        video_providers_where(|c| c.resolution)
+                    )
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    // `veo-lite` is the one exception that is a model, not a
+                    // provider, so it cannot come from the table and a test
+                    // holds it against the guard in `video.rs` instead.
+                    "description": format!(
+                        "What to keep out of the shot. Supported by {}, except that \
+                         google's veo-lite refuses one. Anywhere else passing it is an \
+                         error rather than a no-op.",
+                        video_providers_where(|c| c.negative_prompt)
+                    )
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": format!(
+                        "Renders the same video again. Supported by {}; every other \
+                         provider exposes none, so results there cannot be reproduced \
+                         and passing one is an error.",
+                        video_providers_where(|c| c.seed)
+                    )
+                },
                 "model": {
                     "type": "string",
                     "description": format!(
@@ -1659,6 +1752,117 @@ mod tests {
                     backend.name()
                 );
             }
+        }
+    }
+
+    /// The video counterpart: every parameter only some video providers honour
+    /// says which, and the answer is read off `VideoCapabilities` rather than
+    /// off a phrase.
+    ///
+    /// The image test above pins `comfyui`, which is one provider's name in one
+    /// table. This is checked in both directions against the whole of
+    /// `VideoBackend::ALL`, because the failure it holds was a hand-written
+    /// "google only" that went on being believed after kling declared
+    /// `negative_prompt: true` — an agent reading it would never have asked
+    /// kling for one, and nothing would have said the answer was yes.
+    #[test]
+    fn restricted_video_parameters_name_their_provider() {
+        let schema = start_video_schema();
+        let props = &schema["inputSchema"]["properties"];
+        let text = |field: &str| -> String {
+            props[field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("`{field}` has no description"))
+                .to_string()
+        };
+
+        type Honoured = fn(&crate::provider::VideoCapabilities) -> bool;
+        let flags: [(&str, Honoured); 3] = [
+            ("negative_prompt", |c| c.negative_prompt),
+            ("seed", |c| c.seed),
+            ("resolution", |c| c.resolution),
+        ];
+        for (field, honoured) in flags {
+            let description = text(field);
+            for backend in VideoBackend::ALL {
+                let caps = video_capabilities_for(*backend, backend.default_model());
+                assert_eq!(
+                    description.contains(backend.name()),
+                    honoured(&caps),
+                    "`{field}` must name {} exactly when {} honours it: {description}",
+                    backend.name(),
+                    backend.name()
+                );
+            }
+        }
+
+        // Quality tiers carry their own names, since the tier list is the thing
+        // an agent has to pass.
+        let mode = text("mode");
+        for backend in VideoBackend::ALL {
+            let caps = video_capabilities_for(*backend, backend.default_model());
+            assert_eq!(mode.contains(backend.name()), !caps.modes.is_empty(), "{mode}");
+            for tier in caps.modes {
+                assert!(mode.contains(tier), "`{tier}` is missing from `mode`: {mode}");
+            }
+        }
+
+        // Aspect and duration are offered by everyone, in different shapes, so
+        // each provider is named beside its own description of the shape.
+        let aspect = text("aspect_ratio");
+        let duration = text("duration");
+        for backend in VideoBackend::ALL {
+            let caps = video_capabilities_for(*backend, backend.default_model());
+            assert!(
+                aspect.contains(&format!("{}: {}", backend.name(), describe_aspect(caps.aspect))),
+                "`aspect_ratio` does not give {}'s shapes: {aspect}",
+                backend.name()
+            );
+            assert!(
+                duration.contains(&format!("{}: {}", backend.name(), caps.duration.describe())),
+                "`duration` does not give {}'s lengths: {duration}",
+                backend.name()
+            );
+        }
+
+        // The one model-level exception cannot come from a per-provider table,
+        // so it stays hand-written and is held here against the guard it
+        // describes: `veo-lite` is a real alias, and it is the `lite` the guard
+        // in `video.rs` refuses a negative prompt for.
+        assert!(text("negative_prompt").contains("veo-lite"));
+        assert!(crate::video::resolve_video_model("veo-lite").contains("lite"));
+    }
+
+    /// A `provider` description may not name a default the code does not use.
+    ///
+    /// It read "defaulting to google" while `resolve_default` walked
+    /// `LUCIDA_IMAGE_PROVIDERS` first — so an agent on a machine configured for
+    /// another provider was told the wrong thing about its own machine. The
+    /// setting and the built-in fallback are both read from the `Preferred`
+    /// impl that `resolve_default` uses, so the sentence moves when they do.
+    #[test]
+    fn the_provider_description_names_the_setting_that_picks_the_default() {
+        use crate::provider::Preferred;
+
+        let described = |schema: Value| -> String {
+            schema["inputSchema"]["properties"]["provider"]["description"]
+                .as_str()
+                .expect("provider has a description")
+                .to_string()
+        };
+
+        let image = described(image_schema());
+        assert!(image.contains(Backend::SETTING), "{image}");
+        assert!(image.contains(Backend::BUILT_IN.name()), "{image}");
+
+        let video = described(start_video_schema());
+        assert!(video.contains(VideoBackend::SETTING), "{video}");
+        assert!(video.contains(VideoBackend::BUILT_IN.name()), "{video}");
+
+        // The old claim was unconditional, and it is the unconditional form
+        // that is false.
+        for text in [&image, &video] {
+            assert!(!text.contains("defaulting to"), "{text}");
         }
     }
 
