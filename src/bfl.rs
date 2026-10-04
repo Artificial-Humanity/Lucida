@@ -153,6 +153,8 @@ pub fn capabilities(model: &str) -> Capabilities {
 
     Capabilities {
         provider: "bfl",
+        // Names models by hand, because a tagline is a `&'static str`; held
+        // against this table by `the_tagline_names_exactly_the_models_the_table_does`.
         tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone, and flux-kontext-* and flux-pro-1.1-ultra take a ratio from a short list instead of a size.",
         aspect: if ratio_only {
             AspectSupport::Named(RATIO_ONLY_ASPECTS)
@@ -898,6 +900,59 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+    }
+
+    /// The tagline names models by hand, so it is held against the table.
+    ///
+    /// It is a `&'static str` beside the measured capabilities, which is where
+    /// a tagline stays true — but this one lists which models take steps and
+    /// which take only a ratio, and those lists are the capabilities restated.
+    /// Each clause is read back, its names (a trailing `*` is a prefix) expanded
+    /// against `KNOWN_MODELS`, and compared with what `capabilities` says. A
+    /// model added to either group, or a sentence rewritten so its clause can no
+    /// longer be found, fails here rather than in front of an agent.
+    #[test]
+    fn the_tagline_names_exactly_the_models_the_table_does() {
+        fn expand(clause: &str) -> Vec<&'static str> {
+            let mut named: Vec<&'static str> = clause
+                .split(" and ")
+                .flat_map(|part| part.split(", "))
+                .flat_map(|name| {
+                    let name = name.trim();
+                    let hits: Vec<&'static str> = match name.strip_suffix('*') {
+                        Some(prefix) => {
+                            KNOWN_MODELS.iter().copied().filter(|m| m.starts_with(prefix)).collect()
+                        }
+                        None => KNOWN_MODELS.iter().copied().filter(|m| *m == name).collect(),
+                    };
+                    assert!(!hits.is_empty(), "the tagline names `{name}`, which is no known model");
+                    hits
+                })
+                .collect();
+            named.sort_unstable();
+            named
+        }
+        let sorted = |mut v: Vec<&'static str>| {
+            v.sort_unstable();
+            v
+        };
+
+        let tagline = capabilities(DEFAULT_MODEL).tagline;
+
+        let steps = tagline
+            .split_once("steps and guidance exist on ")
+            .and_then(|(_, rest)| rest.split_once(" alone"))
+            .map(|(clause, _)| clause)
+            .unwrap_or_else(|| panic!("no steps clause in the tagline: {tagline}"));
+        let tunable = KNOWN_MODELS.iter().copied().filter(|m| capabilities(m).steps).collect();
+        assert_eq!(expand(steps), sorted(tunable), "{tagline}");
+
+        let ratio = tagline
+            .split_once(" take a ratio")
+            .and_then(|(before, _)| before.rsplit_once(", and "))
+            .map(|(_, clause)| clause)
+            .unwrap_or_else(|| panic!("no ratio clause in the tagline: {tagline}"));
+        assert_eq!(expand(ratio), sorted(ratio_only_models()), "{tagline}");
     }
 
     /// Each edit model's reference ceiling is its own, and a request over it is
