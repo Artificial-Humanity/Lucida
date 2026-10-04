@@ -141,8 +141,8 @@ lucida config                           # displays active configuration sources
 | `LUCIDA_COMFYUI_URL` | URL | ComfyUI base URL (default: `http://127.0.0.1:8188`) |
 | `LUCIDA_COMFYUI_AUTH` | credentials | ComfyUI authentication (`user:password`, `Bearer …`, or `Basic …`) |
 | `LUCIDA_COMFYUI_CA` | path | Path to PEM file for a private CA |
-| `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`) |
-| `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`) |
+| `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`). Set but naming no provider (`,`) is refused, not read as unset |
+| `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`). Set but naming no provider is refused, not read as unset |
 | `LUCIDA_NO_UPDATE_CHECK` | flag | Set to any non-empty value to disable daily update notices |
 | `LUCIDA_NO_LEDGER` | flag | Set to any non-empty value to disable recording renders in the ledger |
 | `LUCIDA_BUDGET` | USD | Rolling 24-hour spending cap in USD (refuses renders exceeding limit) |
@@ -170,7 +170,7 @@ Values defined in a configuration file take precedence over environment variable
 
 ## Commands
 
-Use `--help` on any command to view supported options. Pass `--json` for structured machine output.
+Use `--help` on any command to view supported options. Pass `--json` for structured machine output from the commands that produce a result (`generate`, `edit`, `video`, `check`, `ops`, `history`); `models`, `config`, `skill`, `setup` and `update` print text only, so `--json` on them is refused with exit code `2` before they do anything.
 
 <h3 id="configuration-commands">Configuration commands</h3>
 
@@ -204,7 +204,7 @@ Use `--help` on any command to view supported options. Pass `--json` for structu
   ```console
   open "$(lucida generate "dawn over the mountains" -o /tmp/dawn.png)"
   ```
-* **Extension correction:** If output format differs from the requested extension (e.g. JPEG bytes returned for `.png`), Lucida corrects the filename extension and reports it on stderr.
+* **Extension correction:** If output format differs from the requested extension (e.g. JPEG bytes returned for `.png`), Lucida corrects the filename extension and reports it on stderr. Only a known format extension (`png`, `jpg`, `jpeg`, `webp`, `mp4`, any case) is replaced; any other suffix is kept as part of the name and the extension is appended, so `-o hero.v1` is written as `hero.v1.png` and never collides with `hero.v2`.
 
 ### Custom ComfyUI workflows
 
@@ -276,7 +276,7 @@ The `--json` flag emits a single JSON response object to stdout. Exit codes indi
 
 * **Budget enforcement:** `LUCIDA_BUDGET` sets a rolling 24-hour spending cap in USD. Requests exceeding the cap fail immediately with exit code `2`.
   The value must be a plain number (`5`, `2.50`). One that is not (`$5`, `5 USD`), or a budget set together with `LUCIDA_NO_LEDGER` or where the ledger has nowhere to live (no home or config directory — the ledger is where spend is counted), refuses every paid render with exit code `2` rather than being ignored. Free renders are never refused. The cap is enforced across concurrent MCP calls in one process, but not between separate `lucida` processes.
-* **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance.
+* **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance. With `--json` the plan lists every resolved request field the render would send (for images: prompt, aspect, size, seed, references, negative prompt, mask, workflow, steps, guidance; for video: aspect, resolution, negative prompt, duration, mode, seed, image), `null` where unset.
 * **Ledger tracking:** Completed and pending operations are recorded to a JSON ledger adjacent to the configuration file. Inspected via `lucida history` or `lucida ops`. Set `LUCIDA_NO_LEDGER=1` to disable recording.
 
 ### Agent skill

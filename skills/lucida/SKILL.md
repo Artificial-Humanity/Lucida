@@ -156,7 +156,8 @@ than hidden, so read what comes back rather than assuming the request was met.
   `reference_images` writes wherever you tell it.
 - **The written path is authoritative, not the one you asked for.** File
   extensions are corrected to match the bytes actually returned, so a request
-  for `.png` may be written as `.jpg`. The CLI prints the real path on stdout
+  for `.png` may be written as `.jpg`. A name whose last suffix is not a
+  format (`hero.v1`) keeps it and gains the extension (`hero.v1.png`). The CLI prints the real path on stdout
   alone, which is why `$(lucida generate …)` composes; the MCP result reports it
   too. Use what comes back when referencing the file afterwards.
 - **What a mask guarantees differs by provider, so read the capability report
@@ -206,8 +207,10 @@ silent substitution. The probe says which.
 
 ## From a shell, in a script
 
-`--json` puts one object on stdout for any subcommand, including on failure, so
-there is one shape to parse either way. The exit code distinguishes four
+`--json` puts one object on stdout for every subcommand that produces a result,
+including on failure, so there is one shape to parse either way. (`models`,
+`config`, `skill`, `setup` and `update` print text only: `--json` on them exits `2`
+before they do anything.) The exit code distinguishes four
 outcomes: `0` done, `1` something went wrong, `2` refused before anything was
 spent, `3` still working. **Do not retry a 2** — it is an answer rather than a
 failure, and the message names what to do instead. A `lucida video` whose wait

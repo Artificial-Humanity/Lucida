@@ -1410,7 +1410,8 @@ impl Preferred for VideoBackend {
 /// The ordered preference list as written, or `None` if the setting is unset.
 ///
 /// Empty entries are skipped so a trailing comma is not an error worth
-/// stopping for, but an unrecognised name is: a typo that silently dropped an
+/// stopping for, but a list with *nothing but* empty entries is refused, and so
+/// is an unrecognised name: a typo that silently dropped an
 /// entry would move the render to the next provider, which is precisely the
 /// substitution this design exists to avoid.
 fn preference_list<T: Preferred>() -> Result<Option<Vec<T>>> {
@@ -1436,8 +1437,25 @@ fn preference_list<T: Preferred>() -> Result<Option<Vec<T>>> {
         chain.push(parsed);
     }
 
+    // Set, and names nothing (`", ,"`). Reading that as unset would send the render
+    // to the built-in default and report "no preference set" about a setting that
+    // is set — the substitution this design exists to avoid, reached by a list
+    // with nothing in it rather than a list with a typo. A setting that is truly
+    // unset, or empty, never gets here: `config::var` drops those.
     if chain.is_empty() {
-        return Ok(None);
+        return Err(anyhow::Error::new(crate::out::Refused(format!(
+            "{setting} is set to `{raw}`, which names no provider.\n\n\
+             List at least one ({every}), or unset {setting} to use the built-in \
+             default ({built_in}). Leaving it set and empty is refused rather than \
+             read as unset, because the list is a statement of where renders may go.",
+            setting = T::SETTING,
+            every = T::every()
+                .iter()
+                .map(|c| c.provider_name())
+                .collect::<Vec<_>>()
+                .join(", "),
+            built_in = T::BUILT_IN.provider_name(),
+        ))));
     }
     Ok(Some(chain))
 }
@@ -1546,6 +1564,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A preference that is set but names nothing is refused, not read as unset.
+    ///
+    /// Driven through `resolve_default`, the way a render reaches it, and for both
+    /// media: the two settings share one function and should share its answer.
+    #[test]
+    fn a_preference_with_no_entries_is_refused_naming_the_setting() {
+        fn refusal<T: Preferred + std::fmt::Debug>(raw: &str) -> anyhow::Error {
+            crate::config::with_injected(&[(T::SETTING, raw)], || {
+                resolve_default::<T>().expect_err("an empty list was accepted")
+            })
+        }
+
+        for raw in [",", ", ,", " , , "] {
+            let image = refusal::<Backend>(raw);
+            assert_eq!(crate::out::code_for(&image), crate::out::REFUSED, "{raw:?}");
+            assert!(format!("{image:#}").contains("LUCIDA_IMAGE_PROVIDERS"), "{image:#}");
+
+            let video = refusal::<VideoBackend>(raw);
+            assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{raw:?}");
+            assert!(format!("{video:#}").contains("LUCIDA_VIDEO_PROVIDERS"), "{video:#}");
+        }
+    }
+
+    /// An unset preference is the built-in default, and says so — the sentence
+    /// the generated help text now promises ("when that setting is unset").
+    #[test]
+    fn an_unset_preference_resolves_to_the_built_in_default() {
+        let (backend, source) = resolve_default::<Backend>().unwrap();
+        assert_eq!(backend, Backend::BUILT_IN);
+        assert!(matches!(source, DefaultSource::BuiltIn));
     }
 
     /// The preference settings are themselves configurable settings.

@@ -401,10 +401,45 @@ fn main() {
     }
 }
 
+/// Refuses `--json` on a command that has no JSON document to give.
+///
+/// `out.rs` promises one JSON object on stdout whatever happens, and `--json` is
+/// global so that a caller never has to remember which subcommands take it. These
+/// five print prose with `println!`, so honouring the flag would mean a stream
+/// that is not JSON under a flag that says it is — and ignoring it, which is what
+/// they did, made the parser on the other end fail on the first word. The flag is
+/// refused instead, by the same rule as any parameter that cannot be honoured.
+///
+/// Listed by the commands that *lack* a document, not by those that have one, so a
+/// new command inherits the promise until someone says it cannot keep it. `mcp` is
+/// in neither list: its stdout is JSON-RPC framing, a stream of documents the
+/// protocol defines, and the flag changes nothing about it.
+fn refuse_json_without_a_document(command: &Command) -> Result<()> {
+    let name = match command {
+        Command::Models { .. } => "models",
+        Command::Config { .. } => "config",
+        Command::Skill => "skill",
+        Command::Setup { .. } => "setup",
+        Command::Update { .. } => "update",
+        _ => return Ok(()),
+    };
+    Err(anyhow::Error::new(out::Refused(format!(
+        "`lucida {name}` prints text and has no JSON document, so `--json` cannot \
+         be honoured. Run it without `--json`; nothing was done."
+    ))))
+}
+
 /// Returns the exit code rather than `()`, because "still working" is an
 /// outcome and not an error — `lucida check` has to be able to say so without
 /// pretending something went wrong.
 fn run(cli: Cli) -> Result<i32> {
+    // Before any command runs: `config --init` writes a file and `update` goes to
+    // the network, and a refusal reported after either would be a lie about
+    // "nothing was done".
+    if cli.json {
+        refuse_json_without_a_document(&cli.command)?;
+    }
+
     match cli.command {
         Command::Mcp => mcp::serve().map(|()| out::OK),
 
@@ -453,10 +488,7 @@ fn run(cli: Cli) -> Result<i32> {
             setup::run(scope, dry_run, yes).map(|()| out::OK)
         }
 
-        Command::Skill => {
-            skill::print();
-            Ok(out::OK)
-        }
+        Command::Skill => skill::print().map(|()| out::OK),
 
         Command::Update { check, yes } => {
             let mode = match (check, yes) {
@@ -650,6 +682,10 @@ fn run(cli: Cli) -> Result<i32> {
                     "model": resolved,
                     "prompt": request.prompt,
                     "aspect": request.aspect.map(|a| a.to_string()),
+                    // Resolution and the negative prompt are sent too; they
+                    // were the two fields of the request this left out.
+                    "resolution": request.resolution,
+                    "negative_prompt": request.negative_prompt,
                     "duration": request.duration,
                     "mode": request.mode,
                     "seed": request.seed,
@@ -1723,6 +1759,15 @@ fn execute(
             "size": request.size.map(|s| s.0),
             "seed": request.seed,
             "references": request.references,
+            // Everything else the render would send, so the plan answers
+            // "what would you send?" in full. These five used to be resolved,
+            // validated and then left out of the document that claims to list
+            // every resolved parameter.
+            "negative_prompt": request.negative_prompt,
+            "mask": request.mask,
+            "workflow": request.workflow,
+            "steps": request.steps,
+            "guidance": request.guidance,
             "estimated_usd": price.against_budget() * count as f64,
             "exit_code": out::OK,
         }))?;
@@ -2004,7 +2049,16 @@ pub fn image_dimensions(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
 /// asked for — so `-o icon.png` would otherwise leave a file named `.png` holding
 /// JPEG bytes. That passes unnoticed until some downstream tool rejects it. The
 /// real path is what goes to stdout, so scripts capturing it stay correct.
+///
+/// Only an extension that is *a known image or video extension* is replaced. Any
+/// other suffix is part of the name, not a format: `-o hero.v1` and `-o hero.v2`
+/// both went through `with_extension` and became `hero.png`, so the second render
+/// silently overwrote the first. Those get the extension appended instead
+/// (`hero.v1.png`). The list is the formats Lucida itself writes, which is also the
+/// set a person might plausibly have meant as a mismatched format.
 pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
+    const FORMATS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "mp4"];
+
     let expected = match mime {
         "image/jpeg" => "jpg",
         "image/png" => "png",
@@ -2025,10 +2079,25 @@ pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
     };
 
     if matches {
-        path.to_path_buf()
-    } else {
-        path.with_extension(expected)
+        return path.to_path_buf();
     }
+    if actual.as_deref().is_some_and(|e| FORMATS.contains(&e)) {
+        return path.with_extension(expected);
+    }
+
+    // Appended, to the file name alone so the directory is untouched. A path with
+    // no file name at all (`..`, or empty) has nothing to append to; the old
+    // behaviour is the best of the bad options there.
+    let Some(name) = path.file_name() else {
+        return path.with_extension(expected);
+    };
+    let mut name = name.to_os_string();
+    // `hero.` already has its dot.
+    if !name.to_string_lossy().ends_with('.') {
+        name.push(".");
+    }
+    name.push(expected);
+    path.with_file_name(name)
 }
 
 /// Writes `bytes` to `path` without ever leaving it truncated.
@@ -2175,6 +2244,51 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A suffix that is not a format is part of the name, so two renders that
+    /// differ only in it must not land on one file.
+    ///
+    /// This was `with_extension`, which replaces whatever follows the last dot:
+    /// `hero.v1` and `hero.v2` both became `hero.png`, and the second render
+    /// overwrote the first without a word.
+    #[test]
+    fn an_unknown_suffix_is_kept_and_the_extension_appended() {
+        let png = |p: &str| correct_extension(Path::new(p), "image/png");
+
+        assert_eq!(png("hero.v1"), PathBuf::from("hero.v1.png"));
+        assert_eq!(png("hero.v2"), PathBuf::from("hero.v2.png"));
+        assert_ne!(png("hero.v1"), png("hero.v2"), "two names collapsed into one file");
+
+        // No extension at all, and the directory untouched.
+        assert_eq!(png("out/hero"), PathBuf::from("out/hero.png"));
+        assert_eq!(png("out.v1/hero.v1"), PathBuf::from("out.v1/hero.v1.png"));
+        assert_eq!(png("hero."), PathBuf::from("hero.png"));
+    }
+
+    /// A known format that disagrees with the bytes is replaced, which is the
+    /// whole reason the function exists — in either case, and for video.
+    #[test]
+    fn a_known_extension_that_disagrees_with_the_bytes_is_replaced() {
+        let fix = |p: &str, mime: &str| correct_extension(Path::new(p), mime);
+
+        assert_eq!(fix("icon.png", "image/jpeg"), PathBuf::from("icon.jpg"));
+        assert_eq!(fix("icon.PNG", "image/webp"), PathBuf::from("icon.webp"));
+        assert_eq!(fix("icon.webp", "image/png"), PathBuf::from("icon.png"));
+        assert_eq!(fix("clip.jpg", "video/mp4"), PathBuf::from("clip.mp4"));
+        assert_eq!(fix("clip.mp4", "image/png"), PathBuf::from("clip.png"));
+        assert_eq!(fix("a.v1/icon.jpeg", "image/png"), PathBuf::from("a.v1/icon.png"));
+    }
+
+    /// An extension that already agrees is left exactly as written, including its
+    /// case and `jpeg` for JPEG, and an unknown mime type changes nothing.
+    #[test]
+    fn an_agreeing_extension_is_left_alone() {
+        let fix = |p: &str, mime: &str| correct_extension(Path::new(p), mime);
+
+        assert_eq!(fix("icon.PNG", "image/png"), PathBuf::from("icon.PNG"));
+        assert_eq!(fix("icon.jpeg", "image/jpeg"), PathBuf::from("icon.jpeg"));
+        assert_eq!(fix("icon.v1", "application/octet-stream"), PathBuf::from("icon.v1"));
+    }
 
     /// The shopfront surfaces — the package description and the `--help` banner
     /// — are the first and often only thing anyone reads, and they are pure
