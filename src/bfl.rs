@@ -112,6 +112,31 @@ pub fn capabilities(model: &str) -> Capabilities {
     }
 }
 
+/// Whether a polling URL may be sent the API key.
+///
+/// The docs say to follow the returned `polling_url` rather than build one,
+/// because the global endpoint hands work to a regional one — so the host is not
+/// fixed, only its family is: the configured base URL's own host, or any
+/// `*.bfl.ai`, and the latter only over https. The base's exact origin is also
+/// accepted whatever its scheme, which is what keeps a recorded-response server
+/// on `http://127.0.0.1` working; production's base is https, so it admits
+/// nothing plaintext. Parsed rather than prefix-matched, so
+/// `https://api.bfl.ai@evil.example/` and `https://evilbfl.ai/` are refused.
+fn trusted_polling_url(base: &str, url: &str) -> bool {
+    let (Ok(url), Ok(base)) = (reqwest::Url::parse(url), reqwest::Url::parse(base)) else {
+        return false;
+    };
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if url.origin() == base.origin() {
+        return true;
+    }
+    url.scheme() == "https"
+        && (base.host_str().is_some_and(|b| b.eq_ignore_ascii_case(&host))
+            || host.ends_with(".bfl.ai"))
+}
+
 pub struct Client {
     key: String,
     http: reqwest::blocking::Client,
@@ -254,6 +279,21 @@ impl Client {
         let mut interval = Duration::from_millis(1000);
         let mut announced = String::new();
         let billed = |error: anyhow::Error| abandoned(polling_url, error);
+
+        // The polling URL arrives in the submit response and every poll carries
+        // the API key to it, so a response that named some other host would be
+        // handed the key. Checked before the first poll, and marked abandoned
+        // like every other way out of the wait: the submit was billed, and the
+        // URL named here is the one handle left on what was paid for.
+        if !trusted_polling_url(&self.base, polling_url) {
+            return Err(billed(anyhow!(
+                "the API named a polling URL Lucida will not send the key to: \
+                 {polling_url}\n\n\
+                 Polling is limited to the API's own host (or a `*.bfl.ai` regional \
+                 one, over https), because each poll carries `x-key`. The render \
+                 was submitted and may be billed; nothing was polled."
+            )));
+        }
 
         loop {
             // Checked before the first poll as well as between the rest, so a
@@ -862,5 +902,50 @@ mod tests {
         assert!(format!("{error:#}").contains("out of credits"), "{error:#}");
         assert!(entries.is_empty(), "an unbilled submit was counted: {entries:?}");
         server.finish();
+    }
+
+    #[test]
+    fn only_the_apis_own_hosts_are_trusted_with_the_key() {
+        let base = "https://api.bfl.ai/v1";
+        for trusted in [
+            "https://api.bfl.ai/v1/get_result?id=a",
+            "https://api.eu1.bfl.ai/v1/get_result?id=a",
+            "https://API.BFL.AI/v1/get_result?id=a",
+        ] {
+            assert!(trusted_polling_url(base, trusted), "{trusted}");
+        }
+        for untrusted in [
+            "http://api.bfl.ai/v1/get_result?id=a",       // plaintext
+            "https://evil.example/v1/get_result?id=a",    // another host
+            "https://evilbfl.ai/v1/get_result?id=a",      // suffix without the dot
+            "https://api.bfl.ai@evil.example/get_result", // userinfo trick
+            "https://bfl.ai.evil.example/get_result",
+            "not a url",
+        ] {
+            assert!(!trusted_polling_url(base, untrusted), "{untrusted}");
+        }
+        // A recorded-response server is its own base, whatever its scheme.
+        assert!(trusted_polling_url("http://127.0.0.1:9/", "http://127.0.0.1:9/get_result"));
+        assert!(!trusted_polling_url("http://127.0.0.1:9/", "http://127.0.0.1:10/get_result"));
+    }
+
+    /// The key is never sent to a host the submit response invented, and the
+    /// refusal is still an abandoned render — it was billed — naming the URL.
+    #[test]
+    fn a_foreign_polling_url_is_never_sent_the_key() {
+        let submit = r#"{"id":"abc","polling_url":"https://evil.example/v1/get_result?id=abc"}"#;
+        let server = serve(vec![Reply::json(submit)]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+        let error = wired(&server).generate(&request).unwrap_err();
+        let abandoned = error
+            .downcast_ref::<crate::provider::Abandoned>()
+            .expect("a billed submit's failure is marked abandoned");
+        assert_eq!(abandoned.handle, "https://evil.example/v1/get_result?id=abc");
+        assert!(error.to_string().contains("https://evil.example/v1/get_result"), "{error:#}");
+        assert_eq!(server.finish().len(), 1, "nothing was polled");
     }
 }
