@@ -19,7 +19,12 @@
 //!
 //! - **Append-only** means a write is one syscall and two processes can hold the
 //!   file open without coordinating. `O_APPEND` writes of this size do not
-//!   interleave on any platform Lucida ships to.
+//!   interleave on any platform Lucida ships to — *provided the line really is
+//!   one `write`*. It was not: `writeln!` of a `serde_json::Value` streams the
+//!   value token by token into an unbuffered file, which `strace` shows as a
+//!   dozen syscalls per record, so four MCP workers finishing together could
+//!   splice their lines into each other and lose both — a paid Veo operation id
+//!   among them. [`append`] serialises the whole line first and writes it once.
 //! - **One object per line** means a truncated or garbled line costs that line
 //!   and nothing else. A JSON *array* would be corrupt as a whole, which for a
 //!   record of things you have paid for is the wrong failure.
@@ -53,6 +58,10 @@ pub const VIDEO: &str = "video";
 
 /// Where the record ended up.
 pub const DONE: &str = "done";
+/// The provider reported the render as finally failed — rejected, filtered,
+/// expired. Retires an operation exactly as `done` does, because there is
+/// nothing left to collect; unlike `done` it carries no file, only the reason.
+pub const FAILED: &str = "failed";
 /// A video render handed back an operation id and nothing has collected it yet.
 pub const STARTED: &str = "started";
 
@@ -118,12 +127,31 @@ pub fn image(
 ///
 /// The entry `lucida ops` is built on, and the reason this module exists: the
 /// operation id is the only way back to a render that is already being billed.
-pub fn video_started(model: &str, prompt: &str, operation: &str, estimated_usd: f64) {
-    record(json!({
+pub fn video_started(
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    operation: &str,
+    estimated_usd: f64,
+) {
+    record(started_entry(provider, model, prompt, operation, estimated_usd));
+}
+
+fn started_entry(
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    operation: &str,
+    estimated_usd: f64,
+) -> Value {
+    json!({
         "at": clock::now(),
         "kind": VIDEO,
         "status": STARTED,
-        "provider": "google",
+        // The backend that was actually used. This was the literal "google" for
+        // every render, so a Runway or Kling operation showed up in `lucida ops`
+        // and `history` as Veo.
+        "provider": provider,
         "model": model,
         "prompt": prompt,
         "operation": operation,
@@ -131,20 +159,84 @@ pub fn video_started(model: &str, prompt: &str, operation: &str, estimated_usd: 
         // which is why the estimate rides on this entry rather than on the
         // `done` one. A render started and never collected still cost money.
         "estimated_usd": estimated_usd,
-    }));
+    })
 }
 
 /// A video that has been downloaded, which is what retires an operation from
 /// `lucida ops`.
-pub fn video_done(operation: &str, path: &str) {
-    record(json!({
+pub fn video_done(provider: &str, operation: &str, path: &str) {
+    record(done_entry(provider, operation, path));
+}
+
+fn done_entry(provider: &str, operation: &str, path: &str) -> Value {
+    json!({
         "at": clock::now(),
         "kind": VIDEO,
         "status": DONE,
-        "provider": "google",
+        "provider": provider,
         "operation": operation,
         "path": path,
+    })
+}
+
+/// A video the provider has said it will never deliver.
+///
+/// Without this a render that failed or expired stayed in `lucida ops` forever,
+/// listed as waiting to be collected and answering every `check` with the same
+/// error. The caller decides what counts as final — see
+/// [`note_failure`] — and this only writes it down.
+pub fn video_failed(provider: &str, operation: &str, error: &str) {
+    record(json!({
+        "at": clock::now(),
+        "kind": VIDEO,
+        "status": FAILED,
+        "provider": provider,
+        "operation": operation,
+        "error": summarise(error),
     }));
+}
+
+/// Retires `operation` if `error` is a failure the provider reported as final.
+///
+/// Only [`crate::video::TerminalFailure`] counts. A transport error, a 5xx or a
+/// deadline says nothing about the render, which may well still finish, and
+/// retiring it on one would hide a paid render that `lucida ops` exists to find.
+pub fn note_failure(provider: &str, operation: &str, error: &anyhow::Error) {
+    if let Some(failure) = error.downcast_ref::<crate::video::TerminalFailure>() {
+        video_failed(provider, operation, &failure.0);
+    }
+}
+
+/// The first line of an error, bounded: the ledger is read line by line and
+/// capped by size, and a provider's failure body can run to pages.
+fn summarise(error: &str) -> String {
+    const LIMIT: usize = 300;
+    let first = error.lines().next().unwrap_or("").trim();
+    match first.char_indices().nth(LIMIT) {
+        Some((cut, _)) => format!("{}…", &first[..cut]),
+        None => first.to_string(),
+    }
+}
+
+/// The provider a ledger entry recorded, if it can be trusted.
+///
+/// Entries written before the provider was real all say `google`, whatever
+/// started them. A `google` entry whose operation id is not Veo-shaped is one of
+/// those, and returning it would make `lucida ops` print a `--provider google`
+/// command that is wrong for the render in front of it, where the plain
+/// `lucida check <id>` it printed before infers the right one. So that case
+/// reads as unrecorded. No entry without a `provider` field gets one invented.
+pub fn recorded_provider(entry: &Value) -> Option<&str> {
+    let provider = entry["provider"].as_str()?;
+    if provider == "google" {
+        let operation = entry["operation"].as_str().unwrap_or_default();
+        if crate::provider::infer_video_backend_from_operation(operation)
+            != crate::provider::VideoBackend::Google
+        {
+            return None;
+        }
+    }
+    Some(provider)
 }
 
 /// Every record, oldest first. An unreadable file reads as no history rather
@@ -159,20 +251,27 @@ pub fn entries() -> Vec<Value> {
         .collect()
 }
 
+/// Operations with a `done` or `failed` record: nothing is left to collect.
+fn retired(all: &[Value]) -> std::collections::HashSet<String> {
+    all.iter()
+        .filter(|e| e["status"] == DONE || e["status"] == FAILED)
+        .filter_map(|e| e["operation"].as_str().map(str::to_string))
+        .collect()
+}
+
 /// Video operations that were started and never collected.
 ///
 /// Computed from the log rather than stored as state, so there is nothing to go
 /// out of sync: an operation is outstanding exactly when it has a `started`
-/// record and no `done` one. A render collected from a different shell, or by an
-/// agent, therefore disappears from here without anything having to be told.
+/// record and no `done` or `failed` one. A render collected from a different
+/// shell, or by an agent, therefore disappears from here without anything
+/// having to be told.
 pub fn outstanding() -> Vec<Value> {
-    let all = entries();
+    outstanding_from(entries())
+}
 
-    let collected: std::collections::HashSet<String> = all
-        .iter()
-        .filter(|e| e["status"] == DONE)
-        .filter_map(|e| e["operation"].as_str().map(str::to_string))
-        .collect();
+fn outstanding_from(all: Vec<Value>) -> Vec<Value> {
+    let collected = retired(&all);
 
     let mut seen = std::collections::HashSet::new();
     all.into_iter()
@@ -196,29 +295,138 @@ fn append(path: &std::path::Path, entry: &Value) -> anyhow::Result<()> {
         prune(path);
     }
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{entry}")?;
+    // The whole record, built before the file is touched. `writeln!(file, "{entry}")`
+    // looked like one write and was a dozen: serde_json's `Display` streams token
+    // by token into an unbuffered `File`, and `O_APPEND` only keeps *each syscall*
+    // whole. Concurrent writers interleaved mid-record, both lines failed to parse
+    // and `entries()` dropped them — a paid operation id and its spend, gone.
+    let mut line = serde_json::to_string(entry)?;
+    line.push('\n');
+
+    let mut options = std::fs::OpenOptions::new();
+    // Readable too, for one byte: see the torn-tail check below.
+    options.create(true).append(true).read(true);
+    #[cfg(unix)]
+    {
+        // The ledger holds prompts. Applies only when this call creates the
+        // file, so a file whose permissions the user chose is left alone.
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+
+    // A crash mid-write leaves a last line with no newline, and the next record
+    // would be joined onto it, costing both. Starting on a fresh line costs only
+    // the torn one — and an empty line, which reads as nothing.
+    if ends_mid_line(&mut file) {
+        line.insert(0, '\n');
+    }
+
+    file.write_all(line.as_bytes())?;
     Ok(())
 }
 
-/// Drops the oldest half when the file outgrows its cap.
+/// Whether the file is non-empty and its last byte is not a newline.
 ///
-/// Half rather than one line, so pruning happens rarely instead of on every
-/// write once the cap is reached. Written atomically, and best-effort: a
-/// concurrent append during the rewrite could be lost, which is a real race and
-/// an acceptable one — the alternative is a lock file, and a lock file that
-/// outlives a crash would stop the ledger recording anything at all. Losing a
-/// line of history is recoverable; refusing to record is not.
+/// An unreadable tail reads as "fine": a stray blank line is cheaper than a
+/// ledger that refuses to record because it could not look first.
+fn ends_mid_line(file: &mut std::fs::File) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1))
+        .and_then(|_| file.read_exact(&mut last))
+        .is_ok()
+        && last[0] != b'\n'
+}
+
+/// Drops old history when the file outgrows its cap.
+///
+/// Up to the oldest half of the lines rather than one, so pruning happens rarely
+/// instead of on every write once the cap is reached. It used to drop *exactly*
+/// the oldest half, which under bulk use reached into the spend window and
+/// deleted entries the budget is computed from, and into video starts that were
+/// still waiting to be collected. Now it drops, oldest first, only what neither
+/// of those needs; if that is less than half, or nothing, the file stays over
+/// the cap, which is best-effort as it always was.
+///
+/// Written atomically, and best-effort: a concurrent append during the rewrite
+/// could be lost, which is a real race and an acceptable one — the alternative
+/// is a lock file, and a lock file that outlives a crash would stop the ledger
+/// recording anything at all. Losing a line of history is recoverable; refusing
+/// to record is not.
 fn prune(path: &std::path::Path) {
+    prune_at(path, clock::now());
+}
+
+fn prune_at(path: &std::path::Path, now: i64) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let lines: Vec<&str> = text.lines().collect();
-    let keep = lines.split_at(lines.len() / 2).1.join("\n");
-    let _ = crate::write_atomically(path, format!("{keep}\n").as_bytes(), false);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let parsed: Vec<Option<Value>> = lines
+        .iter()
+        .map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    let values: Vec<Value> = parsed.iter().flatten().cloned().collect();
+    let retired = retired(&values);
+    let cutoff = now - crate::spend::WINDOW_SECONDS;
+
+    // Entries the spend window is computed from, and starts nobody has collected.
+    // A line that does not parse is neither: it has no timestamp to protect and
+    // no operation id to lose.
+    let protected = |entry: &Option<Value>| -> bool {
+        let Some(e) = entry else { return false };
+        let young = e["at"].as_i64().unwrap_or(0) >= cutoff;
+        let waiting = e["status"] == STARTED
+            && e["operation"].as_str().is_some_and(|op| !retired.contains(op));
+        young || waiting
+    };
+
+    let budget = lines.len() / 2;
+    let mut drop = vec![false; lines.len()];
+    let mut dropped = 0;
+    for (i, entry) in parsed.iter().enumerate() {
+        if dropped == budget {
+            break;
+        }
+        if !protected(entry) {
+            drop[i] = true;
+            dropped += 1;
+        }
+    }
+
+    // A `started` line that survives must keep the record that retired it, or the
+    // operation would reappear in `lucida ops` as waiting.
+    let kept_starts: std::collections::HashSet<&str> = parsed
+        .iter()
+        .zip(&drop)
+        .filter(|(_, d)| !**d)
+        .filter_map(|(e, _)| e.as_ref())
+        .filter(|e| e["status"] == STARTED)
+        .filter_map(|e| e["operation"].as_str())
+        .collect();
+    for (entry, d) in parsed.iter().zip(drop.iter_mut()) {
+        let Some(e) = entry else { continue };
+        let retires = e["status"] == DONE || e["status"] == FAILED;
+        if *d && retires && e["operation"].as_str().is_some_and(|op| kept_starts.contains(op)) {
+            *d = false;
+        }
+    }
+
+    if !drop.contains(&true) {
+        return;
+    }
+
+    let keep: Vec<&str> = lines
+        .iter()
+        .zip(&drop)
+        .filter(|(_, d)| !**d)
+        .map(|(l, _)| *l)
+        .collect();
+    // Private: the ledger holds prompts, and the rewrite would otherwise replace
+    // a 0600 file with one at the umask's default.
+    let _ = crate::write_atomically(path, format!("{}\n", keep.join("\n")).as_bytes(), true);
 }
 
 #[cfg(test)]
@@ -285,25 +493,73 @@ mod tests {
     /// without anything having to be told.
     #[test]
     fn a_collected_render_is_no_longer_outstanding() {
-        let all = [
+        let open = outstanding_from(vec![
             json!({ "kind": VIDEO, "status": STARTED, "operation": "operations/a" }),
             json!({ "kind": VIDEO, "status": STARTED, "operation": "operations/b" }),
             json!({ "kind": VIDEO, "status": DONE, "operation": "operations/a" }),
-        ];
-
-        let collected: std::collections::HashSet<String> = all
-            .iter()
-            .filter(|e| e["status"] == DONE)
-            .filter_map(|e| e["operation"].as_str().map(str::to_string))
-            .collect();
-        let open: Vec<&Value> = all
-            .iter()
-            .filter(|e| e["status"] == STARTED)
-            .filter(|e| !collected.contains(e["operation"].as_str().unwrap()))
-            .collect();
+        ]);
 
         assert_eq!(open.len(), 1);
         assert_eq!(open[0]["operation"], "operations/b");
+    }
+
+    /// A render the provider reported as finally failed has nothing left to
+    /// collect, so it leaves the list exactly as a collected one does. It used
+    /// to stay there forever, answering every `check` with the same error.
+    #[test]
+    fn a_failed_render_is_no_longer_outstanding() {
+        let open = outstanding_from(vec![
+            json!({ "kind": VIDEO, "status": STARTED, "operation": "operations/a" }),
+            json!({ "kind": VIDEO, "status": STARTED, "operation": "operations/b" }),
+            json!({ "kind": VIDEO, "status": FAILED, "operation": "operations/a", "error": "x" }),
+        ]);
+
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0]["operation"], "operations/b");
+    }
+
+    #[test]
+    fn the_entries_carry_the_provider_that_was_used() {
+        let started = started_entry("runway", "gen4_turbo", "a fox", "4f1a2b3c", 0.5);
+        assert_eq!(started["provider"], "runway");
+        assert_eq!(started["status"], STARTED);
+
+        assert_eq!(done_entry("kling", "915468728228253726", "/tmp/x.mp4")["provider"], "kling");
+    }
+
+    /// Entries from before the provider was recorded say `google` for everything,
+    /// so a `google` entry on an id Veo would never issue is not evidence, and a
+    /// missing field stays missing.
+    #[test]
+    fn a_provider_is_trusted_only_when_it_can_be_true() {
+        let entry = |provider: Value, operation: &str| {
+            json!({ "kind": VIDEO, "status": STARTED, "provider": provider, "operation": operation })
+        };
+        let uuid = "4f1a2b3c-0000-4000-8000-000000000000";
+
+        assert_eq!(recorded_provider(&entry(json!("runway"), uuid)), Some("runway"));
+        assert_eq!(recorded_provider(&entry(json!("google"), "operations/abc")), Some("google"));
+        assert_eq!(
+            recorded_provider(&entry(json!("google"), uuid)),
+            None,
+            "a legacy Runway entry, mislabelled google"
+        );
+        assert_eq!(
+            recorded_provider(&json!({ "kind": VIDEO, "operation": "operations/abc" })),
+            None,
+            "no field, no answer"
+        );
+    }
+
+    /// The failure's reason is kept, but only its first line and a bounded
+    /// length: a provider's error body can run to pages.
+    #[test]
+    fn an_error_summary_is_one_bounded_line() {
+        assert_eq!(summarise("the render failed: nope\nlong detail"), "the render failed: nope");
+        let long = "é".repeat(1000);
+        let summary = summarise(&long);
+        assert!(summary.chars().count() <= 301, "{}", summary.chars().count());
+        assert!(summary.ends_with('…'));
     }
 
     /// Pruning keeps the newest half. The oldest entries are the ones nobody
@@ -322,6 +578,215 @@ mod tests {
         assert_eq!(left[0]["n"], 5, "the newest half must survive");
         assert_eq!(left[4]["n"], 9);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The line is one `write`, and so lands whole however many writers there
+    /// are. `writeln!` of the value streamed it token by token: four MCP workers
+    /// finishing together spliced their lines into each other, both failed to
+    /// parse, and a paid operation id was gone.
+    #[test]
+    fn two_appends_are_two_whole_lines() {
+        let path = temp();
+        append(&path, &json!({ "operation": "operations/a" })).unwrap();
+        append(&path, &json!({ "operation": "operations/b" })).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with('\n'));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text:?}");
+        for (line, want) in lines.iter().zip(["operations/a", "operations/b"]) {
+            let parsed: Value = serde_json::from_str(line).expect("a line that does not parse");
+            assert_eq!(parsed["operation"], want);
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn concurrent_appends_never_splice_each_other() {
+        let path = temp();
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for n in 0..50 {
+                        // Long enough that a record cannot be one lucky buffer.
+                        let entry = json!({ "w": w, "n": n, "prompt": "x".repeat(2000) });
+                        append(&path, &entry).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        // Blank lines are allowed: a writer that glimpses another's record
+        // half-written sees no newline yet and starts on a fresh line, which
+        // costs an empty line and nothing else.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().filter(|l| !l.is_empty()).count(), 400);
+        assert_eq!(read(&path).len(), 400, "a line was spliced and dropped");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A crash mid-write leaves a last line with no newline. The next record
+    /// must start on its own line, or it is joined onto the stump and both are
+    /// lost; as it is, only the torn one is.
+    #[test]
+    fn a_torn_last_line_costs_only_itself() {
+        let path = temp();
+        std::fs::write(&path, "{\"n\":1}\n{\"n\":2,\"pro").unwrap();
+
+        append(&path, &json!({ "n": 3 })).unwrap();
+
+        let survived = read(&path);
+        assert_eq!(survived.len(), 2, "{survived:?}");
+        assert_eq!(survived[0]["n"], 1);
+        assert_eq!(survived[1]["n"], 3, "the new record was joined onto the stump");
+
+        // And an intact file gets no stray blank line.
+        append(&path, &json!({ "n": 4 })).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\n\n"), "{text:?}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    const DAY: i64 = 24 * 60 * 60;
+
+    /// Writes `entries` one per line and prunes as of `now`.
+    fn pruned(entries: &[Value], now: i64) -> Vec<Value> {
+        let path = temp();
+        let text: String = entries.iter().map(|e| format!("{e}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        prune_at(&path, now);
+        let left = read(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        left
+    }
+
+    /// The spend window is computed from the ledger, so pruning into it would
+    /// quietly raise the budget. Half the lines are *not* dropped when the other
+    /// half is too young to lose.
+    #[test]
+    fn pruning_never_drops_an_entry_inside_the_spend_window() {
+        let now = 10 * DAY;
+        let mut entries: Vec<Value> = (0..4)
+            .map(|n| json!({ "at": now - 5 * DAY + n, "n": n, "estimated_usd": 1.0 }))
+            .collect();
+        entries.extend((4..10).map(|n| json!({ "at": now - 60 + n, "n": n, "estimated_usd": 1.0 })));
+
+        let left = pruned(&entries, now);
+
+        // Ten lines: up to five may go, but only the four old ones are old.
+        let kept: Vec<i64> = left.iter().map(|e| e["n"].as_i64().unwrap()).collect();
+        assert_eq!(kept, vec![4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn pruning_never_drops_a_video_still_waiting_to_be_collected() {
+        let now = 10 * DAY;
+        let old = now - 5 * DAY;
+        let entries = vec![
+            json!({ "at": old, "kind": VIDEO, "status": STARTED, "operation": "operations/waiting" }),
+            json!({ "at": old + 1, "kind": VIDEO, "status": STARTED, "operation": "operations/collected" }),
+            json!({ "at": old + 2, "kind": VIDEO, "status": DONE, "operation": "operations/collected" }),
+            json!({ "at": old + 3, "kind": VIDEO, "status": STARTED, "operation": "operations/failed" }),
+            json!({ "at": old + 4, "kind": VIDEO, "status": FAILED, "operation": "operations/failed" }),
+            json!({ "at": old + 5, "n": 5 }),
+            json!({ "at": old + 6, "n": 6 }),
+            json!({ "at": old + 7, "n": 7 }),
+        ];
+
+        let left = pruned(&entries, now);
+
+        assert!(
+            left.iter().any(|e| e["operation"] == "operations/waiting"),
+            "an outstanding render was pruned: {left:?}"
+        );
+        // Oldest first, and only what is allowed: of the four that may go (half
+        // of eight) the waiting start is spared and the next four go instead.
+        assert!(!left.iter().any(|e| e["operation"] == "operations/collected"));
+        assert_eq!(left.len(), 4, "{left:?}");
+        assert_eq!(left[0]["operation"], "operations/waiting");
+    }
+
+    /// A retiring record outlives nothing it should not: if the start line is
+    /// kept, the `done` that retired it is kept with it, or the operation would
+    /// reappear in `lucida ops` as waiting.
+    #[test]
+    fn a_start_that_survives_keeps_the_record_that_retired_it() {
+        let now = 10 * DAY;
+        let old = now - 5 * DAY;
+        let entries = vec![
+            json!({ "at": old, "n": 0 }),
+            json!({ "at": old + 1, "kind": VIDEO, "status": DONE, "operation": "operations/a" }),
+            // Out of order, as two processes' clocks can leave a file.
+            json!({ "at": old + 9, "kind": VIDEO, "status": STARTED, "operation": "operations/a" }),
+            json!({ "at": now, "n": 3 }),
+        ];
+
+        let left = pruned(&entries, now);
+
+        let open = outstanding_from(left);
+        assert!(open.is_empty(), "a retired operation came back: {open:?}");
+    }
+
+    /// If nothing may be dropped the file is left alone — over the cap, as the
+    /// module note says, rather than rewritten smaller at the cost of history
+    /// that is still needed.
+    #[test]
+    fn pruning_leaves_the_file_alone_when_everything_is_needed() {
+        let now = 10 * DAY;
+        let entries: Vec<Value> = (0..6).map(|n| json!({ "at": now - n, "n": n })).collect();
+        assert_eq!(pruned(&entries, now).len(), 6);
+    }
+
+    #[cfg(unix)]
+    mod permissions {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        /// The ledger holds prompts, and umask would make it group-readable.
+        #[test]
+        fn a_new_ledger_is_private() {
+            let path = temp();
+            append(&path, &json!({ "n": 1 })).unwrap();
+            assert_eq!(mode(&path), 0o600);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+
+        /// Permissions the user chose are theirs: appending must not tighten
+        /// (or loosen) a file it did not create.
+        #[test]
+        fn an_existing_ledger_keeps_the_permissions_it_has() {
+            let path = temp();
+            std::fs::write(&path, "{\"n\":0}\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            append(&path, &json!({ "n": 1 })).unwrap();
+
+            assert_eq!(mode(&path), 0o644);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+
+        /// The rewrite replaces the file, so it has to bring the privacy with it.
+        #[test]
+        fn a_pruned_ledger_is_private_again() {
+            let path = temp();
+            let lines: String = (0..10).map(|n| format!("{{\"at\":1,\"n\":{n}}}\n")).collect();
+            std::fs::write(&path, lines).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            prune_at(&path, 10 * DAY);
+
+            assert_eq!(read(&path).len(), 5);
+            assert_eq!(mode(&path), 0o600);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
     }
 
     /// A ledger write must never be the thing that fails a render that has

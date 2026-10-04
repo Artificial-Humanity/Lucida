@@ -608,6 +608,48 @@ fn ops_reports_an_empty_ledger() {
 }
 
 #[test]
+fn ops_names_the_provider_that_started_each_render() {
+    let sandbox = Sandbox::new("ops-provider");
+    sandbox.write_config("");
+    let at = 1_700_000_000;
+    let started = |provider: Option<&str>, operation: &str| {
+        let mut entry = serde_json::json!({
+            "at": at, "kind": "video", "status": "started",
+            "model": "m", "prompt": "p", "operation": operation,
+        });
+        if let Some(provider) = provider {
+            entry["provider"] = provider.into();
+        }
+        format!("{entry}\n")
+    };
+    let runway = "4f1a2b3c-0000-4000-8000-000000000000";
+    let legacy = "5f1a2b3c-0000-4000-8000-000000000000";
+    let failed = "6f1a2b3c-0000-4000-8000-000000000000";
+    let ledger = [
+        started(Some("runway"), runway),
+        // Before the provider was recorded: no field, so the bare command.
+        started(None, legacy),
+        // Retired by a terminal failure: must not be listed at all.
+        started(Some("runway"), failed),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "at": at + 1, "kind": "video", "status": "failed",
+                "provider": "runway", "operation": failed, "error": "moderation",
+            })
+        ),
+    ]
+    .concat();
+    fs::write(sandbox.config_file().with_file_name("renders.jsonl"), ledger).unwrap();
+
+    let ops = run(lucida(&sandbox).arg("ops"));
+    ops.says(&format!("lucida check --provider runway {runway}"))
+        .says(&format!("lucida check {legacy}"))
+        .never_says(&format!("--provider runway {legacy}"))
+        .never_says(failed);
+}
+
+#[test]
 fn config_names_the_ledger_and_it_can_be_switched_off() {
     let sandbox = Sandbox::new("ledger-visible");
 

@@ -48,7 +48,7 @@ use crate::provider::{
     Aspect, AspectSupport, Capabilities, DurationSupport, GeneratedImage, ImageProvider,
     ImageRequest, MaskSupport, Provenance, VideoCapabilities, VideoProvider,
 };
-use crate::video::{VideoRequest, VideoStatus};
+use crate::video::{VideoRequest, VideoStatus, terminal};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -581,7 +581,8 @@ impl Client {
                     .as_str()
                     .or_else(|| payload["failureCode"].as_str())
                     .unwrap_or("no reason given");
-                bail!("the render failed: {reason}");
+                // Runway's own terminal states, not an inference from silence.
+                Err(terminal(format!("the render failed: {reason}")))
             }
             // PENDING, RUNNING, THROTTLED — all still in flight.
             _ => Ok(Task::Pending),
@@ -1103,5 +1104,32 @@ mod tests {
     fn a_rejected_key_says_so() {
         let explained = explain_error(401, r#"{"error":"Unauthorized"}"#);
         assert!(explained.contains("RUNWAY_API_KEY"), "{explained}");
+    }
+
+    /// The ledger retires an operation only on a failure the provider reported
+    /// as final, and recognises it by this type. FAILED and CANCELLED are the
+    /// provider saying so; a rejected poll says nothing about the render.
+    #[test]
+    fn a_failed_task_is_a_terminal_failure_and_a_rejected_poll_is_not() {
+        let id = "4f1a2b3c-0000-4000-8000-000000000000";
+        for state in ["FAILED", "CANCELLED"] {
+            let server = serve(vec![Reply::json(&format!(
+                r#"{{"status":"{state}","failure":"content moderation"}}"#
+            ))]);
+            let error = wired(&server).poll(id).err().expect("a failed task must be an error");
+            let failure = error
+                .downcast_ref::<crate::video::TerminalFailure>()
+                .unwrap_or_else(|| panic!("`{state}` was not marked terminal: {error:#}"));
+            assert!(failure.0.contains("content moderation"), "{}", failure.0);
+            server.finish();
+        }
+
+        let server = serve(vec![Reply::status(401, r#"{"error":"Unauthorized"}"#)]);
+        let error = wired(&server).poll(id).err().expect("a rejected poll must be an error");
+        assert!(
+            error.downcast_ref::<crate::video::TerminalFailure>().is_none(),
+            "a rejected poll retired the operation: {error:#}"
+        );
+        server.finish();
     }
 }

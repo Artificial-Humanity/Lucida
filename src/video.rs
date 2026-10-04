@@ -89,6 +89,31 @@ pub enum VideoStatus {
     Done(Vec<u8>),
 }
 
+/// A failure the provider itself reported as final: the render was rejected,
+/// filtered or has expired, and asking again will not change that.
+///
+/// A marker on an ordinary error rather than a new `VideoStatus`, so every
+/// existing caller still sees a failure as an `Err` with the same message, and
+/// only the ledger looks for the type. It exists because the alternatives look
+/// alike from outside: a transport error, a 5xx or a deadline says nothing
+/// about the render, which may well still finish, while this says it never
+/// will — and only the second may retire an operation from `lucida ops`.
+#[derive(Debug)]
+pub struct TerminalFailure(pub String);
+
+impl std::fmt::Display for TerminalFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TerminalFailure {}
+
+/// A [`TerminalFailure`] as an `anyhow` error, for `return Err(terminal(..))`.
+pub fn terminal(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(TerminalFailure(message.into()))
+}
+
 impl Client {
     /// Kicks off a render and returns the operation name to poll.
     ///
@@ -118,7 +143,8 @@ impl Client {
 
         if let Some(error) = payload.get("error") {
             let message = error["message"].as_str().unwrap_or("unknown error");
-            bail!("the render failed: {message}");
+            // The operation finished, with an error: it is over.
+            return Err(terminal(format!("the render failed: {message}")));
         }
 
         if payload["done"].as_bool().unwrap_or(false) {
@@ -225,7 +251,11 @@ impl Client {
         let uri = find_key(done, "uri")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                anyhow!("completed operation contained neither a video URI nor inline bytes: {done}")
+                // Done, and nothing to collect — a filtered render looks like
+                // this. Polling again returns the same payload.
+                terminal(format!(
+                    "completed operation contained neither a video URI nor inline bytes: {done}"
+                ))
             })?;
 
         // The download URL is itself authenticated.
@@ -237,7 +267,13 @@ impl Client {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().unwrap_or_default();
-            bail!("{}", explain_error(status.as_u16(), &text));
+            let explained = explain_error(status.as_u16(), &text);
+            // The file itself is gone — Veo's expire after two days. Any other
+            // status (auth, 5xx) says nothing about whether it still exists.
+            if matches!(status.as_u16(), 404 | 410) {
+                return Err(terminal(explained));
+            }
+            bail!("{explained}");
         }
 
         Ok(response.bytes().context("reading video bytes")?.to_vec())
@@ -360,5 +396,64 @@ mod tests {
         assert_eq!(requests[0].path, "/operations/xyz");
         assert_eq!(requests[1].path, "/files/v1:download?alt=media");
         assert_eq!(requests[1].header("x-goog-api-key"), Some("test-key"));
+    }
+
+    fn is_terminal(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<crate::video::TerminalFailure>().is_some()
+    }
+
+    /// An operation that finished *with an error* is over; a poll the API
+    /// refused is not, and the ledger must be able to tell them apart.
+    #[test]
+    fn an_operation_that_finished_in_error_is_terminal_and_a_refused_poll_is_not() {
+        let server = serve(vec![Reply::json(
+            r#"{"done":true,"error":{"code":3,"message":"filtered by safety"}}"#,
+        )]);
+        let error = Client::recorded(server.url())
+            .poll_video("operations/xyz")
+            .err()
+            .expect("must be an error");
+        assert!(is_terminal(&error), "{error:#}");
+        assert!(error.to_string().contains("filtered by safety"), "{error:#}");
+        server.finish();
+
+        let server = serve(vec![Reply::status(403, r#"{"error":{"message":"denied"}}"#)]);
+        let error = Client::recorded(server.url())
+            .poll_video("operations/xyz")
+            .err()
+            .expect("must be an error");
+        assert!(!is_terminal(&error), "a refused poll retired the operation: {error:#}");
+        server.finish();
+    }
+
+    /// Done with nothing to download, or a download that is gone, will not get
+    /// better by asking again. A download that merely failed (403, 5xx) might.
+    #[test]
+    fn a_finished_operation_whose_file_is_gone_is_terminal() {
+        let server = serve(vec![Reply::json(r#"{"done":true,"response":{}}"#)]);
+        let error = Client::recorded(server.url())
+            .poll_video("operations/xyz")
+            .err()
+            .expect("must be an error");
+        assert!(is_terminal(&error), "{error:#}");
+        server.finish();
+
+        let done = r#"{"done":true,"response":{"generateVideoResponse":{
+            "generatedSamples":[{"video":{"uri":"{{server}}/files/v1:download?alt=media"}}]}}}"#;
+        let server = serve(vec![Reply::json(done), Reply::status(404, r#"{"error":{"message":"gone"}}"#)]);
+        let error = Client::recorded(server.url())
+            .poll_video("operations/xyz")
+            .err()
+            .expect("must be an error");
+        assert!(is_terminal(&error), "a 404 on the file is gone for good: {error:#}");
+        server.finish();
+
+        let server = serve(vec![Reply::json(done), Reply::status(403, r#"{"error":{"message":"denied"}}"#)]);
+        let error = Client::recorded(server.url())
+            .poll_video("operations/xyz")
+            .err()
+            .expect("must be an error");
+        assert!(!is_terminal(&error), "a 403 says nothing about the file: {error:#}");
+        server.finish();
     }
 }

@@ -499,7 +499,13 @@ fn run(cli: Cli) -> Result<i32> {
                 Some(name) => provider::VideoBackend::parse(name)?,
                 None => provider::infer_video_backend_from_operation(&operation),
             };
-            match open_video(backend)?.poll(&operation)? {
+            let polled = open_video(backend)?.poll(&operation);
+            if let Err(error) = &polled {
+                // A render the provider says is over leaves `lucida ops`; any
+                // other failure leaves it there to be asked about again.
+                ledger::note_failure(backend.name(), &operation, error);
+            }
+            match polled? {
                 video::VideoStatus::Pending => {
                     // Its own exit code. This used to be 0 with nothing on
                     // stdout, which a polling script cannot tell apart from a
@@ -525,7 +531,7 @@ fn run(cli: Cli) -> Result<i32> {
                     // Retires the operation from `lucida ops`, wherever it was
                     // started from — the outstanding list is derived from the
                     // log rather than stored, so nothing has to be told.
-                    ledger::video_done(&operation, &written.to_string_lossy());
+                    ledger::video_done(backend.name(), &operation, &written.to_string_lossy());
                     if out::json() {
                         out::emit(serde_json::json!({
                             "ok": true,
@@ -653,6 +659,7 @@ fn run(cli: Cli) -> Result<i32> {
             // deadline message ever mentioned it.
             let operation = client.start(&request)?;
             ledger::video_started(
+                backend.name(),
                 &resolved,
                 &request.prompt,
                 &operation,
@@ -682,14 +689,16 @@ fn run(cli: Cli) -> Result<i32> {
                 return Ok(out::OK);
             }
 
-            let bytes = await_video(client.as_ref(), &operation)?;
+            let bytes = await_video(client.as_ref(), &operation).inspect_err(|error| {
+                ledger::note_failure(backend.name(), &operation, error);
+            })?;
             let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
             eprintln!(
                 "Wrote {} ({:.1} MB)",
                 written.display(),
                 bytes.len() as f64 / 1_048_576.0
             );
-            ledger::video_done(&operation, &written.to_string_lossy());
+            ledger::video_done(backend.name(), &operation, &written.to_string_lossy());
             if out::json() {
                 out::emit(serde_json::json!({
                     "ok": true,
@@ -748,13 +757,24 @@ fn show_operations() -> Result<()> {
     for entry in &open {
         let operation = entry["operation"].as_str().unwrap_or("?");
         println!(
-            "  {}  {}\n    {}\n    lucida check {operation}\n",
+            "  {}  {}\n    {}\n    {}\n",
             clock::stamp(entry["at"].as_i64().unwrap_or(0)),
             entry["model"].as_str().unwrap_or("?"),
             truncate(entry["prompt"].as_str().unwrap_or(""), 68),
+            check_command(entry, operation),
         );
     }
     Ok(())
+}
+
+/// The command that collects a render, naming the provider that started it when
+/// the ledger knows. An entry from before the ledger recorded one gets the bare
+/// form, which infers the provider from the id.
+fn check_command(entry: &serde_json::Value, operation: &str) -> String {
+    match ledger::recorded_provider(entry) {
+        Some(provider) => format!("lucida check --provider {provider} {operation}"),
+        None => format!("lucida check {operation}"),
+    }
 }
 
 fn show_history(count: usize) -> Result<()> {

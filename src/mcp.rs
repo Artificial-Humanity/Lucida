@@ -821,9 +821,17 @@ fn list_operations() -> Result<String> {
     let mut out = String::from("Video renders started and not yet collected:\n\n");
     for entry in &open {
         out.push_str(&format!(
-            "- operation: {}\n  started: {}\n  model: {}\n  prompt: {}\n",
+            "- operation: {}\n  started: {}\n",
             entry["operation"].as_str().unwrap_or("?"),
             crate::clock::stamp(entry["at"].as_i64().unwrap_or(0)),
+        ));
+        // Absent for an entry from before the ledger recorded one, rather than
+        // a guess the caller would pass straight back to check_video.
+        if let Some(provider) = crate::ledger::recorded_provider(entry) {
+            out.push_str(&format!("  provider: {provider}\n"));
+        }
+        out.push_str(&format!(
+            "  model: {}\n  prompt: {}\n",
             entry["model"].as_str().unwrap_or("?"),
             entry["prompt"].as_str().unwrap_or(""),
         ));
@@ -1256,6 +1264,7 @@ fn start_video(args: &Value) -> Result<String> {
     // finishing, and the id would then exist only in a transcript nobody reads
     // again. `lucida ops` reads it back.
     crate::ledger::video_started(
+        backend.name(),
         &resolved,
         &request.prompt,
         &operation,
@@ -1284,7 +1293,12 @@ fn check_video(args: &Value) -> Result<String> {
         crate::provider::VideoBackend::Kling => Box::new(crate::kling::Client::from_env()?),
     };
 
-    match client.poll(operation)? {
+    let polled = client.poll(operation);
+    if let Err(error) = &polled {
+        // Retired from list_operations only when the provider says it is over.
+        crate::ledger::note_failure(backend.name(), operation, error);
+    }
+    match polled? {
         VideoStatus::Pending => Ok(
             "Still rendering. Wait roughly 30 seconds before checking again — \
              polling faster will not make it finish sooner."
@@ -1294,7 +1308,7 @@ fn check_video(args: &Value) -> Result<String> {
             let requested = std::path::Path::new(output_path);
             let destination = crate::correct_extension(requested, "video/mp4");
             let written = crate::write_image(&destination, &bytes)?;
-            crate::ledger::video_done(operation, &written.to_string_lossy());
+            crate::ledger::video_done(backend.name(), operation, &written.to_string_lossy());
             Ok(format!(
                 "Render complete. Wrote {} ({:.1} MB).",
                 written.display(),

@@ -653,7 +653,9 @@ pub fn infer_video_backend(model: &str) -> VideoBackend {
 /// unambiguous command rather than relying on this at all.
 ///
 /// A third provider using UUIDs would collide, and the fix then is the ledger
-/// rather than a cleverer guess.
+/// rather than a cleverer guess. (Entries recorded before the ledger stored the
+/// real provider all say `google`; `ledger::recorded_provider` discounts those
+/// when this function disagrees.)
 pub fn infer_video_backend_from_operation(operation: &str) -> VideoBackend {
     if operation.starts_with("operations/") || operation.starts_with("models/") {
         VideoBackend::Google
