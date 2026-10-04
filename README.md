@@ -268,7 +268,7 @@ The `--json` flag emits a single JSON response object to stdout. Exit codes indi
 | `0` | Success | Operation completed successfully |
 | `1` | Error | Execution failure |
 | `2` | Refused | Pre-flight refusal (unsupported capability or budget limit exceeded) |
-| `3` | Pending | Asynchronous task in progress |
+| `3` | Pending | Asynchronous task in progress: `lucida check`, or `lucida video` when its 15-minute wait runs out with the render still going (already billed — collect it with `lucida check`, do not re-run) |
 
 ### Budget and ledger
 

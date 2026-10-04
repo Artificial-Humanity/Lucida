@@ -496,6 +496,16 @@ fn a_seeded_batch_is_refused() {
     .says("same picture");
 }
 
+#[test]
+fn a_count_of_zero_is_refused_before_anything_runs() {
+    // `--count 0` used to succeed, rendering nothing and exiting 0 — which a
+    // script reads as a batch that worked.
+    let sandbox = Sandbox::new("count-zero");
+    run(lucida(&sandbox).args(["generate", "x", "--provider", "comfyui", "--count", "0"]))
+        .exits(2)
+        .says("--count");
+}
+
 // --- a provider that is not there -------------------------------------------
 
 #[test]

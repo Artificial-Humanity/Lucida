@@ -53,6 +53,35 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// The files a batch had already written, and paid for, when it failed.
+///
+/// Attached with `.context(...)` so the error keeps its kind — a refusal stays
+/// a refusal, and [`code_for`] still sees through it — and recognised by
+/// [`emit_error`], which lifts the paths into their own field. Without it a
+/// `--count 5` that failed at image 4 reported the error alone, and three
+/// billed files reached nothing a caller reads.
+#[derive(Debug)]
+pub struct Written(pub Vec<String>);
+
+impl std::fmt::Display for Written {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} image(s) were written and billed before this failed:",
+            self.0.len()
+        )?;
+        for path in &self.0 {
+            write!(f, "\n  {path}")?;
+        }
+        write!(f, "\nThe failure")
+    }
+}
+
+/// The paths a failed batch had already written, if this error carries any.
+pub fn written_before(error: &anyhow::Error) -> Option<&[String]> {
+    error.downcast_ref::<Written>().map(|w| w.0.as_slice())
+}
+
 /// The exit code an error deserves.
 pub fn code_for(error: &anyhow::Error) -> i32 {
     if error.downcast_ref::<Refused>().is_some() {
@@ -87,14 +116,24 @@ pub fn emit(value: Value) {
 
 /// The failure document, so a `--json` caller parses one shape either way.
 pub fn emit_error(error: &anyhow::Error, code: i32) {
-    emit(json!({
+    emit(error_document(error, code));
+}
+
+fn error_document(error: &anyhow::Error, code: i32) -> Value {
+    let mut document = json!({
         "ok": false,
         "error": format!("{error:#}"),
         // Named as well as numbered, because a wrapper reading this should not
         // have to remember what 2 means to know not to retry.
         "refused": code == REFUSED,
         "exit_code": code,
-    }));
+    });
+    // Present only when something was written, so the common failure keeps its
+    // old shape. A list rather than prose because it is the part a caller acts on.
+    if let Some(paths) = written_before(error) {
+        document["written"] = json!(paths);
+    }
+    document
 }
 
 #[cfg(test)]
@@ -125,6 +164,25 @@ mod tests {
             format!("{refused:#}").contains("use comfyui"),
             "the way forward was lost: {refused:#}"
         );
+    }
+
+    /// A batch that failed partway must say what it already wrote, in the
+    /// document and in the sentence — and must still be the kind of error it was.
+    #[test]
+    fn a_failed_batch_reports_what_it_already_wrote() {
+        let written = vec!["a-1.png".to_string(), "a-2.png".to_string()];
+        let refused = anyhow::Error::new(Refused("over budget".into()))
+            .context(Written(written.clone()));
+
+        assert_eq!(code_for(&refused), REFUSED, "the paths hid the kind");
+        let document = error_document(&refused, code_for(&refused));
+        assert_eq!(document["written"], json!(["a-1.png", "a-2.png"]));
+        let prose = document["error"].as_str().unwrap();
+        assert!(prose.contains("a-1.png") && prose.contains("a-2.png"), "{prose}");
+        assert!(prose.contains("over budget"), "the cause was lost: {prose}");
+
+        let plain = error_document(&anyhow::anyhow!("boom"), ERROR);
+        assert!(plain.get("written").is_none(), "an ordinary failure grew a field");
     }
 
     /// The four outcomes have to be four different numbers, which is the entire
