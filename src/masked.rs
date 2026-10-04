@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 /// like) are discarded whole rather than typed into the value.
 #[cfg(unix)]
 pub fn read_masked() -> Result<String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
 
     let stdin = std::io::stdin();
@@ -78,7 +78,15 @@ pub fn read_masked() -> Result<String> {
     let mut stderr = std::io::stderr();
 
     loop {
-        if stdin.lock().read(&mut byte).context("reading the value")? == 0 {
+        // A real escape sequence arrives in one burst, so if the next byte of a
+        // pending one has not turned up within a moment, the Esc was a key
+        // press of its own. Abandon the sequence rather than swallowing
+        // whatever the user types next.
+        if input.escape_pending() && !byte_ready(fd, ESCAPE_TIMEOUT_MS).context("reading the value")? {
+            input.abandon_escape();
+            continue;
+        }
+        if read_byte(fd, &mut byte).context("reading the value")? == 0 {
             break; // EOF
         }
         match input.feed(byte[0]) {
@@ -106,6 +114,51 @@ pub fn read_masked() -> Result<String> {
 
     let _ = writeln!(stderr);
     String::from_utf8(input.value).context("the value was not valid UTF-8")
+}
+
+/// How long to wait for the rest of an escape sequence before deciding the Esc
+/// was typed on its own. Terminal libraries use the same order of magnitude:
+/// long enough for a slow link to deliver a sequence's bytes, short enough that
+/// nobody notices the wait.
+#[cfg(unix)]
+const ESCAPE_TIMEOUT_MS: libc::c_int = 50;
+
+/// Waits up to `timeout_ms` for `fd` to have a byte to read.
+///
+/// Reading goes through `read_byte` on the raw descriptor rather than
+/// `std::io::stdin()`: that is a `BufReader`, which swallows a whole burst on
+/// the first one-byte read, after which `poll` on the descriptor reports
+/// nothing pending while the rest of the sequence sits in the buffer.
+#[cfg(unix)]
+fn byte_ready(fd: std::os::fd::RawFd, timeout_ms: libc::c_int) -> std::io::Result<bool> {
+    let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    loop {
+        // SAFETY: `poll` is a valid, initialised `pollfd` and the count is 1.
+        let ready = unsafe { libc::poll(&mut poll, 1, timeout_ms) };
+        if ready >= 0 {
+            return Ok(ready > 0);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// Reads one byte straight from `fd`, returning 0 at end of input.
+#[cfg(unix)]
+fn read_byte(fd: std::os::fd::RawFd, byte: &mut [u8; 1]) -> std::io::Result<usize> {
+    loop {
+        // SAFETY: `byte` is a valid one-byte buffer and the length passed is 1.
+        let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
 }
 
 /// What one input byte did, so the caller can draw it without knowing the rules.
@@ -155,6 +208,19 @@ struct MaskedInput {
 
 #[cfg(unix)]
 impl MaskedInput {
+    /// Whether an escape sequence is part-way through, so the next byte is
+    /// expected to belong to it.
+    fn escape_pending(&self) -> bool {
+        self.escape != Escape::None
+    }
+
+    /// Gives up on a pending escape sequence because nothing followed the Esc
+    /// in time. Without this a lone Esc press would swallow the next key, and
+    /// a `[` after it would swallow digits until a letter closed the "sequence".
+    fn abandon_escape(&mut self) {
+        self.escape = Escape::None;
+    }
+
     fn feed(&mut self, byte: u8) -> Key {
         match self.escape {
             Escape::None => {}
@@ -348,8 +414,67 @@ mod tests {
         input.feed(0x1b);
         input.feed(b'[');
         assert_eq!(input.feed(0x03), Key::Interrupt);
-        // A malformed CSI ends at the first byte that cannot be part of it.
+        // A malformed CSI ends at the first byte that cannot be part of it, and
+        // that byte is then handled as ordinary input. Here it is DEL (0x7f),
+        // which is not valid inside a CSI, so it acts as a backspace and erases
+        // the `a`; `b` follows. Hence `b`, not `ab`.
         assert_eq!(typed(b"a\x1b[\x7fb"), b"b");
+    }
+
+    /// A second Esc restarts the sequence rather than being swallowed by the
+    /// first, so `ESC ESC [ A` is still one arrow key.
+    #[test]
+    fn a_repeated_escape_restarts_the_sequence() {
+        assert_eq!(typed(b"a\x1b\x1b[Ab"), b"ab");
+    }
+
+    /// A lone Esc (nothing follows within the timeout) must not corrupt what is
+    /// typed next: `read_masked` calls `abandon_escape` when the poll expires.
+    #[test]
+    fn a_lone_escape_is_abandoned_on_timeout() {
+        let mut input = MaskedInput::default();
+        input.feed(0x1b);
+        assert!(input.escape_pending());
+        input.abandon_escape();
+        assert!(!input.escape_pending());
+        for &b in b"abc" {
+            input.feed(b);
+        }
+        assert_eq!(input.value, b"abc");
+
+        // Esc then `[` and then silence: the digits typed afterwards are the
+        // user's, not the parameters of a sequence that never finished.
+        let mut input = MaskedInput::default();
+        input.feed(0x1b);
+        input.feed(b'[');
+        assert!(input.escape_pending());
+        input.abandon_escape();
+        for &b in b"12" {
+            input.feed(b);
+        }
+        assert_eq!(input.value, b"12");
+    }
+
+    /// The two descriptor helpers `read_masked` uses for the timeout, driven
+    /// over a pipe: nothing pending times out, a pending byte is seen and read.
+    #[test]
+    fn byte_ready_and_read_byte_follow_the_descriptor() {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` has room for the two descriptors `pipe` writes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (rd, wr) = (fds[0], fds[1]);
+        assert!(!byte_ready(rd, 10).unwrap(), "nothing written yet");
+        // SAFETY: `wr` is the open write end and the buffer is one byte.
+        assert_eq!(unsafe { libc::write(wr, b"x".as_ptr().cast(), 1) }, 1);
+        assert!(byte_ready(rd, 10).unwrap());
+        let mut byte = [0u8; 1];
+        assert_eq!(read_byte(rd, &mut byte).unwrap(), 1);
+        assert_eq!(byte, *b"x");
+        // SAFETY: closing the write end makes the read end report end of input.
+        unsafe { libc::close(wr) };
+        assert_eq!(read_byte(rd, &mut byte).unwrap(), 0);
+        // SAFETY: `rd` is still open and owned by this test.
+        unsafe { libc::close(rd) };
     }
 
     /// Backspace, Enter, Ctrl-D, Ctrl-C and ordinary typing keep their meaning.
