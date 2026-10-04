@@ -27,9 +27,10 @@
 #   1. A free endpoint — the model list or credit balance behind `lucida models`.
 #      Exercises the base URL, the credential header and the response parsing.
 #   2. A render request naming a model that does not exist. The provider must
-#      reject it, which proves the render endpoint is still where we think it is
-#      and still fails in the shape `explain_error` reads. A model that does not
-#      exist cannot be rendered, so this cannot bill.
+#      reject it, which proves the provider still fails in the shape
+#      `explain_error` reads (and, for openai and runway, which carry no model
+#      in the URL, that the endpoint is still where we think it is). A model
+#      that does not exist cannot be rendered, so this cannot bill.
 #
 # A SUCCESSFUL RENDER HERE IS A FAILURE. If a nonsense model id ever comes back
 # 200, either the provider stopped validating or Lucida sent something other than
@@ -43,8 +44,17 @@
 # own unknown-model rejection for a render probe. Anything else is a failure
 # that shows what came back. The first version of this script passed on "did not
 # match any failure I thought of", which made DNS failure, connection refused, a
-# timeout, a moved endpoint (404) and a 5xx all read as "rejected the unknown
-# model, as expected" — a canary that is green because nothing was looked at.
+# timeout and a 5xx all read as "rejected the unknown model, as expected" — a
+# canary that is green because nothing was looked at.
+#
+# WHAT THIS CANNOT SEE: a moved render endpoint. For google, bfl and stability
+# the model id is part of the URL, and Lucida maps ANY 404 to the unknown-model
+# text, filling in `{model}` from its own request — so a 404 from a base URL
+# that has moved reads exactly like a 404 for a model that does not exist, and
+# naming the model id in the expected text does not tell them apart. Only the
+# free list and credit endpoints, which are different URLs, would notice a
+# moved base URL. A render probe here proves the error shape still parses, not
+# that the render endpoint is still where we think it is.
 #
 # A provider whose key is absent is SKIPPED, not failed. This is meant to be
 # runnable on a laptop with two keys as well as on the machine that has them all.
@@ -82,12 +92,17 @@ printf 'binary: %s (%s)\n\n' "$BIN" "$("$BIN" --version 2>&1)"
 # having looked at nothing.
 settings=$("$BIN" config 2>/dev/null)
 config_status=$?
+# Set when the credentials could not be listed at all, so the closing message can
+# say the fault is in this binary or its config layout rather than in a provider.
+config_broken=0
 if [ "$config_status" -ne 0 ]; then
+  config_broken=1
   fail "config — \`lucida config\` exited $config_status, so no credential can be found and nothing can be probed"
   settings=""
 elif ! printf '%s' "$settings" | grep -qE '^ +[A-Z_]+ +(set|not set)'; then
   # The column layout is what `have_key` greps. If it changed, every provider
   # would read as keyless; tests/cli.rs pins the layout from the other side.
+  config_broken=1
   fail "config — its output no longer has the \`NAME  set|not set\` rows this script reads"
 fi
 
@@ -174,9 +189,10 @@ produced_output() { [ -n "$(ls -A "$1" 2>/dev/null)" ]; }
 #
 # The rejection text is what that provider's unknown-model failure says in
 # Lucida's wording (each `explain_error` in src/<provider>.rs), so a pass means
-# the provider answered *and said no for the reason we expect*. A 404 on a moved
-# endpoint says the same thing for the providers that put the model in the URL,
-# which is why those texts name the model id as well.
+# the provider answered *and said no for the reason we expect*. For the providers
+# that put the model in the URL (google, bfl, stability) that is weaker than it
+# sounds: Lucida turns any 404 into this text, so a moved endpoint passes too
+# (see WHAT THIS CANNOT SEE in the header).
 probe() {
   provider=$1
   model=$2
@@ -268,6 +284,17 @@ else
   skip "runway — no credential in this environment"
 fi
 
+# What a failed balance read looks like in the report: from the line that names
+# the failure on, as the free-endpoint loop above does, because the first lines
+# of the output are the `== Images ==` banner, which says nothing about why.
+# Falls back to the start of the output when no such line is found, so an
+# unrecognised failure still shows what came back.
+failure_excerpt() {
+  excerpt=$(printf '%s' "$1" | grep -A2 -E 'did not answer|NOT reachable|cannot be used right now' | head -c 200 | tr '\n' ' ')
+  [ -n "$excerpt" ] || excerpt=$(printf '%s' "$1" | head -c 200 | tr '\n' ' ')
+  printf '%s' "$excerpt"
+}
+
 # Runway's and Kling's balances are free, and `lucida models` reads them. For
 # Runway that exercises the base URL, the Bearer header and the mandatory
 # X-Runway-Version header, which is the one most likely to be retired under us.
@@ -275,7 +302,7 @@ if have_key runway; then
   out=$("$BIN" models --provider runway 2>&1)
   case "$out" in
     *"Remaining credits"*) pass "runway — reachable, version header still accepted" ;;
-    *) fail "runway — $(printf '%s' "$out" | head -2 | tr '\n' ' ')" ;;
+    *) fail "runway — $(failure_excerpt "$out")" ;;
   esac
 else
   skip "runway — no credential in this environment"
@@ -292,7 +319,7 @@ if have_key kling; then
     # with no pack there is nothing to tell the two apart.
     *"no resource pack on this account"*)
       skip "kling — key accepted, but the account has no resource pack to read" ;;
-    *) fail "kling — $(printf '%s' "$out" | head -2 | tr '\n' ' ')" ;;
+    *) fail "kling — $(failure_excerpt "$out")" ;;
   esac
 else
   skip "kling — no credential in this environment"
@@ -341,7 +368,16 @@ if [ "$failures" -eq 0 ]; then
   exit 0
 fi
 
-printf '%s drift finding(s). A provider changed under us — read the lines marked\n' "$failures"
-printf 'DRIFT above, then check the recorded-response tests that cover that lane:\n'
-printf 'they will still be passing, which is exactly the gap this script exists for.\n'
+printf '%s finding(s). Read the lines marked DRIFT above.\n' "$failures"
+if [ "$config_broken" -eq 1 ]; then
+  # The credentials could not be listed, which says something about this binary
+  # or its config layout, not about any provider — and every keyed provider was
+  # skipped as a consequence, so none of them was asked anything.
+  printf 'The first DRIFT line is `lucida config` itself failing, so no keyed provider\n'
+  printf 'was probed: check the binary and its config file before suspecting a provider.\n'
+else
+  printf 'A provider changed under us. Check the recorded-response tests that cover\n'
+  printf 'that lane: they will still be passing, which is exactly the gap this script\n'
+  printf 'exists for.\n'
+fi
 exit 1

@@ -10,9 +10,12 @@ name: canary
 #
 # This workflow exists for the other case: running the probes by hand against a
 # specific commit, from a machine that is not ai-lab-0. It reads whatever
-# provider secrets happen to be configured and skips the rest, so it is useful
-# with none of them set — the free-endpoint checks still confirm the binary
-# builds and the capability tables print.
+# provider secrets happen to be configured and skips the rest — but a dispatch
+# with NO provider secrets set fails, by design. Every keyed provider is then
+# skipped, ComfyUI is skipped too (nothing listens on the runner), and
+# `scripts/canary.sh` exits 1 with "NOTHING WAS PROBED": a probe that probed
+# nothing must not pass, because a green run would read as "no drift" when no
+# question was asked. Set at least one provider secret before dispatching.
 on:
   workflow_dispatch:
 

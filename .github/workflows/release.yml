@@ -37,6 +37,14 @@ on:
       # tag now stops in `verify`, because a tag like `signing-test.1` does not
       # name the version in Cargo.toml. A throwaway tag spelled like a version
       # would still get through.
+      #
+      # ⚠ The throwaway tag must name a commit that is already on `main`: the
+      # `verify` job refuses any tag whose commit is not (see "The tag's commit
+      # is on main" below), a draft dispatch included. A workflow
+      # change can still be signing-tested before it merges, because a dispatch
+      # takes the workflow YAML from the branch it is run from, not from the
+      # tag. Only an unmerged *source* change cannot be tested this way, since
+      # the build is of the tag's commit.
       draft:
         description: "Publish to a DRAFT release (signing-path test only)"
         type: boolean
@@ -105,7 +113,11 @@ jobs:
       #
       # A dispatch is checked the same way, on the commit its tag names. `^{commit}`
       # because an annotated tag is an object of its own, and the question is
-      # about the commit underneath it.
+      # about the commit underneath it. A `draft` signing-test dispatch is no
+      # exception, so its throwaway tag (`signing-test.1`) must be put on a commit
+      # already on main; only the workflow YAML comes from the branch the dispatch
+      # runs from, so a workflow change is still testable before it merges and an
+      # unmerged source change is not.
       - name: The tag's commit is on main
         env:
           TAG: ${{ github.event.inputs.tag }}
