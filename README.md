@@ -259,6 +259,8 @@ For other MCP clients, configure `lucida mcp` as a stdio server:
 | `check_video` | Polls render status and retrieves completed video |
 | `list_operations` | Lists tracked in-flight video operations |
 
+A call that names an argument its tool does not declare (`reference_image` for `reference_images`, say) is refused with a tool-level error that names the key and lists the accepted ones; nothing is run or billed. Every tool's `inputSchema` carries `"additionalProperties": false` to say so up front. Protocol-level failures use the standard JSON-RPC codes: `-32700` for a line that is not JSON (with `"id": null`), `-32601` for an unknown method, `-32602` for an unknown tool name, `-32600` for a request id reused while its call is still running.
+
 ### Scripting and exit codes
 
 The `--json` flag emits a single JSON response object to stdout. Exit codes indicate operation status:

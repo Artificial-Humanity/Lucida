@@ -213,7 +213,18 @@ where
         let request: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("skipping unparseable line: {e}");
+                // Dropping the line left the client waiting for an answer that
+                // was never coming, indistinguishable from a server that hung.
+                // JSON-RPC has a reply for exactly this, and because the
+                // request could not be read there is no id to echo: the spec
+                // says to send null.
+                eprintln!("unparseable line: {e}");
+                respond_error(
+                    &out,
+                    &Value::Null,
+                    PARSE_ERROR,
+                    &format!("the line is not valid JSON ({e}); nothing was run"),
+                );
                 continue;
             }
         };
@@ -261,7 +272,7 @@ where
                 respond_error(
                     &out,
                     &id,
-                    -32600,
+                    INVALID_REQUEST,
                     &format!(
                         "request id {id} belongs to a tools/call that has not finished yet. \
                          JSON-RPC ids must be unique among outstanding requests. This call \
@@ -332,14 +343,46 @@ fn respond<W: Write>(out: &Out<W>, id: &Value, result: Result<Value>) {
     match result {
         Ok(result) => write_reply(out, json!({ "jsonrpc": "2.0", "id": id, "result": result })),
         Err(e) => {
-            // -32601 is "method not found", which clients may probe for
-            // (resources/list, prompts/list); everything else is -32603.
-            let message = e.to_string();
-            let code = if message.starts_with("unknown method") { -32601 } else { -32603 };
-            respond_error(out, id, code, &message);
+            // The code comes from the error's type, never from its wording: the
+            // message used to be matched with `starts_with("unknown method")`,
+            // so rewording it would have quietly turned -32601 into -32603.
+            // Anything that did not say what it was is an internal error.
+            let code = e.downcast_ref::<RpcError>().map_or(INTERNAL_ERROR, |typed| typed.code);
+            respond_error(out, id, code, &e.to_string());
         }
     }
 }
+
+// The JSON-RPC 2.0 error codes this server uses.
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+/// Clients probe for methods this server lacks (resources/list, prompts/list),
+/// and this is the code that tells them to stop.
+const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
+
+/// An error that knows which JSON-RPC code it is. `respond` downcasts to this;
+/// an `anyhow::Error` of any other type is reported as -32603.
+#[derive(Debug)]
+struct RpcError {
+    code: i64,
+    message: String,
+}
+
+impl RpcError {
+    fn failure(code: i64, message: String) -> anyhow::Error {
+        anyhow::Error::new(Self { code, message })
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RpcError {}
 
 /// Writes one JSON-RPC error reply with a code chosen by the caller.
 fn respond_error<W: Write>(out: &Out<W>, id: &Value, code: i64, message: &str) {
@@ -366,19 +409,25 @@ fn dispatch(method: &str, params: &Value) -> Result<Value> {
             "serverInfo": { "name": "lucida", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({
-            "tools": [
-                image_schema(),
-                providers_schema(),
-                start_video_schema(),
-                check_video_schema(),
-                video_providers_schema(),
-                list_operations_schema(),
-            ]
-        })),
+        "tools/list" => Ok(json!({ "tools": tool_schemas() })),
         "tools/call" => call_tool(params),
-        other => anyhow::bail!("unknown method: {other}"),
+        other => Err(RpcError::failure(METHOD_NOT_FOUND, format!("unknown method: {other}"))),
     }
+}
+
+/// Every tool's schema, in the order `tools/list` advertises them.
+///
+/// The one place the schemas are gathered, because two things read them: the
+/// listing, and the refusal of an argument a tool does not declare.
+fn tool_schemas() -> Vec<Value> {
+    vec![
+        image_schema(),
+        providers_schema(),
+        start_video_schema(),
+        check_video_schema(),
+        video_providers_schema(),
+        list_operations_schema(),
+    ]
 }
 
 /// Describes every provider from its own declared capabilities.
@@ -595,7 +644,8 @@ fn image_schema() -> Value {
                     )
                 }
             },
-            "required": ["prompt", "output_path"]
+            "required": ["prompt", "output_path"],
+            "additionalProperties": false
         }
     })
 }
@@ -616,7 +666,7 @@ fn providers_schema() -> Value {
             "before generate_image when the choice of provider matters, or after ",
             "a parameter is rejected."
         ),
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
 
@@ -727,7 +777,8 @@ fn start_video_schema() -> Value {
                     )
                 }
             },
-            "required": ["prompt"]
+            "required": ["prompt"],
+            "additionalProperties": false
         }
     })
 }
@@ -763,7 +814,8 @@ fn check_video_schema() -> Value {
                 "provider": { "type": "string", "enum": video_provider_enum(), "description": "Which provider started it. Inferred from the id's shape when omitted." },
                 "output_path": { "type": "string", "description": "Where to write the finished video. An .mp4 extension is applied if missing." }
             },
-            "required": ["operation", "output_path"]
+            "required": ["operation", "output_path"],
+            "additionalProperties": false
         }
     })
 }
@@ -789,7 +841,7 @@ fn video_providers_schema() -> Value {
             "carries. Spends nothing. Call this before start_video when the choice ",
             "of provider or model matters, or after a parameter is rejected."
         ),
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
 
@@ -875,7 +927,7 @@ fn list_operations_schema() -> Value {
             "started earlier — by you, by a previous session, or from the shell — ",
             "and its id is no longer to hand. Spends nothing; reads a local file."
         ),
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
 
@@ -935,10 +987,19 @@ fn call_tool(params: &Value) -> Result<Value> {
     let args = &params["arguments"];
 
     if !TOOL_NAMES.contains(&name) {
-        anyhow::bail!(
-            "unknown tool: {name}. This server offers: {}",
-            TOOL_NAMES.join(", ")
-        );
+        // A call naming a tool that does not exist is invalid params for
+        // `tools/call` (the MCP spec's own example), not an internal fault.
+        return Err(RpcError::failure(
+            INVALID_PARAMS,
+            format!(
+                "unknown tool: {name}. This server offers: {}",
+                TOOL_NAMES.join(", ")
+            ),
+        ));
+    }
+
+    if let Err(refusal) = refuse_unknown_arguments(name, args) {
+        return wrap(Err(refusal));
     }
 
     match name {
@@ -952,6 +1013,53 @@ fn call_tool(params: &Value) -> Result<Value> {
         // the constant is for.
         other => anyhow::bail!("`{other}` is advertised but not implemented"),
     }
+}
+
+/// Refuses an argument the tool's own schema does not declare.
+///
+/// Reading arguments by name means a key nobody asked for is never read, so a
+/// misspelling is not an error anywhere downstream — it is just absent.
+/// `"reference_image": "photo.png"`, singular, rendered a fresh generation and
+/// reported success: the edit-that-becomes-a-generation failure `optional`
+/// exists to prevent, arriving by the other door. The accepted names are read
+/// from the schema `tools/list` serves rather than listed again here, so what a
+/// client was told it may send and what the server accepts cannot differ.
+fn refuse_unknown_arguments(tool: &str, args: &Value) -> Result<()> {
+    let Some(given) = args.as_object() else {
+        return Ok(());
+    };
+    let schema = tool_schemas()
+        .into_iter()
+        .find(|schema| schema["name"] == tool)
+        .ok_or_else(|| anyhow::anyhow!("`{tool}` is advertised without a schema"))?;
+    let accepted: Vec<&str> = schema["inputSchema"]["properties"]
+        .as_object()
+        .map(|properties| properties.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    let unknown: Vec<&str> = given
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !accepted.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+
+    let names = unknown.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", ");
+    let offered = if accepted.is_empty() {
+        format!("`{tool}` takes no arguments")
+    } else {
+        format!(
+            "`{tool}` accepts: {}",
+            accepted.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", ")
+        )
+    };
+    anyhow::bail!(
+        "{} not an argument of `{tool}`. {offered}. It was refused rather than \
+         ignored, so nothing has been run or billed — fix the name, or leave it out.",
+        if unknown.len() == 1 { format!("{names} is") } else { format!("{names} are") }
+    )
 }
 
 /// Errors are returned as isError content rather than as JSON-RPC errors, so the
@@ -1572,6 +1680,104 @@ mod tests {
     fn an_unknown_tool_is_refused() {
         let called = call_tool(&json!({ "name": "paint_a_fresco", "arguments": {} }));
         assert!(called.unwrap_err().to_string().contains("unknown tool"));
+    }
+
+    /// What `respond` writes for `result`, as the one reply it is.
+    fn replied(result: Result<Value>) -> Value {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        respond(&out, &json!(1), result);
+        let written = out.lock().unwrap().clone();
+        serde_json::from_slice(&written).unwrap()
+    }
+
+    /// The code is carried by the error's type. These messages are the exact
+    /// wording the old `starts_with` check keyed on, so a pass here is the
+    /// proof that wording no longer decides anything.
+    #[test]
+    fn the_code_comes_from_the_type_of_the_error_not_its_wording() {
+        let untyped = replied(Err(anyhow::anyhow!("unknown method: resources/list")));
+        assert_eq!(untyped["error"]["code"], INTERNAL_ERROR, "{untyped}");
+
+        let typed = replied(dispatch("resources/list", &Value::Null));
+        assert_eq!(typed["error"]["code"], METHOD_NOT_FOUND, "{typed}");
+
+        let reworded = replied(Err(RpcError::failure(INVALID_PARAMS, "something else".into())));
+        assert_eq!(reworded["error"]["code"], INVALID_PARAMS, "{reworded}");
+    }
+
+    #[test]
+    fn an_unknown_tool_is_invalid_params() {
+        let called = replied(call_tool(&json!({ "name": "paint_a_fresco", "arguments": {} })));
+        assert_eq!(called["error"]["code"], INVALID_PARAMS, "{called}");
+    }
+
+    /// A line that is not JSON is answered, with the id JSON-RPC prescribes when
+    /// the request could not be read.
+    #[test]
+    fn an_unparseable_line_is_answered_with_a_parse_error() {
+        let replies = drive("not json at all\n", |_| Ok(json!({})));
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["error"]["code"], PARSE_ERROR, "{}", replies[0]);
+        assert_eq!(replies[0]["id"], Value::Null);
+    }
+
+    /// The misspelling that turned an edit into a fresh generation.
+    ///
+    /// `workflow` with `model` is a refusal `generate_image` raises before it
+    /// touches a provider, so if the argument check ever stopped running this
+    /// test would fail on the wrong message — not render. A test of this guard
+    /// that passed a valid call would, on a machine holding credentials, spend
+    /// money the moment the guard broke; the first version of it did.
+    #[test]
+    fn a_misspelt_argument_is_refused_naming_it_and_what_is_accepted() {
+        let called = call_tool(&json!({
+            "name": "generate_image",
+            "arguments": {
+                "prompt": "a fox",
+                "output_path": "fox.png",
+                "workflow": "graph.json",
+                "model": "klein",
+                "reference_image": "photo.png"
+            }
+        }))
+        .unwrap();
+        assert_eq!(called["isError"], true, "{called}");
+        let text = called["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`reference_image`"), "{text}");
+        assert!(text.contains("`reference_images`"), "{text}");
+        assert!(text.contains("refused rather than ignored"), "{text}");
+    }
+
+    /// A tool that takes nothing says so, rather than listing nothing.
+    #[test]
+    fn an_argument_to_a_tool_that_takes_none_is_refused() {
+        let called = call_tool(&json!({ "name": "list_operations", "arguments": { "all": true } })).unwrap();
+        assert_eq!(called["isError"], true, "{called}");
+        let text = called["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("takes no arguments"), "{text}");
+    }
+
+    /// The accepted set is read from the schema, so every property a schema
+    /// declares is accepted by construction — and each schema says it is closed,
+    /// which is what a validating client enforces before the call is sent.
+    #[test]
+    fn every_declared_property_is_accepted_and_every_schema_is_closed() {
+        for schema in tool_schemas() {
+            let name = schema["name"].as_str().unwrap();
+            assert_eq!(schema["inputSchema"]["additionalProperties"], false, "{name}");
+
+            let declared = schema["inputSchema"]["properties"].as_object().unwrap();
+            let args: serde_json::Map<String, Value> =
+                declared.keys().map(|key| (key.clone(), Value::Null)).collect();
+            assert!(
+                refuse_unknown_arguments(name, &Value::Object(args)).is_ok(),
+                "{name} refused an argument its own schema declares"
+            );
+            assert!(
+                refuse_unknown_arguments(name, &json!({ "no_such_argument": 1 })).is_err(),
+                "{name} accepted an argument its schema does not declare"
+            );
+        }
     }
 
     /// The last silent drop: a workflow names its own checkpoints, so an

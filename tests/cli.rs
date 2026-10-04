@@ -942,6 +942,128 @@ fn a_notification_draws_no_response() {
     );
 }
 
+/// The replies of one `lucida mcp` session, one JSON document per line.
+///
+/// Waits for `expected` replies before hanging up. A `tools/call` runs on a
+/// worker, and closing stdin discards calls that have not started — so the
+/// plain `mcp` helper, which closes it at once, would race the very call under
+/// test. Bounded, so a missing reply fails the assertion rather than hanging.
+fn mcp_replies(sandbox: &Sandbox, script: &str, expected: usize) -> Vec<serde_json::Value> {
+    use std::io::BufRead;
+
+    let mut child = lucida(sandbox)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("could not start `lucida mcp`");
+
+    let mut pipe = child.stdin.take().unwrap();
+    pipe.write_all(script.as_bytes()).expect("could not write stdin");
+
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut replies = Vec::new();
+    while replies.len() < expected {
+        match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(line) => replies
+                .push(serde_json::from_str(&line).expect("the server wrote a line that is not JSON")),
+            Err(_) => break,
+        }
+    }
+
+    drop(pipe);
+    child.wait().expect("`lucida mcp` did not exit after its input closed");
+    replies
+}
+
+#[test]
+fn a_line_that_is_not_json_gets_a_parse_error_with_a_null_id() {
+    // The line used to be logged to stderr and dropped, so a client that sent
+    // one malformed request waited for an answer for as long as it cared to.
+    let sandbox = Sandbox::new("mcp-parse-error");
+    let replies = mcp_replies(&sandbox, "this is not json\n", 1);
+
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["error"]["code"], -32700, "{}", replies[0]);
+    assert!(replies[0]["id"].is_null(), "{}", replies[0]);
+    assert!(replies[0].get("id").is_some(), "the id must be present, as null: {}", replies[0]);
+}
+
+#[test]
+fn the_error_code_says_what_was_wrong() {
+    let sandbox = Sandbox::new("mcp-codes");
+    let replies = mcp_replies(
+        &sandbox,
+        concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"paint_a_fresco","arguments":{}}}"#, "\n",
+        ),
+        2,
+    );
+
+    let code_of = |id: u64| {
+        replies
+            .iter()
+            .find(|reply| reply["id"] == id)
+            .unwrap_or_else(|| panic!("no reply to {id}: {replies:?}"))["error"]["code"]
+            .clone()
+    };
+    assert_eq!(code_of(1), -32601, "an unknown method is method-not-found");
+    assert_eq!(code_of(2), -32602, "an unknown tool is invalid params");
+}
+
+#[test]
+fn a_misspelt_argument_is_refused_and_nothing_runs() {
+    // `reference_image`, singular, used to be ignored: the call rendered a
+    // fresh generation and reported success. The output path is absolute and
+    // inside the sandbox so the test can see whether anything was written.
+    let sandbox = Sandbox::new("mcp-unknown-argument");
+    let output = sandbox.dir.join("fox.png");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "generate_image", "arguments": {
+            "prompt": "a fox",
+            "output_path": output,
+            "reference_image": "photo.png"
+        } }
+    });
+    let replies = mcp_replies(&sandbox, &format!("{call}\n"), 1);
+
+    let result = &replies[0]["result"];
+    assert_eq!(result["isError"], true, "{}", replies[0]);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("`reference_image`"), "must name the key: {text}");
+    assert!(text.contains("`reference_images`"), "must list what is accepted: {text}");
+    assert!(text.contains("nothing has been run"), "{text}");
+    assert!(!output.exists(), "a refused call must not write an image");
+}
+
+#[test]
+fn every_tool_schema_closes_its_properties() {
+    let sandbox = Sandbox::new("mcp-closed-schemas");
+    let replies = mcp_replies(&sandbox, &format!("{TOOLS_LIST}\n"), 1);
+
+    let tools = replies[0]["result"]["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    for tool in tools {
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"], false,
+            "{} does not say it refuses unknown arguments",
+            tool["name"]
+        );
+    }
+}
+
 // --- the file this replaced -------------------------------------------------
 
 #[test]

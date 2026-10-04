@@ -30,6 +30,10 @@ ignored you. This is unusual and it is worth relying on:
 
 - Do not defensively strip parameters you are unsure about. Ask for what you
   want; if it cannot be honoured you get told, before anything is spent.
+- A misspelt argument name is refused the same way: over MCP, `reference_image`
+  for `reference_images` comes back as an error naming the key and listing what
+  the tool accepts. Nothing was rendered or billed, so correct the name and call
+  again.
 - Do not treat such an error as failure. It is a routing hint — the message
   names the provider to switch to.
 - Do not pre-filter by consulting a table you remember. Let the call fail and
