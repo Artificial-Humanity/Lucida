@@ -290,7 +290,7 @@ impl Client {
             body.insert("steps".into(), json!(steps));
         }
         if let Some(guidance) = req.guidance {
-            body.insert("guidance".into(), json!(guidance));
+            body.insert("guidance".into(), json!(crate::provider::guidance_as_written(guidance)));
         }
 
         // `Capabilities::check` has already refused a count over this model's
@@ -740,6 +740,23 @@ mod tests {
     /// reframes the picture to a square default. Measured the hard way: a 16:9
     /// source came back 1024x1024 with the composition destroyed, while the edit
     /// itself was perfectly good.
+    /// The guidance sent is the one written: 7.1, not the 7.099999904632568
+    /// an `f32` widens to through `json!`.
+    #[test]
+    fn guidance_is_sent_as_written() {
+        let client = Client {
+            key: "x".into(),
+            http: reqwest::blocking::Client::new(),
+            base: API_ROOT.into(),
+        };
+        let req = ImageRequest {
+            guidance: Some(7.1),
+            ..Default::default()
+        };
+        let body = client.body(&req, "flux-2-flex").unwrap();
+        assert_eq!(body["guidance"].to_string(), "7.1");
+    }
+
     #[test]
     fn an_edit_sends_no_dimensions_unless_asked() {
         let client = Client {

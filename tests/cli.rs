@@ -723,6 +723,20 @@ fn a_dry_run_reports_every_resolved_image_parameter() {
     }
 }
 
+/// `--guidance 7.1` is reported as 7.1, not as the f64 its f32 widens to.
+///
+/// `json!` on an `f32` widens it first, and the widened value is
+/// 7.099999904632568 — true to the bits and not what anyone typed, in the one
+/// document whose job is to show a caller what they asked for.
+#[test]
+fn a_dry_run_reports_guidance_as_it_was_written() {
+    let sandbox = Sandbox::new("dry-guidance");
+    let out = run(lucida(&sandbox).args([
+        "generate", "x", "--provider", "comfyui", "--guidance", "7.1", "--dry-run", "--json",
+    ]));
+    out.exits(0).says("\"guidance\":7.1").never_says("7.0999");
+}
+
 #[test]
 fn a_dry_run_reports_a_video_resolution_and_negative_prompt() {
     let sandbox = Sandbox::new("dry-video-fields");

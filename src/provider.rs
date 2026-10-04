@@ -22,6 +22,18 @@
 use anyhow::{Result, bail};
 use std::fmt;
 
+/// A guidance scale as the number a JSON document should carry: the shortest
+/// decimal that reads back as the same `f32`.
+///
+/// `json!` on an `f32` widens it to `f64` first, and `7.1f32` widened is
+/// 7.099999904632568 — exact to the bits and not what anyone typed. It reached
+/// the dry-run plan, which exists to show a caller what they asked for, and the
+/// bodies sent to BFL and ComfyUI, so the plan and the wire now both go
+/// through here. `f32`'s `Display` is already the shortest round-trip form.
+pub fn guidance_as_written(guidance: f32) -> f64 {
+    guidance.to_string().parse().unwrap_or(f64::from(guidance))
+}
+
 /// An image request, in terms every provider can be asked to interpret.
 ///
 /// Fields past `references` are the ones providers disagree about. Each is

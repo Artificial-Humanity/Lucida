@@ -517,7 +517,8 @@ impl Client {
         mask: Option<&str>,
     ) -> Value {
         let steps = req.steps.unwrap_or(DEFAULT_STEPS);
-        let guidance = req.guidance.unwrap_or(DEFAULT_GUIDANCE);
+        let guidance =
+            crate::provider::guidance_as_written(req.guidance.unwrap_or(DEFAULT_GUIDANCE));
         let negative = req.negative_prompt.clone().unwrap_or_default();
 
         let mut nodes = serde_json::Map::new();
@@ -1443,6 +1444,18 @@ mod tests {
             model: "klein".into(),
             ..Default::default()
         }
+    }
+
+    /// The cfg the graph carries is the one written: 7.1, not the
+    /// 7.099999904632568 an `f32` widens to through `json!`.
+    #[test]
+    fn guidance_reaches_the_graph_as_written() {
+        let req = ImageRequest {
+            guidance: Some(7.1),
+            ..request("a fox")
+        };
+        let graph = Client::graph_for(&req, &checkpoint(), 1, &[], None);
+        assert_eq!(graph["guider"]["inputs"]["cfg"].to_string(), "7.1");
     }
 
     #[test]

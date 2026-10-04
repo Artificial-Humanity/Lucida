@@ -1782,7 +1782,7 @@ fn execute(
             "mask": request.mask,
             "workflow": request.workflow,
             "steps": request.steps,
-            "guidance": request.guidance,
+            "guidance": request.guidance.map(provider::guidance_as_written),
             "estimated_usd": price.against_budget() * count as f64,
             "exit_code": out::OK,
         }))?;
