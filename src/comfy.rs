@@ -698,10 +698,19 @@ impl Client {
         let mut last_report = Instant::now();
 
         loop {
-            // Between polls, never between the submit and the first poll: the
-            // job is queued by now, and leaving without saying so would strand
-            // it on someone's GPU.
-            crate::cancel::check()?;
+            // Checked before the first poll as well as between the rest. The
+            // prompt is queued by now, so a cancellation stops the *waiting*,
+            // not the job — and the error carries the prompt id, the one handle
+            // left on what would otherwise sit on someone's GPU. It used to
+            // return `cancel::check`'s bare message, which named nothing.
+            crate::cancel::check().map_err(|e| {
+                anyhow!(
+                    "{e} Its ComfyUI prompt id is {prompt_id}; it may still be \
+                     queued or running — remove it from the queue at {} (or \
+                     interrupt it) to stop it.",
+                    self.base
+                )
+            })?;
 
             if started.elapsed() > deadline {
                 bail!(
@@ -1746,6 +1755,37 @@ mod tests {
     const QUEUED: &str = r#"{"prompt_id":"p1"}"#;
     const COMPLETED: &str = r#"{"p1":{"status":{"completed":true,"status_str":"success","messages":[]},
         "outputs":{"save":{"images":[{"filename":"lucida_00001_.png","subfolder":"","type":"output"}]}}}}"#;
+
+    /// A cancellation that lands after the prompt is queued names the prompt it
+    /// leaves behind. It used to return `cancel::check`'s bare message, which says
+    /// a render may complete but not which one, so a queued job was stranded on
+    /// someone's GPU with nothing to find it by.
+    #[test]
+    fn a_cancellation_after_the_submit_names_the_prompt_id() {
+        let server = serve(vec![
+            object_info("UNETLoader", "unet_name", "flux2-klein.safetensors"),
+            object_info("CLIPLoader", "clip_name", "flux2_te.safetensors"),
+            object_info("VAELoader", "vae_name", "flux2_vae.safetensors"),
+            Reply::json(QUEUED),
+        ]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "klein".into(),
+            seed: Some(9),
+            ..Default::default()
+        };
+        let token = crate::cancel::Token::new();
+        token.cancel();
+        let error = crate::cancel::with(token, || wired(&server).generate(&request))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(error.contains("p1"), "must name the prompt id: {error}");
+        assert!(error.contains(server.url()), "must say where its queue is: {error}");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4, "a cancelled wait must not poll");
+        assert_eq!(requests[3].path, "/prompt");
+    }
 
     /// The whole conversation, replayed: three `/object_info` lookups, submit,
     /// history, download. The claim only the wire can prove is that the
