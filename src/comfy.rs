@@ -825,6 +825,24 @@ pub const CAPABILITIES: Capabilities = Capabilities {
 
 impl ImageProvider for Client {
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
+        // A supplied workflow names its own inputs; Lucida has no idea which
+        // node would receive an upload, and composites nothing. Refused first,
+        // ahead of `check_mask`: that function's reasons ("composited back onto
+        // the source", "would select nothing") describe the built-in graph, and
+        // when this refusal came later a workflow edit was refused for a reason
+        // that was not its own. With this first, `check_mask` only ever sees the
+        // built-in path. A refusal (exit 2), since nothing has been sent.
+        if req.workflow.is_some() && (!req.references.is_empty() || req.mask.is_some()) {
+            return Err(anyhow::Error::new(crate::out::Refused(
+                "a workflow cannot be combined with reference images or a mask.\n\n\
+                 Lucida substitutes tokens into a workflow but cannot know which \
+                 node an uploaded image or mask belongs to. Put the image into the \
+                 workflow itself, or drop --workflow to use the built-in editing \
+                 graph."
+                    .to_string(),
+            )));
+        }
+
         // Refused before anything else: nothing here has touched the server, the
         // clock or the disk beyond reading the mask's header.
         if let Some(mask) = &req.mask {
@@ -867,18 +885,8 @@ impl ImageProvider for Client {
             None => " (the workflow sets its own seed)".to_string(),
         };
 
+        // A workflow with references was refused at the top.
         let uploaded = if workflow.is_some() {
-            // A supplied workflow names its own inputs; Lucida has no idea which
-            // node would receive an upload.
-            if !req.references.is_empty() {
-                bail!(
-                    "a workflow and reference images cannot be combined.\n\n\
-                     Lucida substitutes tokens into a workflow but cannot know \
-                     which node an uploaded image belongs to. Put the image into \
-                     the workflow itself, or drop --workflow to use the built-in \
-                     editing graph."
-                );
-            }
             Vec::new()
         } else {
             req.references
@@ -1258,6 +1266,9 @@ fn has_alpha(bytes: &[u8]) -> Option<bool> {
 ///   latent and its composite destination from the *source's* shape, so the
 ///   requested dimensions would reach only the scheduler while the output kept
 ///   the source's shape and the progress line claimed the requested one.
+///
+/// Both reasons are about the built-in graph, which is the only path that
+/// reaches here: `generate` refuses a workflow with a mask before calling this.
 fn check_mask(path: &str, req: &ImageRequest) -> Result<()> {
     let refuse = |message: String| Err(anyhow::Error::new(crate::out::Refused(message)));
 
@@ -2108,6 +2119,46 @@ mod tests {
             assert!(server.finish().is_empty(), "the server was asked something");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A workflow with a mask or references is refused for the workflow, before
+    /// the mask is looked at.
+    ///
+    /// The mask checks gave their reasons for the built-in graph — "composited
+    /// back onto the source", "would select nothing" — and fired on the workflow
+    /// path too, where Lucida composites nothing and reads no mask. The
+    /// workflow refusal was the true one and came later, as a plain error, so a
+    /// workflow edit with `--aspect` was refused for a reason that was not its
+    /// own. Exit 2 now, since nothing has been sent.
+    #[test]
+    fn a_workflow_with_a_mask_or_references_is_refused_for_the_workflow() {
+        let (dir, mask) = mask_file("alpha.png", &png(6, &[]));
+        let (wdir, workflow) = workflow_file(r#"{"a":{"class_type":"X","inputs":{}}}"#);
+        let workflow = workflow.to_string_lossy().into_owned();
+        for (references, mask, aspect) in [
+            (vec![mask.clone()], Some(mask.clone()), Some(crate::provider::Aspect::parse("16:9").unwrap())),
+            (vec![mask.clone()], Some(mask.clone()), None),
+            (vec![], Some(mask.clone()), None),
+            (vec![mask.clone()], None, None),
+        ] {
+            let server = serve(vec![]);
+            let request = ImageRequest {
+                prompt: "p".into(),
+                references,
+                mask,
+                aspect,
+                workflow: Some(workflow.clone()),
+                ..Default::default()
+            };
+            let error = wired(&server).generate(&request).unwrap_err();
+            assert!(refused(&error), "{error:#}");
+            let text = error.to_string();
+            assert!(text.contains("workflow"), "{text}");
+            assert!(!text.contains("composited"), "{text}");
+            assert!(server.finish().is_empty(), "the server was asked something");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(wdir);
     }
 
     #[test]

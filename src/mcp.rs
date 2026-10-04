@@ -627,7 +627,7 @@ fn image_schema() -> Value {
                 },
                 "workflow": {
                     "type": "string",
-                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped. Cannot be combined with `model` or `reference_images` — the workflow names its own checkpoints and inputs."
+                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped. Cannot be combined with `model`, `reference_images` or `mask` — the workflow names its own checkpoints and inputs."
                 },
                 "mask": {
                     "type": "string",
@@ -1310,13 +1310,15 @@ fn generate_image(args: &Value) -> Result<String> {
     // nowhere to go. Refused here rather than in the provider because by the
     // time the request reaches comfyui the default model has been filled in
     // and an explicit one is indistinguishable from it.
+    // A refusal, since nothing has been sent.
     if workflow.is_some() && requested_model.is_some() {
-        anyhow::bail!(
+        return Err(anyhow::Error::new(crate::out::Refused(
             "`workflow` and `model` cannot be combined: a supplied workflow \
              names its own checkpoints, so there is nowhere to put a model id. \
              Name the model inside the workflow file, or drop `workflow` to \
              use the built-in graph."
-        );
+                .to_string(),
+        )));
     }
 
     let (backend, default_source) = match opt_str(args, "provider")? {
@@ -2083,8 +2085,11 @@ mod tests {
             "workflow": "graph.json",
             "model": "klein"
         }))
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        // A refusal, as the README says: nothing was sent, and retrying the
+        // same call cannot succeed.
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED, "{error:#}");
+        let error = error.to_string();
         assert!(error.contains("workflow"), "must name the conflict: {error}");
         assert!(error.contains("model"));
     }

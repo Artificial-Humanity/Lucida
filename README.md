@@ -226,6 +226,8 @@ Tokens must exist in the workflow file for corresponding CLI flags to be applied
 
 A workflow with no `%seed%` renders with the seed its own graph names, so Lucida reports and records no seed for it.
 
+A workflow names its own checkpoints and inputs, so it cannot be combined with `--model`, reference images or `--mask`; each combination is refused (exit 2) before anything is sent.
+
 ## MCP server
 
 ### Setup

@@ -970,13 +970,15 @@ impl ImageOptions {
         // has nowhere to go — the same reasoning that refuses `--ref` with a
         // workflow. Caught here rather than in the provider because only the
         // entry point still knows the model was typed rather than defaulted.
+        // A refusal (exit 2): nothing has been sent.
         if self.workflow.is_some() && self.model.is_some() {
-            anyhow::bail!(
+            return Err(anyhow::Error::new(out::Refused(
                 "a workflow and an explicit `--model` cannot be combined.\n\n\
                  A supplied workflow names its own checkpoints, so there is \
                  nowhere to put a model id. Name the model inside the workflow \
                  file, or drop `--workflow` to use the built-in graph."
-            );
+                    .to_string(),
+            )));
         }
 
         // Nothing named: this is the only branch a preference may answer, and
@@ -2754,10 +2756,9 @@ mod tests {
             model: Some("klein".into()),
             ..Default::default()
         };
-        let error = opts
-            .into_request("x".into(), Vec::new())
-            .unwrap_err()
-            .to_string();
+        let error = opts.into_request("x".into(), Vec::new()).unwrap_err();
+        assert_eq!(out::code_for(&error), out::REFUSED, "{error:#}");
+        let error = error.to_string();
         assert!(error.contains("--workflow"), "must name the conflict: {error}");
         assert!(error.contains("--model"));
 
