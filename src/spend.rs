@@ -493,9 +493,9 @@ fn reserve(
                 "LUCIDA_BUDGET is set (${budget:.2}), but the render ledger has \
                  nowhere to live: none of HOME, USERPROFILE, XDG_CONFIG_HOME or \
                  LUCIDA_CONFIG is set (nor APPDATA, on Windows), so there is no \
-                 config directory to keep it in. The budget is counted from the ledger, so nothing spent would \
-                 ever be counted and the cap cannot hold — this {what} is refused \
-                 rather than sent unmetered.\n\n\
+                 config directory to keep it in. The budget is counted from the \
+                 ledger, so nothing spent would ever be counted and the cap cannot \
+                 hold — this {what} is refused rather than sent unmetered.\n\n\
                  Set HOME, or LUCIDA_CONFIG to a config file whose directory can \
                  hold the ledger, or unset LUCIDA_BUDGET to run without a cap. \
                  comfyui renders locally, costs nothing, and is never refused."

@@ -2258,10 +2258,6 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// A suffix that is not a format is part of the name, so two renders that
-    /// differ only in it must not land on one file.
-    ///
-    /// This was `with_extension`, which replaces whatever follows the last dot:
     /// `lucida models --provider bfl` annotated Kontext and Ultra exactly like
     /// the pixel models, though they take a ratio from a list and no `--size`.
     #[test]
@@ -2279,6 +2275,10 @@ mod tests {
         assert!(bfl_model_notes("flux-dev").contains(&"generate only".to_string()));
     }
 
+    /// A suffix that is not a format is part of the name, so two renders that
+    /// differ only in it must not land on one file.
+    ///
+    /// This was `with_extension`, which replaces whatever follows the last dot:
     /// `hero.v1` and `hero.v2` both became `hero.png`, and the second render
     /// overwrote the first without a word.
     #[test]

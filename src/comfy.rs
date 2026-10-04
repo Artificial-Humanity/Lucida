@@ -1185,8 +1185,9 @@ fn find_image(value: &Value) -> Option<&Value> {
 ///   gives an otherwise opaque grey, RGB or palette image transparent entries.
 ///   Chunks are walked up to the first `IDAT`, since `tRNS` must precede it.
 ///   `tRNS` on colour types 0 and 2 counting as alpha is a claim about
-///   ComfyUI's decoder, not about PNG: PyAV promotes it to an alpha channel, and
-///   an older Pillow-only `LoadImage` would not.
+///   ComfyUI's decoder, not about PNG: whether it becomes an alpha channel
+///   depends on how the installed ComfyUI's `LoadImage` loader treats `tRNS`,
+///   which this does not check.
 /// - **WebP**: a `VP8X` header with the alpha flag, or a `VP8L` header with the
 ///   alpha hint. A bare lossy `VP8 ` image has no alpha.
 /// - **JPEG**: never.

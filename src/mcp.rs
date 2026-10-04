@@ -890,7 +890,6 @@ fn start_video_schema() -> Value {
     })
 }
 
-/// One line describing an aspect-ratio capability, shared by both schemas.
 /// The ratios BFL's ratio-only models offer, from their capabilities.
 fn ratio_only_bfl_ratios() -> String {
     crate::bfl::ratio_only_models()
@@ -899,6 +898,7 @@ fn ratio_only_bfl_ratios() -> String {
         .unwrap_or_default()
 }
 
+/// One line describing an aspect-ratio capability, shared by both schemas.
 fn describe_aspect(support: AspectSupport) -> String {
     match support {
         AspectSupport::Named(ratios) => ratios.join(", "),

@@ -621,9 +621,6 @@ mod tests {
         assert_eq!(open[0]["operation"], "operations/b");
     }
 
-    /// A render the provider reported as finally failed has nothing left to
-    /// collect, so it leaves the list exactly as a collected one does. It used
-    /// to stay there forever, answering every `check` with the same error.
     /// An abandoned image carries no `operation`, so `ops` has nothing to list:
     /// an image wait does not outlive its call, and nothing is left to collect.
     #[test]
@@ -639,6 +636,9 @@ mod tests {
         assert_eq!(open[0]["operation"], "operations/a");
     }
 
+    /// A render the provider reported as finally failed has nothing left to
+    /// collect, so it leaves the list exactly as a collected one does. It used
+    /// to stay there forever, answering every `check` with the same error.
     #[test]
     fn a_failed_render_is_no_longer_outstanding() {
         let open = outstanding_from(vec![
