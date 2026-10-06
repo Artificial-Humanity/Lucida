@@ -307,6 +307,47 @@ fn the_canary_can_find_where_googles_video_half_starts() {
 }
 
 #[test]
+fn the_canary_can_find_which_credentials_are_set() {
+    // scripts/canary.sh decides which providers to probe by grepping
+    // `lucida config` for `^ +NAME +set`. Reworded or re-columned, the grep
+    // finds nothing, every keyed provider is skipped, and the canary used to
+    // report "no drift detected" having probed none of them. It now refuses a
+    // run that probed nothing, but a layout change should fail here first.
+    //
+    // Both directions are pinned: a key that is set must match, and one that is
+    // not must not — `not set` would otherwise read as set and send the canary
+    // after a provider it has no credential for.
+    let sandbox = Sandbox::new("canary-config-layout");
+    sandbox.write_config("GEMINI_API_KEY=cli-test-value\n");
+
+    let shown = run(lucida(&sandbox).arg("config"));
+    shown.exits(0);
+
+    // `^ +NAME +set`, by hand: this crate has no regex dependency.
+    let canary_sees_set = |name: &str| {
+        shown.stdout.lines().any(|line| {
+            let indented = line.trim_start_matches(' ');
+            line.len() > indented.len()
+                && indented
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    .is_some_and(|rest| rest.trim_start_matches(' ').starts_with("set"))
+        })
+    };
+
+    assert!(
+        canary_sees_set("GEMINI_API_KEY"),
+        "the canary's `^ +GEMINI_API_KEY +set` no longer matches a key that is set:\n{}",
+        shown.stdout
+    );
+    assert!(
+        !canary_sees_set("BFL_API_KEY"),
+        "the canary's `^ +BFL_API_KEY +set` now matches a key that is NOT set:\n{}",
+        shown.stdout
+    );
+}
+
+#[test]
 fn a_provider_of_both_media_lists_both() {
     // `runway` was a video provider only, and `lucida models --provider runway`
     // listed its video models. Now that it renders images too, the image lane
@@ -737,6 +778,9 @@ fn the_server_never_emits_a_carriage_return() {
     let sandbox = Sandbox::new("mcp-lf");
     let out = mcp(&sandbox, &format!("{TOOLS_LIST}\n"));
 
+    // A server that never started has no CR in its output either. Require the
+    // response, and a clean exit, so there is something for the check to see.
+    out.exits(0).says("generate_image");
     assert!(
         !out.stdout.contains('\r'),
         "the server emitted CR in its output"
@@ -745,17 +789,44 @@ fn the_server_never_emits_a_carriage_return() {
 
 #[test]
 fn a_notification_draws_no_response() {
+    // An empty stdout is also what a server that failed to start produces. So a
+    // `ping` follows the notification: its answer proves the server was reading,
+    // and, being the only line, that the notification before it drew none.
     let sandbox = Sandbox::new("mcp-notify");
     let out = mcp(
         &sandbox,
-        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\
+         {\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n",
     );
 
-    assert!(
-        out.stdout.trim().is_empty(),
-        "replied to a notification:\n{}",
+    out.exits(0);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected only the ping's reply, so the notification drew none:\n{}",
         out.stdout
     );
+    let reply: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("the one reply must be a JSON document");
+    assert_eq!(reply["id"], 7, "the reply is not the ping's: {reply}");
+}
+
+#[test]
+fn lucida_config_names_the_file_in_use() {
+    // The process-level half of the `src/config.rs` unit test for the same
+    // rule: that unit test cannot set the variable without racing its
+    // neighbours, so the proof that it is read at all lives here, where each
+    // run has an environment of its own.
+    let sandbox = Sandbox::new("config-explicit");
+    let file = sandbox.dir.join("elsewhere.env");
+    fs::write(&file, "OPENAI_API_KEY=sk-not-a-real-key\n").unwrap();
+
+    let out = run(lucida(&sandbox).env("LUCIDA_CONFIG", &file).arg("config"));
+
+    out.exits(0)
+        .says(&format!("Config file: {}", file.display()))
+        .says("set (config file)");
 }
 
 // --- the file this replaced -------------------------------------------------
@@ -975,5 +1046,12 @@ fn a_current_video_model_carries_no_such_warning() {
     let sandbox = Sandbox::new("veo-current");
     let out = run(lucida(&sandbox).args(["video", "x", "--model", "veo-fast", "--dry-run"]));
 
-    out.never_says("retired").never_says("expect this to fail");
+    // The warning's absence means nothing from a command that did not run, so
+    // require the dry run's own output first: it exits 0 and names the model
+    // that `veo-fast` resolves to.
+    out.exits(0)
+        .says("Dry run")
+        .says("veo-3.1-fast-generate-preview")
+        .never_says("retired")
+        .never_says("expect this to fail");
 }

@@ -14,6 +14,13 @@
 //!   order. There is no routing and no cleverness — if the code under test makes
 //!   its requests in a different order than the recording, the assertions on the
 //!   recorded requests say so.
+//! - **The script is a contract, and `finish()` enforces it.** The server keeps
+//!   listening until `finish()`, answers any request beyond the script with a
+//!   500 that says so, and then fails the test if a request went beyond the
+//!   script or a scripted reply was never asked for. It used to stop listening
+//!   after the last reply, so an extra request was refused at connect and never
+//!   recorded, and `serve(vec![])` never listened at all — which made
+//!   "no request reached the API" an assertion that could not fail.
 //! - **Requests are recorded whole**: method, path with query, headers, body
 //!   bytes. Assertions read what was actually sent rather than what the client
 //!   intended to send, which is the difference that catches a credential on the
@@ -29,6 +36,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -106,9 +114,18 @@ impl Reply {
     }
 }
 
+/// How long `finish()` waits for the scripted replies to be asked for before it
+/// reports them unused — a bound, so a test can never hang the suite.
+const DEADLINE: Duration = Duration::from_secs(15);
+
 pub struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Recorded>>>,
+    /// How many replies the script holds; requests past this index are extras.
+    scripted: usize,
+    deadline: Duration,
+    stop: Arc<AtomicBool>,
+    finished: bool,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -117,19 +134,73 @@ impl Server {
         &self.url
     }
 
-    /// Waits for every scripted reply to be consumed and returns the requests in
-    /// the order they arrived. Consuming `self`, because the requests are only
-    /// complete once the conversation is over.
+    /// Ends the conversation and returns the requests in the order they arrived.
+    /// Consuming `self`, because the requests are only complete once the
+    /// conversation is over.
+    ///
+    /// Panics, failing the calling test, when the conversation did not match the
+    /// script: a request beyond it (the server answered that one with a 500), or
+    /// a scripted reply nobody asked for. A test whose code under test really
+    /// makes a variable number of requests must script for that, not tolerate it.
     pub fn finish(mut self) -> Vec<Recorded> {
+        self.finished = true;
+
+        // The code under test has normally returned by now, so every request it
+        // made is already recorded. The wait covers a request still in flight.
+        let deadline = Instant::now() + self.deadline;
+        while self.requests.lock().unwrap().len() < self.scripted && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        std::mem::take(&mut *self.requests.lock().unwrap())
+        let requests = std::mem::take(&mut *self.requests.lock().unwrap());
+
+        let seen: Vec<String> = requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+        if requests.len() > self.scripted {
+            panic!(
+                "test server: {} request(s) beyond the script of {} reply(ies), each answered with a 500: {}",
+                requests.len() - self.scripted,
+                self.scripted,
+                seen[self.scripted..].join(", ")
+            );
+        }
+        if requests.len() < self.scripted {
+            panic!(
+                "test server: {} of {} scripted reply(ies) were never asked for (only saw: [{}])",
+                self.scripted - requests.len(),
+                self.scripted,
+                seen.join(", ")
+            );
+        }
+        requests
     }
 }
 
-/// Starts a server that answers with `replies`, in order, then stops listening.
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // A server dropped without `finish()` checked nothing: the test never
+        // compared the conversation with the script, so it would pass whatever
+        // the code under test sent. Not while unwinding — a second panic there
+        // aborts the whole test process and hides the first failure.
+        if !self.finished && !std::thread::panicking() {
+            panic!("test server dropped without finish(): the script was never checked against the requests");
+        }
+    }
+}
+
+/// Starts a server that answers with `replies`, in order, and keeps listening
+/// until `finish()` so that a request beyond the script is seen, not refused.
 pub fn serve(replies: Vec<Reply>) -> Server {
+    serve_with_deadline(replies, DEADLINE)
+}
+
+/// `serve` with its own bound on how long `finish()` waits for unused replies,
+/// so the server's own tests can watch one go unused without a 15 s wait.
+fn serve_with_deadline(replies: Vec<Reply>, deadline: Duration) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding the test server");
     let url = format!("http://{}", listener.local_addr().unwrap());
 
@@ -145,36 +216,39 @@ pub fn serve(replies: Vec<Reply>) -> Server {
             reply
         })
         .collect();
+    let scripted = replies.len();
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&requests);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
 
     let handle = std::thread::spawn(move || {
-        // Non-blocking accept with a deadline, so a test whose code makes fewer
-        // requests than the script expects fails in seconds rather than hanging
-        // the suite on a join that can never complete.
+        // Non-blocking accept, so the thread can notice `stop` rather than sit
+        // in `accept` forever once the test is over.
         listener.set_nonblocking(true).ok();
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let unexpected = Reply::status(
+            500,
+            r#"{"error":"test server: unexpected request, the script had no reply left"}"#,
+        );
 
-        'replies: for reply in replies {
-            let stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if Instant::now() > deadline {
-                            eprintln!("test server: gave up waiting for a request");
-                            break 'replies;
-                        }
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break 'replies,
+        while !stopping.load(Ordering::SeqCst) {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
                 }
+                Err(_) => break,
             };
             stream.set_nonblocking(false).ok();
             stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-            if let Err(e) = handle_connection(stream, &reply, &recorded) {
+            // Connections are handled one at a time, so the next reply is the
+            // one after however many requests have been recorded.
+            let next = recorded.lock().unwrap().len();
+            let reply = replies.get(next).unwrap_or(&unexpected);
+            if let Err(e) = handle_connection(stream, reply, &recorded) {
                 eprintln!("test server: {e}");
-                break;
             }
         }
     });
@@ -182,6 +256,10 @@ pub fn serve(replies: Vec<Reply>) -> Server {
     Server {
         url,
         requests,
+        scripted,
+        deadline,
+        stop,
+        finished: false,
         handle: Some(handle),
     }
 }
@@ -195,6 +273,10 @@ fn handle_connection(
 
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
+    if request_line.trim().is_empty() {
+        // A connection that closed without sending a request is not one.
+        return Ok(());
+    }
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
@@ -266,4 +348,77 @@ fn handle_connection(
     stream.write_all(head.as_bytes())?;
     stream.write_all(&reply.body)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    /// One bare GET, returning the status line — no HTTP client, so these tests
+    /// exercise the server and nothing else.
+    fn get(server: &Server, path: &str) -> String {
+        let address = server.url().trim_start_matches("http://");
+        let mut stream = TcpStream::connect(address).expect("connecting to the test server");
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response.lines().next().unwrap_or_default().to_string()
+    }
+
+    fn panic_message(result: std::thread::Result<Vec<Recorded>>) -> String {
+        let payload = result.err().expect("finish() should have panicked");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_conversation_that_matches_the_script_passes() {
+        let server = serve(vec![Reply::json("{}")]);
+        assert!(get(&server, "/one").contains("200"));
+        let requests = server.finish();
+        assert_eq!(requests[0].path, "/one");
+    }
+
+    /// The defect this guards: with an empty script the listener used to drop at
+    /// once, so a request was refused at connect and never recorded.
+    #[test]
+    fn a_request_to_an_empty_script_is_recorded_answered_500_and_fails_the_test() {
+        let server = serve(vec![]);
+        assert!(get(&server, "/sneaked").contains("500"));
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| server.finish())));
+        assert!(message.contains("beyond the script"), "{message}");
+        assert!(message.contains("GET /sneaked"), "{message}");
+    }
+
+    /// The listener used to close after the last reply, so a second request was
+    /// refused and went unrecorded.
+    #[test]
+    fn a_request_past_the_last_reply_is_recorded_and_fails_the_test() {
+        let server = serve(vec![Reply::json("{}")]);
+        assert!(get(&server, "/first").contains("200"));
+        assert!(get(&server, "/second").contains("500"));
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| server.finish())));
+        assert!(message.contains("1 request(s) beyond the script of 1"), "{message}");
+        assert!(message.contains("GET /second"), "{message}");
+    }
+
+    #[test]
+    fn a_scripted_reply_nobody_asked_for_fails_the_test() {
+        let server = serve_with_deadline(vec![Reply::json("{}"), Reply::json("{}")], Duration::from_millis(300));
+        get(&server, "/only");
+        let message = panic_message(catch_unwind(AssertUnwindSafe(|| server.finish())));
+        assert!(message.contains("1 of 2 scripted reply(ies) were never asked for"), "{message}");
+        assert!(message.contains("GET /only"), "{message}");
+    }
+
+    #[test]
+    fn a_server_dropped_without_finish_fails_the_test() {
+        let server = serve(vec![]);
+        let result = catch_unwind(AssertUnwindSafe(|| drop(server)));
+        assert!(result.is_err(), "dropping an unchecked server must panic");
+    }
 }
