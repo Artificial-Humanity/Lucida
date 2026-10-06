@@ -155,7 +155,7 @@ pub fn capabilities(model: &str) -> Capabilities {
         provider: "bfl",
         // Names models by hand, because a tagline is a `&'static str`; held
         // against this table by `the_tagline_names_exactly_the_models_the_table_does`.
-        tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone, and flux-kontext-* and flux-pro-1.1-ultra take a ratio from a short list instead of a size.",
+        tagline: "Hosted FLUX. Paid, fast, edits well. Its capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone, and flux-kontext-* and flux-pro-1.1-ultra take a ratio from a short list instead of a size.",
         aspect: if ratio_only {
             AspectSupport::Named(RATIO_ONLY_ASPECTS)
         } else {
@@ -180,6 +180,9 @@ pub fn capabilities(model: &str) -> Capabilities {
         provenance: Provenance::C2paOnly,
         needs_reference: false,
         foreign_model: None,
+        reference_formats: None,
+        max_long_edge: None,
+        seed_limit: None,
     }
 }
 

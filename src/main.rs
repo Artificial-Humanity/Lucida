@@ -6,10 +6,11 @@
 //! One binary, two front ends: a plain CLI for shell and script use, and an MCP
 //! server (`lucida mcp`) so agents can call it as a first-class tool.
 //!
-//! Images come from one of six providers — Google's Gemini models, a local
-//! ComfyUI, hosted FLUX from Black Forest Labs, Stability AI, OpenAI, or
-//! Runway — chosen from the model id unless `--provider` says otherwise. Video
-//! comes from Veo, Runway or Kling.
+//! Images come from Google's Gemini models, a local ComfyUI, hosted FLUX from
+//! Black Forest Labs, Stability AI, OpenAI, Runway, or a Lemonade server's
+//! image models. The provider is chosen from the model id unless `--provider`
+//! says otherwise — and Lemonade only when `--provider` names it. Video comes
+//! from Veo, Runway or Kling.
 
 mod bfl;
 mod cancel;
@@ -19,6 +20,7 @@ mod config;
 mod genai;
 mod kling;
 mod ledger;
+mod lemonade;
 mod masked;
 mod mcp;
 mod openai;
@@ -45,16 +47,23 @@ use video::VideoRequest;
 #[command(
     name = "lucida",
     version,
-    about = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, FLUX, Stability AI or OpenAI",
+    about = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, Lemonade, FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
-                  hosted FLUX from Black Forest Labs, Stability AI, OpenAI or \
-                  Runway, and video with Veo, Runway or Kling.\n\n\
+                  a Lemonade server, hosted FLUX from Black Forest Labs, Stability \
+                  AI, OpenAI or Runway, and video with Veo, Runway or Kling.\n\n\
                   Google reads GEMINI_API_KEY — one key for both images and Veo \
                   video. Image generation requires billing to be enabled on the \
                   project behind the key; free-tier keys report a quota of \
                   zero.\n\n\
                   ComfyUI needs no credential. It is found at \
                   http://127.0.0.1:8188 unless LUCIDA_COMFYUI_URL says otherwise.\n\n\
+                  Lemonade needs no credential, and sends LEMONADE_API_KEY as a \
+                  bearer token when it is set. It is found at \
+                  http://127.0.0.1:13305/v1 unless LUCIDA_LEMONADE_URL says \
+                  otherwise. It is never inferred from a model id: it is used \
+                  when named — --provider lemonade — or when \
+                  LUCIDA_IMAGE_PROVIDERS lists it, with the model from --model \
+                  or LUCIDA_LEMONADE_MODEL.\n\n\
                   Black Forest Labs reads BFL_API_KEY and bills per image. Its \
                   capabilities differ per model — run `lucida models --provider bfl`.\n\n\
                   Stability reads STABILITY_API_KEY; OpenAI reads OPENAI_API_KEY, \
@@ -108,11 +117,11 @@ struct ImageOptions {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Which provider to use: google, comfyui, bfl, stability, openai or runway. Inferred from the model when omitted.
+    /// Which provider to use: google, comfyui, bfl, stability, openai, runway or lemonade. Inferred from the model when omitted — except lemonade, which is used when named here or listed in LUCIDA_IMAGE_PROVIDERS.
     #[arg(short, long)]
     provider: Option<String>,
 
-    /// What to keep out of the picture (comfyui and stability — no FLUX, Gemini or gpt-image model takes one)
+    /// What to keep out of the picture (comfyui and stability — no FLUX, Gemini, gpt-image or Lemonade model takes one)
     #[arg(short, long)]
     negative: Option<String>,
 
@@ -134,15 +143,18 @@ struct ImageOptions {
     #[arg(long)]
     mask: Option<String>,
 
-    /// Seed, for a reproducible render (comfyui, bfl, stability and runway; google and openai have none)
+    /// Seed to render with (comfyui, bfl, stability, runway and lemonade; google and openai have none). A seed has been verified to give the same picture again only on comfyui and stability.
+    //
+    // The second sentence is `provider::seed_verified_sentence()`, which a clap
+    // literal cannot call; a test holds the two together.
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Sampling steps (comfyui, and bfl on flux-2-flex / flux-dev only)
+    /// Sampling steps (comfyui, lemonade, and bfl on flux-2-flex / flux-dev only)
     #[arg(long)]
     steps: Option<u32>,
 
-    /// Guidance scale (comfyui, and bfl on flux-2-flex / flux-dev only)
+    /// Guidance scale (comfyui, lemonade, and bfl on flux-2-flex / flux-dev only)
     #[arg(short, long)]
     guidance: Option<f32>,
 
@@ -311,7 +323,7 @@ enum Command {
     /// List the models a provider can reach, and what it can be asked for.
     /// Answers for the video providers too, including remaining credits
     Models {
-        /// Which provider to interrogate: google, comfyui, bfl, stability, openai, runway or kling
+        /// Which provider to interrogate: google, comfyui, bfl, stability, openai, runway, lemonade or kling
         #[arg(short, long, default_value = "google")]
         provider: String,
     },
@@ -467,9 +479,9 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Err(image_error) => match provider::VideoBackend::parse(&provider) {
                 Ok(backend) => list_video_models(backend).map(|()| out::OK),
-                // The image error, not the video one: six of the seven providers
-                // are image providers, so that is the more likely mistake and
-                // the more useful list to be shown.
+                // The image error, not the video one: most providers are image
+                // providers, so that is the more likely mistake and the more
+                // useful list to be shown.
                 Err(_) => Err(image_error),
             },
         },
@@ -986,7 +998,11 @@ impl ImageOptions {
         // `provider::resolve_default` for why it can never become a fallback.
         let (backend, default_source) = match (&self.provider, &self.model) {
             (Some(name), _) => (Backend::parse(name)?, None),
-            (None, Some(model)) => (infer_backend(model), None),
+            (None, Some(model)) => {
+                // Inferred, so the id alone decides where the money goes.
+                provider::refuse_misrouted_model(model)?;
+                (infer_backend(model), None)
+            }
             (None, None) => {
                 let (backend, source) = provider::resolve_default::<Backend>()?;
                 (backend, Some(source))
@@ -994,7 +1010,7 @@ impl ImageOptions {
         };
         announce_default(&default_source, backend.name());
 
-        let model = self.model.unwrap_or_else(|| backend.default_model().to_string());
+        let model = provider::model_for(backend, self.model.as_deref())?;
 
         let request = ImageRequest {
             prompt,
@@ -1548,6 +1564,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::Stability => Box::new(stability::Client::from_env()?),
         Backend::OpenAi => Box::new(openai::Client::from_env()?),
         Backend::Runway => Box::new(runway::Client::from_env()?),
+        Backend::Lemonade => Box::new(lemonade::Client::from_env()?),
     })
 }
 
@@ -1647,6 +1664,7 @@ fn list_models(backend: Backend) -> Result<()> {
         Backend::Stability => stability::MODEL_ALIASES,
         Backend::OpenAi => openai::MODEL_ALIASES,
         Backend::Runway => runway::IMAGE_ALIASES,
+        Backend::Lemonade => &[], // its ids are the server's; it has no aliases
     };
     if !aliases.is_empty() {
         println!("\nAliases:");
@@ -1659,18 +1677,44 @@ fn list_models(backend: Backend) -> Result<()> {
     // error, one rejected flag at a time. For bfl this is the floor for the
     // default model; the per-model differences are annotated above.
     println!("\nThis provider supports:");
-    println!("  aspect ratio    {}", describe_aspect(caps.aspect));
-    println!("  output size     {}", yes_no(caps.size));
-    println!("  seed            {}", yes_no(caps.seed));
-    println!("  negative prompt {}", yes_no(caps.negative_prompt));
-    println!("  reference image {}", yes_no(caps.references));
-    println!("  own workflow    {}", yes_no(caps.workflow));
-    println!("  mask            {}", caps.mask.describe());
-    println!("  steps           {}", yes_no(caps.steps));
-    println!("  guidance        {}", yes_no(caps.guidance));
-    println!("  output carries  {}", caps.provenance.describe());
+    print!("{}", capabilities_table(&caps));
 
     Ok(())
+}
+
+/// The rows of `lucida models`' "This provider supports" table. A limit the
+/// provider records nothing about gets no row, rather than a row saying so.
+fn capabilities_table(caps: &provider::Capabilities) -> String {
+    let mut rows: Vec<(&str, String)> = vec![
+        ("aspect ratio", describe_aspect(caps.aspect)),
+        ("output size", yes_no(caps.size).to_string()),
+    ];
+    if let Some(edge) = caps.describe_long_edge() {
+        rows.push(("long edge", edge));
+    }
+    rows.push((
+        "seed",
+        match caps.describe_seed_limit() {
+            Some(range) => format!("{}, {range}", yes_no(caps.seed)),
+            None => yes_no(caps.seed).to_string(),
+        },
+    ));
+    rows.push(("negative prompt", yes_no(caps.negative_prompt).to_string()));
+    rows.push(("reference image", yes_no(caps.references).to_string()));
+    if let Some(formats) = caps.describe_reference_formats() {
+        rows.push(("reference format", formats));
+    }
+    rows.push(("own workflow", yes_no(caps.workflow).to_string()));
+    rows.push(("mask", caps.mask.describe().to_string()));
+    rows.push(("steps", yes_no(caps.steps).to_string()));
+    rows.push(("guidance", yes_no(caps.guidance).to_string()));
+    rows.push(("output carries", caps.provenance.describe().to_string()));
+    // As wide as the widest label present, so a table without `reference
+    // format` keeps the layout it has always had.
+    let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|(label, value)| format!("  {label:<width$} {value}\n"))
+        .collect()
 }
 
 /// What differs per BFL model, as the notes beside it in `lucida models`.
@@ -1786,6 +1830,12 @@ fn execute(
     }
 
     if dry_run {
+        // Lemonade's render refuses an edit whose source is over its ceiling
+        // before it sends anything — a check on a file on disk, not on the
+        // server — so a dry run makes it too.
+        if backend == Backend::Lemonade {
+            lemonade::preflight(&request)?;
+        }
         report_plan(serde_json::json!({
             "ok": true,
             "status": "dry-run",
@@ -1815,7 +1865,8 @@ fn execute(
 
     let written = render_batch(&out, count, |destination| {
         render_one(&request, backend, caps, price, destination)
-    })?;
+    })
+    .map_err(|error| lemonade::explain_unreachable(error, &default_source))?;
 
     if out::json() {
         out::emit(serde_json::json!({
@@ -1931,7 +1982,7 @@ fn render_one(
         }
     }
     if let Some(seed) = image.seed {
-        eprintln!("Seed {seed} — pass `--seed {seed}` to render this again.");
+        eprintln!("{}", provider::seed_note(seed, &format!("`--seed {seed}`")));
     }
 
     // The size is reported rather than assumed, because an edit on the local lane
@@ -2357,6 +2408,192 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four clap strings that name providers are literals — clap help cannot
+    /// be generated — so each is held against the capabilities it describes.
+    /// `--seed` said "comfyui, bfl, stability and runway" the day a fifth lane
+    /// gained one.
+    #[test]
+    fn each_restricted_flag_names_every_provider_that_honours_it() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let generate = command
+            .get_subcommands()
+            .find(|c| c.get_name() == "generate")
+            .expect("no `generate` subcommand");
+        let help = |id: &str| {
+            generate
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .and_then(|a| a.get_help())
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| panic!("`--{id}` has no help"))
+        };
+        type Honours = fn(&provider::Capabilities) -> bool;
+        let flags: [(&str, Honours); 4] = [
+            ("negative", |c| c.negative_prompt),
+            ("seed", |c| c.seed),
+            ("steps", |c| c.steps),
+            ("guidance", |c| c.guidance),
+        ];
+        for (flag, honours) in flags {
+            let text = help(flag);
+            for backend in Backend::ALL {
+                if honours(&provider::capabilities_for(*backend, backend.default_model())) {
+                    assert!(
+                        text.contains(backend.name()),
+                        "`--{flag}` works on {} and its help does not say so: {text}",
+                        backend.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `--seed`'s help and the README are literals; each carries the sentence
+    /// the MCP `seed` description generates, so all three name the same lanes
+    /// as the ones a seed is verified to repeat on.
+    #[test]
+    fn the_seed_help_and_the_readme_name_the_verified_lanes() {
+        use clap::CommandFactory;
+        let sentence = provider::seed_verified_sentence();
+        let command = Cli::command();
+        let generate = command
+            .get_subcommands()
+            .find(|c| c.get_name() == "generate")
+            .expect("no `generate` subcommand");
+        let help = generate
+            .get_arguments()
+            .find(|a| a.get_id() == "seed")
+            .and_then(|a| a.get_help())
+            .map(|h| h.to_string())
+            .expect("`--seed` has no help");
+        // clap drops the closing full stop of a one-paragraph help.
+        assert!(help.contains(sentence.trim_end_matches('.')), "{help}");
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(readme.contains(&sentence), "the README does not say: {sentence}");
+    }
+
+    /// The README's provider table and AGENTS.md's provider line are prose a
+    /// test can still read.
+    #[test]
+    fn the_readme_and_agents_name_every_image_provider() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+        let row = readme
+            .lines()
+            .find(|l| l.starts_with("| **Images** |"))
+            .expect("the README's provider table has no Images row");
+        let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        let line = agents
+            .split("\n* ")
+            .find(|item| item.starts_with("**Image providers ("))
+            .expect("AGENTS.md has no image-provider line");
+        let count = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+            [Backend::ALL.len()];
+        assert!(line.starts_with(&format!("**Image providers ({count}):**")), "{line}");
+        for backend in Backend::ALL {
+            assert!(row.contains(&format!("`{}`", backend.name())), "README omits {}: {row}", backend.name());
+            assert!(line.contains(backend.product_name()), "AGENTS.md omits {}: {line}", backend.product_name());
+        }
+    }
+
+    /// The provenance line names exactly the image providers whose declared
+    /// provenance is `Unmarked`, and the README says what an unmarked local PNG
+    /// still carries.
+    #[test]
+    fn the_unmarked_lanes_are_named_as_the_code_declares_them() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        let line = agents
+            .split("\n* ")
+            .find(|item| item.starts_with("**Provenance:**"))
+            .expect("AGENTS.md has no provenance line");
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (_, unmarked_clause) = line
+            .split_once(';')
+            .expect("the provenance line has no clause naming the unmarked lanes");
+        let unmarked_clause = unmarked_clause.split("Unmarked means").next().unwrap();
+        for backend in Backend::ALL {
+            let declared = provider::capabilities_for(*backend, backend.default_model()).provenance
+                == provider::Provenance::Unmarked;
+            assert_eq!(
+                unmarked_clause.contains(backend.product_name()),
+                declared,
+                "{} is declared {} and AGENTS.md says otherwise: {line}",
+                backend.product_name(),
+                if declared { "unmarked" } else { "marked" }
+            );
+        }
+        let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(readme.contains("PNG text chunks"), "the README does not say a Lemonade PNG carries its prompt");
+    }
+
+    /// The column a table row's value starts in, found by naming the row's label.
+    fn value_column(line: &str) -> usize {
+        const LABELS: [&str; 12] = [
+            "aspect ratio",
+            "output size",
+            "long edge",
+            "seed",
+            "negative prompt",
+            "reference image",
+            "reference format",
+            "own workflow",
+            "mask",
+            "steps",
+            "guidance",
+            "output carries",
+        ];
+        let label = LABELS
+            .iter()
+            .filter(|label| line.strip_prefix("  ").is_some_and(|rest| rest.starts_with(**label)))
+            .max_by_key(|label| label.len())
+            .unwrap_or_else(|| panic!("no known label in `{line}`"));
+        let after = &line[2 + label.len()..];
+        2 + label.len() + (after.len() - after.trim_start().len())
+    }
+
+    /// `lucida models` gives a row to a limit only when the provider records
+    /// one, and the rows share one column — the one they always had when no
+    /// limit is recorded, so the existing providers' output does not move.
+    #[test]
+    fn the_models_table_has_a_row_for_a_limit_only_when_one_is_recorded() {
+        // Lemonade records all three limits; it is checked with the limited case.
+        for backend in Backend::ALL.iter().copied().filter(|b| *b != Backend::Lemonade) {
+            let table =
+                capabilities_table(&provider::capabilities_for(backend, backend.default_model()));
+            for label in ["long edge", "reference format"] {
+                assert!(!table.contains(label), "{}: `{label}` in:\n{table}", backend.name());
+            }
+            assert!(!table.contains("below"), "{}:\n{table}", backend.name());
+            for line in table.lines() {
+                assert_eq!(value_column(line), 18, "{}: `{line}` in:\n{table}", backend.name());
+            }
+        }
+
+        let limited = provider::Capabilities {
+            reference_formats: Some(&["image/png"]),
+            max_long_edge: Some(2048),
+            seed_limit: Some(1 << 31),
+            ..comfy::CAPABILITIES
+        };
+        let table = capabilities_table(&limited);
+        assert!(table.contains("long edge        at most 2048 pixels"), "{table}");
+        assert!(table.contains("reference format PNG only"), "{table}");
+        assert!(table.contains(", below 2147483648"), "{table}");
+        // Every value starts in the same column, the widest label included.
+        let columns: std::collections::BTreeSet<usize> = table.lines().map(value_column).collect();
+        assert_eq!(columns.len(), 1, "{table}");
+
+        let table = capabilities_table(&lemonade::CAPABILITIES);
+        assert!(table.contains("reference format PNG and JPEG only"), "{table}");
+        assert!(table.contains(", below 4294967296"), "{table}");
+        let columns: std::collections::BTreeSet<usize> = table.lines().map(value_column).collect();
+        assert_eq!(columns.len(), 1, "{table}");
+    }
 
     /// `lucida models --provider bfl` annotated Kontext and Ultra exactly like
     /// the pixel models, though they take a ratio from a list and no `--size`.

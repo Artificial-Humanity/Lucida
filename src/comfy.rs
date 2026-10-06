@@ -821,6 +821,9 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     provenance: Provenance::Unmarked,
     needs_reference: false,
     foreign_model: None,
+    reference_formats: None,
+    max_long_edge: None,
+    seed_limit: None,
 };
 
 impl ImageProvider for Client {
@@ -963,7 +966,7 @@ impl ImageProvider for Client {
 /// is then structural rather than lucky: consecutive tickets differ by 1 before
 /// the multiply and by the multiplier after it, which is far too large a gap for
 /// the final shift to close.
-fn arbitrary_seed() -> u64 {
+pub(crate) fn arbitrary_seed() -> u64 {
     static BASE: OnceLock<u64> = OnceLock::new();
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -991,7 +994,7 @@ fn arbitrary_seed() -> u64 {
 /// is concatenated with paths by hand, and — more importantly — it is printed in
 /// error messages. A password in an error message ends up in terminal
 /// scrollback, CI logs and pasted bug reports.
-fn split_credentials(url: &str) -> (String, Option<String>) {
+pub(crate) fn split_credentials(url: &str) -> (String, Option<String>) {
     let Some((scheme, rest)) = url.split_once("://") else {
         return (url.to_string(), None);
     };
@@ -1098,7 +1101,7 @@ fn explain_refusal(status: u16, auth: &Option<String>) -> Option<String> {
 /// from rustls and differs per failure — `UnknownIssuer`, `NotValidForName`,
 /// `CaUsedAsEndEntity` and `BadSignature` are all the same story as far as the
 /// person reading the message is concerned.
-fn is_certificate_failure(error: &reqwest::Error) -> bool {
+pub(crate) fn is_certificate_failure(error: &reqwest::Error) -> bool {
     let mut source: Option<&dyn std::error::Error> = Some(error);
     while let Some(current) = source {
         let text = current.to_string().to_ascii_lowercase();

@@ -131,6 +131,9 @@ pub fn capabilities(_model: &str) -> Capabilities {
         provenance: Provenance::C2paOnly,
         needs_reference: false,
         foreign_model: None,
+        reference_formats: None,
+        max_long_edge: None,
+        seed_limit: None,
     }
 }
 

@@ -150,6 +150,20 @@ impl Server {
         &self.url
     }
 
+    /// Waits until `count` requests have been recorded, up to the same bound
+    /// `finish()` keeps, and says whether they were. For a test that must act
+    /// only once the code under test has got that far — a sleep guesses at it.
+    pub fn await_requests(&self, count: usize) -> bool {
+        let deadline = Instant::now() + self.deadline;
+        while Instant::now() < deadline {
+            if self.requests.lock().unwrap().len() >= count {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     /// Ends the conversation and returns the requests in the order they arrived.
     /// Consuming `self`, because the requests are only complete once the
     /// conversation is over.

@@ -317,6 +317,7 @@ Two details that would have been silent failures:
 | ~~Flux (Black Forest Labs)~~ | — | **Done; see below** |
 | ~~OpenAI~~ | — | **Done; see below** |
 | ~~Stability AI~~ | — | **Done; see below** |
+| ~~Lemonade~~ | — | **Done; see below** |
 | ~~Adobe Firefly~~ | — | **Ruled out: subscription only** |
 | ~~Midjourney~~ | — | **Ruled out: subscription only, and no official API** |
 
@@ -355,6 +356,28 @@ Two facts confirmed rather than assumed: local output carries no SynthID and no
 C2PA manifest, and Flux really does run on the gfx1151. The ROCm caveats hold —
 `--disable-mmap` is mandatory, and "it hangs" is indeed the first thing anyone
 will report, which is why elapsed time is now printed every 30 seconds.
+
+### Lemonade — DELIVERED
+
+A named lane over the image models a Lemonade server already serves, chosen for three things the
+local ComfyUI lane does not give: one server for all local AI, rendering on another machine's GPU
+over the network, and one HTTP call per render instead of a workflow graph. It was added with the
+owner's approval despite the 2026-08-09 pause on new providers.
+
+What shaped it: Lemonade's ids collide with other lanes' inference (`Flux-2-Klein-4B` lowercases
+to a paid BFL endpoint), so the lane is reached only by name, and an id in that casing inferred to
+BFL is refused. Capabilities stay a value computed without the network — the MCP reader thread
+answers `tools/list` from it — so the fixed shape (free aspect on a 16-pixel grid, a 2048
+long-edge ceiling, one PNG or JPEG reference, no negative prompt, no mask) is declared, and the
+model, its `edit` label and its default size are checked live inside the render after one
+`GET /models`. Lemonade reports no seed, so Lucida chooses and reports one; whether the same seed
+gives the same image has not been measured. A size is always sent, because Lemonade's API docs give
+512x512 as the default for an omitted one. Its output carries no C2PA manifest (`Unmarked`), though the PNG's text
+chunks hold the prompt and seed. The canary lists models only; the render endpoint is not probed
+live.
+
+Still open: masks (Lemonade's convention is white = change, Lucida's transparent = change, and
+converting needs a PNG decoder), `/images/variations` and `/images/upscale`.
 
 ### Flux — Black Forest Labs (hosted) — DELIVERED
 
@@ -768,6 +791,7 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 | `openai` | shipped | **missing** — see Sora below |
 | `stability` | shipped | **missing** — `/v2beta/image-to-video` returns 404 today; retired or moved, unverified |
 | `runway` | shipped in v1.2.0 — its own two models | shipped |
+| `lemonade` | shipped — the release after v1.2.0 | n/a — Lemonade serves no video |
 | `kling` | **on hold** — endpoint confirmed, models not enumerable free; no Kling credit | shipped |
 
 ### The items, in the order worth doing them

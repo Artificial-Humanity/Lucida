@@ -243,6 +243,9 @@ pub fn image_capabilities(model: &str) -> Capabilities {
         // is one of the ten models this endpoint fronts.
         foreign_model: (!id.is_empty() && !IMAGE_MODELS.contains(&id.as_str()))
             .then_some(IMAGE_MODELS),
+        reference_formats: None,
+        max_long_edge: None,
+        seed_limit: None,
     }
 }
 

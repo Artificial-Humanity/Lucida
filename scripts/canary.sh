@@ -32,6 +32,17 @@
 #      in the URL, that the endpoint is still where we think it is). A model
 #      that does not exist cannot be rendered, so this cannot bill.
 #
+# LEMONADE is probed by its model list only. It needs no credential, so
+# `have_key` treats it like comfyui. Its render endpoint is NOT probed, by the
+# owner's decision: a model id that cannot exist is refused by Lucida after the
+# listing and never reaches the render endpoint, and a real model would render.
+# It is skipped ONLY when Lucida says the server is not reachable — nothing
+# listening, or a gateway's 502 `upstream_unreachable` — which is a state of the
+# world. Every other answer FAILS with its reason, an empty image-model list
+# included: a 404 from a base without `/v1`, a 401, a body that is not the list,
+# or a renamed `labels` field that makes every model non-image would otherwise
+# all read as a quiet skip — drift, passed over.
+#
 # A SUCCESSFUL RENDER HERE IS A FAILURE. If a nonsense model id ever comes back
 # 200, either the provider stopped validating or Lucida sent something other than
 # what was asked for, and both mean money was spent by a script whose whole
@@ -64,8 +75,9 @@ BIN=${1:?usage: canary.sh <path-to-binary>}
 failures=0
 skipped=0
 passed=0
-# Passes that needed no credential (ComfyUI). They are real, but they do not show
-# that any keyed provider was looked at, which is what the floor below asks.
+# Passes that needed no credential (ComfyUI, Lemonade). They are real, but they
+# do not show that any keyed provider was looked at, which is what the floor
+# below asks.
 unkeyed_passed=0
 
 pass() { printf '  ok    %s\n' "$1"; passed=$((passed + 1)); }
@@ -84,8 +96,8 @@ printf 'binary: %s (%s)\n\n' "$BIN" "$("$BIN" --version 2>&1)"
 # for a lane nothing looked at — a canary that quietly stops watching is worse
 # than no canary. `config` prints presence and source, never a value.
 #
-# comfyui needs no credential: it is either listening or it is not, and "not" is
-# a state of the world rather than drift.
+# comfyui and lemonade need no credential: each is either listening or it is not,
+# and "not" is a state of the world rather than drift.
 #
 # A failing `config` is a finding, not silence: with the output discarded, every
 # keyed provider read as keyless, was skipped, and the run reported "no drift"
@@ -109,6 +121,7 @@ fi
 have_key() {
   case "$1" in
     comfyui)   return 0 ;;
+    lemonade)  return 0 ;;
     google)    name=GEMINI_API_KEY ;;
     bfl)       name=BFL_API_KEY ;;
     stability) name=STABILITY_API_KEY ;;
@@ -125,14 +138,42 @@ have_key() {
 # nothing and is the fastest way to learn that a key has been revoked, a base URL
 # has moved, or a response shape has changed.
 
+# Why `lucida models --provider lemonade` did not pass, in one line: the first
+# line of the failure under "did not answer:", or else the first line that says
+# anything — "No image models visible to …" for an empty list.
+lemonade_reason() {
+  reason=$(printf '%s\n' "$1" | awk '/did not answer:/ { found = 1; next } found && NF { sub(/^ +/, ""); print; exit }')
+  [ -n "$reason" ] || reason=$(printf '%s\n' "$1" | awk 'NF { print; exit }')
+  printf '%s' "$reason" | head -c 200
+}
+
 printf 'Free endpoints (model lists and balances):\n'
-for provider in google comfyui bfl stability openai runway kling; do
+for provider in google comfyui lemonade bfl stability openai runway kling; do
   if ! have_key "$provider"; then
     skip "$provider — no credential in this environment"
     continue
   fi
 
   out=$("$BIN" models --provider "$provider" 2>&1)
+
+  # Lemonade is judged on its own terms; see LEMONADE in the header.
+  if [ "$provider" = lemonade ]; then
+    case "$out" in
+      *"Image models available to"*)
+        pass "lemonade — reachable, answered with its models"
+        unkeyed_passed=$((unkeyed_passed + 1))
+        ;;
+      # The lane's own Unreachable sentence, and nothing looser.
+      *"Lemonade is not reachable at"*)
+        skip "lemonade — not listening"
+        ;;
+      *)
+        fail "lemonade — $(lemonade_reason "$out")"
+        ;;
+    esac
+    continue
+  fi
+
   case "$out" in
     *"no resource pack on this account"*)
       # See the kling balance check below.
@@ -144,9 +185,9 @@ for provider in google comfyui bfl stability openai runway kling; do
     # printed after either, so it proves nothing about reachability and is not
     # looked for here.
     *"did not answer"*|*"NOT reachable"*|*"cannot be used right now"*)
-      # ComfyUI being off is an ordinary state of the world, not drift.
+      # A local server being off is an ordinary state of the world, not drift.
       if [ "$provider" = comfyui ]; then
-        skip "comfyui — not listening"
+        skip "$provider — not listening"
       else
         # From the line that names the failure on: the retry chatter and the
         # `== Images ==` banner above it say nothing about why.
@@ -157,7 +198,10 @@ for provider in google comfyui bfl stability openai runway kling; do
     # balance read) succeeded.
     *"Image models available to"*|*"Remaining units"*)
       pass "$provider — reachable, answered with its models"
-      [ "$provider" = comfyui ] && unkeyed_passed=$((unkeyed_passed + 1))
+      case "$provider" in comfyui) unkeyed_passed=$((unkeyed_passed + 1)) ;; esac
+      ;;
+    *"No image models visible to"*)
+      fail "$provider — reachable, but listed no models"
       ;;
     *)
       fail "$provider — unrecognised output: $(printf '%s' "$out" | head -c 200)"
@@ -355,8 +399,9 @@ done
 printf '\n'
 if [ "$failures" -eq 0 ] && [ "$((passed - unkeyed_passed))" -eq 0 ]; then
   # Every keyed provider was skipped, so nothing was looked at. "No drift
-  # detected" would be true of a run that asked no question. ComfyUI answering
-  # does not count: it needs no key, so it is probed on every machine.
+  # detected" would be true of a run that asked no question. ComfyUI or Lemonade
+  # answering does not count: neither needs a key, so each is probed on every
+  # machine.
   printf 'NOTHING WAS PROBED (%s probe(s) skipped, no keyed provider passed or failed).\n' "$skipped"
   printf 'No provider had a credential this script could find; run `lucida config` and\n'
   printf 'see which keys are set, then run it where at least one is.\n'
