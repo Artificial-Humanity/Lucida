@@ -118,8 +118,24 @@ main() {
 
     say "Installing lucida $version to $dir"
 
-    tmp=$(mktemp -d) || die "could not create a temporary directory"
-    trap 'rm -rf "$tmp"' EXIT INT TERM
+    # Staged inside the install directory, under a dot-prefixed name, and not in
+    # the system temp directory. That one is often a separate tmpfs, which turns
+    # the final `mv` into a copy-then-unlink, and a copy cannot write over a
+    # binary that is running ("Text file busy") — the normal state of an
+    # upgrade, since an open Claude session runs lucida as its MCP server. Within
+    # one filesystem `mv` is a rename, which swaps the directory entry and leaves
+    # the running process on the old inode. The directory is made first for that
+    # reason, and removed on every way out, so a failed download or a bad
+    # checksum leaves nothing behind. (Only a SIGKILL skips the trap.)
+    mkdir -p "$dir" || die "could not create $dir"
+    tmp=""
+    # HUP, INT and TERM exit, which runs the EXIT trap: a handler that only cleaned
+    # up would let the script carry on installing after Ctrl-C, and without HUP a
+    # closed terminal leaves the staging directory in the bin directory.
+    trap '[ -z "$tmp" ] || rm -rf "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    tmp=$(mktemp -d "$dir/.lucida-install.XXXXXX") ||
+        die "could not create a staging directory in $dir. The install directory must be writable; set LUCIDA_INSTALL_DIR to install somewhere else"
 
     curl -fsSL -o "$tmp/$asset" "$base/$asset" ||
         die "could not download $base/$asset. See $RELEASES_PAGE"
@@ -129,7 +145,6 @@ main() {
     verify "$tmp/$asset" "$tmp/$asset.sha256"
     say "Checksum verified."
 
-    mkdir -p "$dir" || die "could not create $dir"
     chmod +x "$tmp/$asset"
     mv -f "$tmp/$asset" "$dir/lucida" || die "could not write to $dir"
 

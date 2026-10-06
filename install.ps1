@@ -17,9 +17,13 @@
 #   $env:GITHUB_TOKEN         used if set, purely to avoid the unauthenticated
 #                             rate limit — no scopes are needed for public releases
 
-$ErrorActionPreference = 'Stop'
-
 function Install-Lucida {
+    # Set here and not at the top of the file: run as `irm | iex`, a top-level
+    # assignment lands in the user's own session and leaves every later command
+    # of theirs stopping on its first error. Inside the function it is scoped to
+    # this call and ends with it.
+    $ErrorActionPreference = 'Stop'
+
     $repo = 'Artificial-Humanity/Lucida'
     $releasesPage = "https://github.com/$repo/releases/latest"
 
@@ -67,7 +71,39 @@ function Install-Lucida {
         Write-Host 'Checksum verified.'
 
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        Move-Item -Path $binary -Destination (Join-Path $dir 'lucida.exe') -Force
+        $target = Join-Path $dir 'lucida.exe'
+
+        # Windows will not overwrite or delete a running exe, and an open Claude
+        # session runs lucida.exe as its MCP server — so the normal upgrade is
+        # over a running copy, and `Move-Item -Force` onto it fails with "file in
+        # use". It WILL rename one, so the old exe is moved aside under a unique
+        # name and the new one takes the vacated path. The name is the one
+        # `lucida update` uses, `.lucida-update-old-{pid}-{nanos}.exe`, so each
+        # path sweeps the other's leftovers.
+        $aside = $null
+        if (Test-Path -LiteralPath $target) {
+            $nanos = ([DateTime]::UtcNow.Ticks - 621355968000000000) * 100
+            $aside = Join-Path $dir ".lucida-update-old-$PID-$nanos.exe"
+            Move-Item -LiteralPath $target -Destination $aside -Force
+        }
+        try {
+            Move-Item -LiteralPath $binary -Destination $target -Force
+        } catch {
+            # Leave the user the working copy they had rather than none.
+            if ($aside -and -not (Test-Path -LiteralPath $target)) {
+                Move-Item -LiteralPath $aside -Destination $target -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+
+        # Best effort: a copy a session still runs cannot be deleted, which is the
+        # expected case and not an error — it goes on the next install. The
+        # pattern is exactly what `lucida update` sweeps: the fixed name of its
+        # earlier versions, or `-{pid}-{nanos}`, and nothing else that merely
+        # starts the same way.
+        Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\.lucida-update-old(-[0-9-]*)?\.exe$' } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }

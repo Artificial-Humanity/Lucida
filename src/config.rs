@@ -440,27 +440,6 @@ pub fn write_replacing(path: &Path, body: &str, private: bool) -> Result<()> {
     crate::write_atomically(path, body.as_bytes(), private)
 }
 
-/// Restricts a file to its owner.
-///
-/// Done rather than left to the umask because these files are intended to hold an
-/// API key, and the default umask on most systems leaves them readable by the
-/// whole group.
-#[cfg(unix)]
-pub fn restrict_to_owner(path: &Path) -> Result<()> {
-    // Imported here rather than at the top of the file: this is the only caller
-    // in the module and it does not exist on Windows, so a file-level import
-    // becomes an unused-import error there — which is exactly how CI caught it.
-    use anyhow::Context;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restricting permissions on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-pub fn restrict_to_owner(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 /// A starter file, written by `lucida config --init`.
 pub fn template() -> String {
     let mut text = String::from(
