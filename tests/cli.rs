@@ -537,6 +537,16 @@ fn a_seeded_batch_is_refused() {
     .says("same picture");
 }
 
+#[test]
+fn a_count_of_zero_is_refused_before_anything_runs() {
+    // `--count 0` used to succeed, rendering nothing and exiting 0 — which a
+    // script reads as a batch that worked.
+    let sandbox = Sandbox::new("count-zero");
+    run(lucida(&sandbox).args(["generate", "x", "--provider", "comfyui", "--count", "0"]))
+        .exits(2)
+        .says("--count");
+}
+
 // --- a provider that is not there -------------------------------------------
 
 #[test]
@@ -637,6 +647,111 @@ fn a_dry_run_still_refuses_what_a_real_run_would() {
     .exits(2);
 }
 
+// --- a budget that cannot be enforced refuses -------------------------------
+//
+// Each of these used to remove the cap without a word: the value was read as no
+// budget at all, and every render went through. Driven as dry runs, because a
+// dry run refuses exactly what a real run would and sends nothing.
+
+#[test]
+fn an_unreadable_budget_refuses_a_paid_render_and_names_the_value() {
+    for written in ["$5", "5 USD", "NaN", "inf", "-1"] {
+        let sandbox = Sandbox::new("budget-unreadable");
+        run(lucida(&sandbox)
+            .env("LUCIDA_BUDGET", written)
+            .args(["generate", "x", "--provider", "google", "--dry-run"]))
+        .exits(2)
+        .says(&format!("`{written}`"))
+        .says("such as `5`");
+    }
+}
+
+#[test]
+fn an_unreadable_budget_never_refuses_the_local_lane() {
+    let sandbox = Sandbox::new("budget-unreadable-free");
+    run(lucida(&sandbox)
+        .env("LUCIDA_BUDGET", "$5")
+        .args(["generate", "x", "--provider", "comfyui", "--dry-run"]))
+    .exits(0);
+}
+
+#[test]
+fn config_flags_an_unreadable_budget() {
+    let sandbox = Sandbox::new("budget-config");
+    sandbox.write_config("LUCIDA_BUDGET=$5\n");
+    run(lucida(&sandbox).arg("config"))
+        .says("LUCIDA_BUDGET  (`$5`")
+        .says("such as `5`");
+}
+
+/// `budget_usd` is `null` for an unreadable budget as well as for none, and
+/// read alone that says "no cap" while every paid render is refused. The
+/// problem field is what tells the two apart.
+#[test]
+fn history_json_names_an_unreadable_budget() {
+    let history = |budget: Option<&str>| {
+        let sandbox = Sandbox::new("budget-history");
+        let mut cmd = lucida(&sandbox);
+        if let Some(budget) = budget {
+            cmd.env("LUCIDA_BUDGET", budget);
+        }
+        let out = run(cmd.args(["--json", "history"]));
+        out.exits(0);
+        serde_json::from_str::<serde_json::Value>(out.stdout.trim()).unwrap()
+    };
+
+    let unreadable = history(Some("$5"));
+    assert!(unreadable["budget_usd"].is_null(), "{unreadable}");
+    let problem = unreadable["budget_problem"].as_str().unwrap_or_default();
+    assert!(problem.contains("`$5`") && problem.contains("such as `5`"), "{unreadable}");
+
+    let readable = history(Some("5"));
+    assert_eq!(readable["budget_usd"], 5.0);
+    assert!(readable["budget_problem"].is_null(), "{readable}");
+
+    let unset = history(None);
+    assert!(unset["budget_usd"].is_null() && unset["budget_problem"].is_null(), "{unset}");
+}
+
+#[test]
+fn a_budget_with_the_ledger_off_refuses_a_paid_render() {
+    // The budget is counted from the ledger, so with the ledger off nothing
+    // spent is ever counted and the cap could never be reached.
+    let sandbox = Sandbox::new("budget-no-ledger");
+    run(lucida(&sandbox)
+        .env("LUCIDA_BUDGET", "5")
+        .env("LUCIDA_NO_LEDGER", "1")
+        .args(["video", "x", "--provider", "google", "--dry-run"]))
+    .exits(2)
+    .says("LUCIDA_BUDGET")
+    .says("LUCIDA_NO_LEDGER");
+
+    run(lucida(&sandbox)
+        .env("LUCIDA_BUDGET", "5")
+        .env("LUCIDA_NO_LEDGER", "1")
+        .args(["generate", "x", "--provider", "comfyui", "--dry-run"]))
+    .exits(0);
+}
+
+/// With no home directory the ledger has nowhere to live, so nothing spent is
+/// counted — the same hole as `LUCIDA_NO_LEDGER`, refused the same way, and
+/// named for what it is.
+#[test]
+fn a_budget_with_nowhere_to_keep_the_ledger_refuses_a_paid_render() {
+    let sandbox = Sandbox::new("budget-homeless");
+    let homeless = || {
+        let mut cmd = lucida(&sandbox);
+        cmd.env_remove("HOME").env_remove("USERPROFILE").env("LUCIDA_BUDGET", "5");
+        cmd
+    };
+    run(homeless().args(["generate", "x", "--provider", "google", "--dry-run"]))
+        .exits(2)
+        .says("nowhere to live")
+        .never_says("LUCIDA_NO_LEDGER");
+
+    run(homeless().args(["generate", "x", "--provider", "comfyui", "--dry-run"])).exits(0);
+}
+
 // --- the render ledger ------------------------------------------------------
 //
 // Checked out of a real process because the ledger's location is resolved at
@@ -646,6 +761,75 @@ fn a_dry_run_still_refuses_what_a_real_run_would() {
 fn ops_reports_an_empty_ledger() {
     let sandbox = Sandbox::new("ops-empty");
     run(lucida(&sandbox).arg("ops")).says("No video renders are waiting");
+}
+
+#[test]
+fn ops_names_the_provider_that_started_each_render() {
+    let sandbox = Sandbox::new("ops-provider");
+    sandbox.write_config("");
+    let at = 1_700_000_000;
+    let started = |provider: Option<&str>, operation: &str| {
+        let mut entry = serde_json::json!({
+            "at": at, "kind": "video", "status": "started",
+            "model": "m", "prompt": "p", "operation": operation,
+        });
+        if let Some(provider) = provider {
+            entry["provider"] = provider.into();
+        }
+        format!("{entry}\n")
+    };
+    let runway = "4f1a2b3c-0000-4000-8000-000000000000";
+    let legacy = "5f1a2b3c-0000-4000-8000-000000000000";
+    let failed = "6f1a2b3c-0000-4000-8000-000000000000";
+    let ledger = [
+        started(Some("runway"), runway),
+        // Before the provider was recorded: no field, so the bare command.
+        started(None, legacy),
+        // Retired by a terminal failure: must not be listed at all.
+        started(Some("runway"), failed),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "at": at + 1, "kind": "video", "status": "failed",
+                "provider": "runway", "operation": failed, "error": "moderation",
+            })
+        ),
+    ]
+    .concat();
+    fs::write(sandbox.config_file().with_file_name("renders.jsonl"), ledger).unwrap();
+
+    let ops = run(lucida(&sandbox).arg("ops"));
+    ops.says(&format!("lucida check --provider runway {runway}"))
+        .says(&format!("lucida check {legacy}"))
+        .never_says(&format!("--provider runway {legacy}"))
+        .never_says(failed);
+}
+
+/// An image whose wait was abandoned after it was billed is spend `history`
+/// counts and a render `ops` never lists: there is nothing to collect.
+#[test]
+fn an_abandoned_image_is_counted_and_never_listed() {
+    let sandbox = Sandbox::new("ledger-abandoned");
+    sandbox.write_config("");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let entry = serde_json::json!({
+        "at": now, "kind": "image", "status": "abandoned", "provider": "runway",
+        "model": "gen4_image", "prompt": "p", "handle": "img-7", "estimated_usd": 0.08,
+        "error": "gave up after 10 minutes",
+    });
+    fs::write(sandbox.config_file().with_file_name("renders.jsonl"), format!("{entry}\n")).unwrap();
+
+    let history = run(lucida(&sandbox).args(["--json", "history"]));
+    let document: serde_json::Value = serde_json::from_str(history.stdout.trim()).unwrap();
+    assert_eq!(document["estimated_usd_24h"], 0.08, "{document}");
+
+    run(lucida(&sandbox).arg("history")).says("abandoned").says("img-7");
+    run(lucida(&sandbox).arg("ops"))
+        .says("No video renders are waiting")
+        .never_says("img-7");
 }
 
 #[test]

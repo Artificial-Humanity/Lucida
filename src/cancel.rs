@@ -66,11 +66,24 @@ thread_local! {
 /// Restores the previous token on the way out rather than clearing it, so this
 /// nests. Nothing nests today; a version that clobbered would be a trap for the
 /// first thing that did.
+///
+/// The restore happens in a drop guard, so it runs when `work` unwinds as well
+/// as when it returns. It used to be a plain statement after `work()`, which
+/// was safe only because the MCP worker catches panics *inside* this call: had
+/// the catch ever moved outside it, a panicking render would have left its
+/// token installed on a pooled thread, and a cancelled one would have cancelled
+/// the next request that thread picked up before it had done anything.
 pub fn with<T>(token: Token, work: impl FnOnce() -> T) -> T {
-    let previous = CURRENT.with(|current| current.replace(Some(token)));
-    let outcome = work();
-    CURRENT.with(|current| *current.borrow_mut() = previous);
-    outcome
+    struct Restore(Option<Token>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CURRENT.with(|current| *current.borrow_mut() = previous);
+        }
+    }
+
+    let _restore = Restore(CURRENT.with(|current| current.replace(Some(token))));
+    work()
 }
 
 /// Whether the work on this thread has been cancelled. False on any thread that
@@ -84,9 +97,13 @@ pub fn cancelled() -> bool {
     })
 }
 
-/// Stops the work if it has been cancelled. Call between polls, never between
-/// a submit and its first poll — the render exists by then, and abandoning it
-/// without reporting the id would lose something already paid for.
+/// Stops the work if it has been cancelled.
+///
+/// Its message cannot name a render, because it does not know one. So once a
+/// submit has succeeded, a poll loop must not return this error bare: the render
+/// exists and is paid for, and abandoning it without reporting its id or
+/// polling URL loses something already billed. Such a loop adds the id to the
+/// error on the way out, the way its deadline error already does.
 pub fn check() -> Result<()> {
     if cancelled() {
         bail!(
@@ -144,6 +161,23 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         handle.cancel();
         assert!(worker.join().unwrap(), "the worker never saw the cancellation");
+    }
+
+    /// The same, when the work unwinds rather than returns. Caught outside
+    /// `with` deliberately: that is the arrangement the drop guard exists for,
+    /// and the one where a plain restore after `work()` never ran.
+    #[test]
+    fn the_token_does_not_outlive_work_that_panicked() {
+        let token = Token::new();
+        token.cancel();
+        let unwound = std::panic::catch_unwind(|| {
+            with(token, || {
+                assert!(cancelled());
+                panic!("deliberate");
+            })
+        });
+        assert!(unwound.is_err());
+        assert!(!cancelled(), "a panicking request left its token on the thread");
     }
 
     /// Leaving `with` must not leave the token behind for whatever the thread

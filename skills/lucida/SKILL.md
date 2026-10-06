@@ -206,7 +206,9 @@ silent substitution. The probe says which.
 there is one shape to parse either way. The exit code distinguishes four
 outcomes: `0` done, `1` something went wrong, `2` refused before anything was
 spent, `3` still working. **Do not retry a 2** — it is an answer rather than a
-failure, and the message names what to do instead.
+failure, and the message names what to do instead. A `lucida video` whose wait
+ran out also exits `3`: the render is still running and already billed, so
+collect it with `lucida check --provider <p> <operation>` — do not run it again.
 
 ## When credentials fail
 

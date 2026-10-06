@@ -39,7 +39,7 @@
 use crate::provider::{
     AspectSupport, DurationSupport, Provenance, VideoCapabilities, VideoProvider,
 };
-use crate::video::{VideoRequest, VideoStatus};
+use crate::video::{VideoRequest, VideoStatus, terminal};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -303,7 +303,8 @@ impl VideoProvider for Client {
             }
             "failed" => {
                 let reason = task["task_status_msg"].as_str().unwrap_or("no reason given");
-                bail!("the render failed: {reason}");
+                // Kling's own terminal state, not an inference from silence.
+                Err(terminal(format!("the render failed: {reason}")))
             }
             // submitted, processing — and anything unrecognised, which must read
             // as in-flight rather than as finished.
@@ -526,5 +527,31 @@ mod tests {
         }
         assert!(!is_kling_model("veo-3.1-fast-generate-preview"));
         assert!(!is_kling_model("gen4.5"));
+    }
+
+    /// See the matching Runway test: only the provider's own `failed` retires an
+    /// operation from the ledger; an error response does not.
+    #[test]
+    fn a_failed_task_is_a_terminal_failure_and_an_error_response_is_not() {
+        let server = serve(vec![Reply::json(
+            r#"{"code":0,"data":{"task_status":"failed","task_status_msg":"risk control"}}"#,
+        )]);
+        let error = wired(&server).poll("915468728228253726").err().expect("must be an error");
+        let failure = error
+            .downcast_ref::<crate::video::TerminalFailure>()
+            .unwrap_or_else(|| panic!("`failed` was not marked terminal: {error:#}"));
+        assert!(failure.0.contains("risk control"), "{}", failure.0);
+        server.finish();
+
+        let server = serve(vec![Reply::status(
+            401,
+            r#"{"code":1001,"message":"invalid token","request_id":"abc"}"#,
+        )]);
+        let error = wired(&server).poll("915468728228253726").err().expect("must be an error");
+        assert!(
+            error.downcast_ref::<crate::video::TerminalFailure>().is_none(),
+            "an error response retired the operation: {error:#}"
+        );
+        server.finish();
     }
 }

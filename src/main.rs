@@ -147,13 +147,26 @@ struct ImageOptions {
     ///
     /// Spelled in full because `-n` already means `--negative` here, and
     /// re-using it would break every existing caller to save two keystrokes.
-    #[arg(long, default_value_t = 1, value_name = "N")]
+    ///
+    /// At least 1: a `--count 0` used to succeed having rendered nothing, which
+    /// a script reads as a batch that worked.
+    #[arg(long, default_value_t = 1, value_name = "N", value_parser = at_least_one)]
     count: usize,
 
     /// Print what would be sent — provider, model, every resolved parameter and
     /// the estimated cost — and stop without rendering.
     #[arg(long)]
     dry_run: bool,
+}
+
+/// `--count`'s parser. clap's `range` exists for the fixed-width integers and not
+/// `usize`, and the count is a `usize` everywhere it is used.
+fn at_least_one(text: &str) -> std::result::Result<usize, String> {
+    match text.parse::<usize>() {
+        Ok(0) => Err("must be at least 1; 0 would render nothing".into()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("`{text}` is not a whole number")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -499,7 +512,13 @@ fn run(cli: Cli) -> Result<i32> {
                 Some(name) => provider::VideoBackend::parse(name)?,
                 None => provider::infer_video_backend_from_operation(&operation),
             };
-            match open_video(backend)?.poll(&operation)? {
+            let polled = open_video(backend)?.poll(&operation);
+            if let Err(error) = &polled {
+                // A render the provider says is over leaves `lucida ops`; any
+                // other failure leaves it there to be asked about again.
+                ledger::note_failure(backend.name(), &operation, error);
+            }
+            match polled? {
                 video::VideoStatus::Pending => {
                     // Its own exit code. This used to be 0 with nothing on
                     // stdout, which a polling script cannot tell apart from a
@@ -507,12 +526,7 @@ fn run(cli: Cli) -> Result<i32> {
                     // it either spins forever or abandons something already paid
                     // for.
                     eprintln!("Still rendering. Try again in half a minute.");
-                    out::emit(serde_json::json!({
-                        "ok": true,
-                        "status": "pending",
-                        "operation": operation,
-                        "exit_code": out::PENDING,
-                    }));
+                    out::emit(pending_document(backend.name(), &operation));
                     Ok(out::PENDING)
                 }
                 video::VideoStatus::Done(bytes) => {
@@ -525,7 +539,7 @@ fn run(cli: Cli) -> Result<i32> {
                     // Retires the operation from `lucida ops`, wherever it was
                     // started from — the outstanding list is derived from the
                     // log rather than stored, so nothing has to be told.
-                    ledger::video_done(&operation, &written.to_string_lossy());
+                    ledger::video_done(backend.name(), &operation, &written.to_string_lossy());
                     if out::json() {
                         out::emit(serde_json::json!({
                             "ok": true,
@@ -619,7 +633,7 @@ fn run(cli: Cli) -> Result<i32> {
             // before the render rather than after it — this is where a wrong
             // parameter is expensive rather than merely annoying.
             let price = spend::video_price(backend, &resolved, request.duration);
-            spend::check(price, "video render")?;
+            let reservation = spend::check(price, "video render")?;
 
             // After the capability and budget checks, so a dry run reports the
             // same refusals a real one would, and before any client exists, so
@@ -653,11 +667,15 @@ fn run(cli: Cli) -> Result<i32> {
             // deadline message ever mentioned it.
             let operation = client.start(&request)?;
             ledger::video_started(
+                backend.name(),
                 &resolved,
                 &request.prompt,
                 &operation,
                 price.against_budget(),
             );
+            // The started entry carries the spend, so the hold can go — before
+            // the wait, which can run for minutes.
+            drop(reservation);
             eprintln!("{}", video::resume_notice(&operation));
 
             // The shape the MCP surface has had since it existed — start, hand
@@ -682,14 +700,27 @@ fn run(cli: Cli) -> Result<i32> {
                 return Ok(out::OK);
             }
 
-            let bytes = await_video(client.as_ref(), &operation)?;
+            // A wait that runs out is not a failure: the render is still going
+            // and already billed, so it leaves the ledger as it is and exits 3.
+            let waited = await_video(client.as_ref(), backend.name(), &operation, Pacing::DEFAULT)
+                .inspect_err(|error| {
+                    ledger::note_failure(backend.name(), &operation, error);
+                })?;
+            let bytes = match waited {
+                Waited::Done(bytes) => bytes,
+                Waited::StillRunning => {
+                    eprintln!("{}", still_running_notice(backend.name(), &operation));
+                    out::emit(pending_document(backend.name(), &operation));
+                    return Ok(out::PENDING);
+                }
+            };
             let written = write_image(correct_extension(&out, "video/mp4"), &bytes)?;
             eprintln!(
                 "Wrote {} ({:.1} MB)",
                 written.display(),
                 bytes.len() as f64 / 1_048_576.0
             );
-            ledger::video_done(&operation, &written.to_string_lossy());
+            ledger::video_done(backend.name(), &operation, &written.to_string_lossy());
             if out::json() {
                 out::emit(serde_json::json!({
                     "ok": true,
@@ -748,13 +779,56 @@ fn show_operations() -> Result<()> {
     for entry in &open {
         let operation = entry["operation"].as_str().unwrap_or("?");
         println!(
-            "  {}  {}\n    {}\n    lucida check {operation}\n",
+            "  {}  {}\n    {}\n    {}\n",
             clock::stamp(entry["at"].as_i64().unwrap_or(0)),
             entry["model"].as_str().unwrap_or("?"),
             truncate(entry["prompt"].as_str().unwrap_or(""), 68),
+            check_command(entry, operation),
         );
     }
     Ok(())
+}
+
+/// The command that collects a render, naming the provider that started it when
+/// the ledger knows. An entry from before the ledger recorded one gets the bare
+/// form, which infers the provider from the id.
+fn check_command(entry: &serde_json::Value, operation: &str) -> String {
+    match ledger::recorded_provider(entry) {
+        Some(provider) => check_command_for(provider, operation),
+        None => format!("lucida check {operation}"),
+    }
+}
+
+/// [`check_command`] when the provider is known for certain, as it is for a
+/// render this process started.
+fn check_command_for(provider: &str, operation: &str) -> String {
+    format!("lucida check --provider {provider} {operation}")
+}
+
+/// The `--json` document for a render that is still running. One shape for
+/// `lucida check` and for a wait that ran out, so a wrapper polling either
+/// parses the same thing — and carries the provider, because the id alone does
+/// not always say which one to ask.
+fn pending_document(provider: &str, operation: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "status": "pending",
+        "provider": provider,
+        "operation": operation,
+        "exit_code": out::PENDING,
+    })
+}
+
+/// What a wait that ran out says on stderr. The second sentence is the one
+/// that matters: the exit used to be 1, which a wrapper retries, and a retry
+/// starts a second render and pays for it while the first is still running.
+fn still_running_notice(provider: &str, operation: &str) -> String {
+    format!(
+        "The render is still running; the wait ran out, not the render. It is \
+         already billed, so do not start another.\n\
+         Collect it later with: {}",
+        check_command_for(provider, operation)
+    )
 }
 
 fn show_history(count: usize) -> Result<()> {
@@ -772,6 +846,13 @@ fn show_history(count: usize) -> Result<()> {
             "entries": recent,
             "estimated_usd_24h": spend::spent_recently(),
             "budget_usd": spend::budget(),
+            // Beside `budget_usd` rather than folded into it, because that
+            // field is `null` both for no budget and for one that cannot be
+            // read, and the two mean opposite things: the first refuses
+            // nothing, the second refuses every paid render. This is non-null
+            // exactly when the setting is there and unreadable, worded as
+            // `lucida config` words it.
+            "budget_problem": spend::budget_setting().problem(),
             "exit_code": out::OK,
         }));
         return Ok(());
@@ -795,6 +876,7 @@ fn show_history(count: usize) -> Result<()> {
             entry["path"]
                 .as_str()
                 .or_else(|| entry["operation"].as_str())
+                .or_else(|| entry["handle"].as_str())
                 .unwrap_or("?"),
         );
         let prompt = entry["prompt"].as_str().unwrap_or("");
@@ -810,9 +892,14 @@ fn show_history(count: usize) -> Result<()> {
     let spent = spend::spent_recently();
     if spent > 0.0 {
         print!("\nEstimated spend in the last 24 hours: ${spent:.2}");
-        match spend::budget() {
-            Some(budget) => println!(" of a ${budget:.2} LUCIDA_BUDGET"),
-            None => println!(" (no LUCIDA_BUDGET set)"),
+        match spend::budget_setting() {
+            spend::Budget::Cap(budget) => println!(" of a ${budget:.2} LUCIDA_BUDGET"),
+            spend::Budget::Unset => println!(" (no LUCIDA_BUDGET set)"),
+            // Not "no budget": an unreadable one refuses every paid render.
+            spend::Budget::Unreadable(raw) => println!(
+                " (LUCIDA_BUDGET is `{raw}`, which is not a number — paid renders \
+                 are refused until it is fixed)"
+            ),
         }
     }
     Ok(())
@@ -977,6 +1064,14 @@ fn show_config() {
         for name in &unrecognised {
             println!("  {name}  (ignored — check the spelling)");
         }
+    }
+
+    // The other way a setting can be present and not do what it says. Flagged
+    // here because a budget that cannot be read refuses every paid render, and
+    // this is where someone looks to find out why.
+    if let Some(problem) = spend::budget_setting().problem() {
+        println!("\nSet, but not a value Lucida can use:");
+        println!("  LUCIDA_BUDGET  ({problem} — paid renders are refused until it is fixed)");
     }
 
     if config::source().is_none() {
@@ -1298,6 +1393,32 @@ fn resolve_video_model(backend: provider::VideoBackend, model: &str) -> String {
     }
 }
 
+/// How [`await_video`] paces itself. A value rather than constants so a test
+/// can wait for milliseconds instead of a quarter of an hour.
+#[derive(Clone, Copy)]
+struct Pacing {
+    deadline: std::time::Duration,
+    first_interval: std::time::Duration,
+    max_interval: std::time::Duration,
+}
+
+impl Pacing {
+    const DEFAULT: Pacing = Pacing {
+        deadline: std::time::Duration::from_secs(900),
+        first_interval: std::time::Duration::from_secs(5),
+        max_interval: std::time::Duration::from_secs(30),
+    };
+}
+
+/// How a blocking wait ended, when it did not fail.
+#[derive(Debug)]
+enum Waited {
+    Done(Vec<u8>),
+    /// The deadline passed with the render still running. Not an error: the
+    /// provider has not said it failed, and it is billed either way.
+    StillRunning,
+}
+
 /// Polls a render to completion, for the CLI's blocking path.
 ///
 /// Lives here rather than on the trait because the waiting is a *front-end*
@@ -1305,30 +1426,51 @@ fn resolve_video_model(backend: provider::VideoBackend, model: &str) -> String {
 /// a provider that had to implement both would be implementing a policy it does
 /// not own. Both providers get the same backoff, the same deadline and the same
 /// cancellation check this way, rather than each reinventing them.
-fn await_video(client: &dyn provider::VideoProvider, operation: &str) -> Result<Vec<u8>> {
+///
+/// Running out of time is [`Waited::StillRunning`] and not an `Err`. It was an
+/// error, exit 1, while the render was still going and billed — and a wrapper
+/// that retries on 1 then paid for the same video twice.
+fn await_video(
+    client: &dyn provider::VideoProvider,
+    provider: &str,
+    operation: &str,
+    pacing: Pacing,
+) -> Result<Waited> {
     let started = std::time::Instant::now();
-    let deadline = std::time::Duration::from_secs(900);
-    let mut interval = std::time::Duration::from_secs(5);
+    let mut interval = pacing.first_interval;
 
     loop {
         cancel::check().map_err(|e| {
-            anyhow::anyhow!("{e}\n\nCollect it later with: lucida check {operation}")
+            anyhow::anyhow!(
+                "{e}\n\nCollect it later with: {}",
+                check_command_for(provider, operation)
+            )
         })?;
 
-        if started.elapsed() > deadline {
-            anyhow::bail!(
-                "gave up after {} minutes; the render may still finish. \
-                 Poll it with: lucida check {operation}",
-                deadline.as_secs() / 60
-            );
+        if started.elapsed() > pacing.deadline {
+            return Ok(Waited::StillRunning);
         }
 
         std::thread::sleep(interval);
-        interval = (interval * 2).min(std::time::Duration::from_secs(30));
+        interval = (interval * 2).min(pacing.max_interval);
 
-        if let video::VideoStatus::Done(bytes) = client.poll(operation)? {
+        let polled = client.poll(operation).map_err(|error| {
+            // A failure the provider reported as final has nothing left to
+            // collect, and it must keep its type for `note_failure`. Anything
+            // else — a dropped connection, a 5xx — says nothing about the
+            // render, which is still billed and may still finish.
+            if error.downcast_ref::<video::TerminalFailure>().is_some() {
+                error
+            } else {
+                anyhow::anyhow!(
+                    "{error:#}\n\nThe render may still be running. Ask again with: {}",
+                    check_command_for(provider, operation)
+                )
+            }
+        })?;
+        if let video::VideoStatus::Done(bytes) = polled {
             eprintln!("Render finished in {}s.", started.elapsed().as_secs());
-            return Ok(bytes);
+            return Ok(Waited::Done(bytes));
         }
 
         eprintln!("  still rendering ({}s elapsed)…", started.elapsed().as_secs());
@@ -1541,8 +1683,13 @@ fn execute(
     // per render and is not one — every call re-reads the same ledger, so all of
     // them ask "can I afford one more?" and all of them say yes. Measured: three
     // images at $0.134 went through a $0.20 budget and rendered all three.
-    let price = spend::price_for(backend, &request.model);
-    spend::check_batch(price, count, "render")?;
+    //
+    // The reservation is held for the whole batch, released when this function
+    // returns — after the last image's ledger entry, or on the first failure.
+    // Each image's entry lands while the batch's hold is still up, so for that
+    // moment it counts twice; nothing in a CLI process checks again meanwhile.
+    let price = spend::price_for(backend, &request.model, request.size);
+    let _reservation = spend::check_batch(price, count, "render")?;
 
     // A pinned seed asks for one specific image; a batch asks for several
     // different ones. Together they are a contradiction that renders the same
@@ -1579,11 +1726,9 @@ fn execute(
         return Ok(());
     }
 
-    let mut written = Vec::new();
-    for n in 1..=count {
-        let destination = numbered(&out, n, count);
-        written.push(render_one(&request, backend, caps, price, destination)?);
-    }
+    let written = render_batch(&out, count, |destination| {
+        render_one(&request, backend, caps, price, destination)
+    })?;
 
     if out::json() {
         out::emit(serde_json::json!({
@@ -1599,6 +1744,33 @@ fn execute(
         }
     }
     Ok(())
+}
+
+/// Runs `render` once per image and collects what it returns.
+///
+/// A failure at image k is an error that names images 1..k-1, because those were
+/// written — and, on a paid provider, billed — and nothing else would ever print
+/// their paths: stdout is only reached on success.
+fn render_batch(
+    out: &Path,
+    count: usize,
+    mut render: impl FnMut(PathBuf) -> Result<serde_json::Value>,
+) -> Result<Vec<serde_json::Value>> {
+    let mut written = Vec::new();
+    for n in 1..=count {
+        match render(numbered(out, n, count)) {
+            Ok(image) => written.push(image),
+            Err(error) if written.is_empty() => return Err(error),
+            Err(error) => {
+                let paths = written
+                    .iter()
+                    .map(|image| image["path"].as_str().unwrap_or_default().to_string())
+                    .collect();
+                return Err(error.context(out::Written(paths)));
+            }
+        }
+    }
+    Ok(written)
 }
 
 /// `image.png` → `image-2.png`, but only when there is more than one.
@@ -1635,7 +1807,15 @@ fn render_one(
     };
     eprintln!("{verb} via {}…", caps.provider);
 
-    let image = provider.generate(&request)?;
+    let image = generate_billed(provider.as_ref(), &request, |abandoned| {
+        ledger::abandoned_image(
+            caps.provider,
+            &request.model,
+            &request.prompt,
+            abandoned,
+            price.against_budget(),
+        );
+    })?;
 
     let destination = correct_extension(&out, &image.mime_type);
     if destination != out {
@@ -1646,7 +1826,17 @@ fn render_one(
             out.display()
         );
     }
-    let written = write_image(&destination, &image.bytes)?;
+    let written = write_billed(&destination, &image.bytes, |path, unsaved| {
+        ledger::image(
+            caps.provider,
+            &request.model,
+            &request.prompt,
+            path,
+            image.seed,
+            price.against_budget(),
+            unsaved,
+        );
+    })?;
 
     if let Some(commentary) = &image.commentary
         && !commentary.is_empty()
@@ -1683,14 +1873,6 @@ fn render_one(
     if price != spend::Price::Free {
         eprintln!("Cost: {}.", price.describe());
     }
-    ledger::image(
-        caps.provider,
-        &request.model,
-        &request.prompt,
-        &written.to_string_lossy(),
-        image.seed,
-        price.against_budget(),
-    );
 
     // Returned rather than printed, so a batch can be reported as one document
     // and a single render still gets its path on stdout alone — which is what
@@ -1976,6 +2158,53 @@ fn staging_path(path: &Path) -> PathBuf {
         ".{name}.lucida-{}-{nonce}",
         std::process::id()
     ))
+}
+
+/// Asks `provider` for an image, and hands `record` the marker when the
+/// provider billed for one it never returned.
+///
+/// The twin of [`write_billed`], one step earlier. A BFL or Runway wait that is
+/// cancelled or runs out comes back as an error after the submit was billed,
+/// and both image call sites used to let it go by `?` with no ledger entry — so
+/// the budget never counted it. Routing both through here means the marker
+/// cannot be missed at one of them. Only a [`provider::Abandoned`] error is
+/// passed on; every other error, a failed submit among them, records nothing.
+pub fn generate_billed(
+    provider: &dyn ImageProvider,
+    request: &ImageRequest,
+    record: impl FnOnce(&provider::Abandoned),
+) -> Result<provider::GeneratedImage> {
+    provider.generate(request).inspect_err(|error| {
+        if let Some(abandoned) = error.downcast_ref::<provider::Abandoned>() {
+            record(abandoned);
+        }
+    })
+}
+
+/// Writes a render the provider has already billed, recording it whether or not
+/// the write succeeds.
+///
+/// `record` receives the path written, or the path intended and the write's
+/// error. The ledger call used to come after a successful write, so a full disk
+/// or an unwritable path after a paid render left no entry, and the budget —
+/// summed from the ledger — never counted money that was spent. Routing both
+/// image call sites through here makes the record unskippable: there is no way
+/// to get the written path without passing it.
+pub fn write_billed(
+    destination: &Path,
+    bytes: &[u8],
+    record: impl FnOnce(&str, Option<&anyhow::Error>),
+) -> Result<PathBuf> {
+    match write_image(destination, bytes) {
+        Ok(written) => {
+            record(&written.to_string_lossy(), None);
+            Ok(written)
+        }
+        Err(error) => {
+            record(&destination.to_string_lossy(), Some(&error));
+            Err(error)
+        }
+    }
 }
 
 /// Writes an image to `path`, creating parent directories, and returns the
@@ -2316,6 +2545,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A render the provider has returned has been billed, so it is recorded
+    /// whether or not the file lands. The ledger call used to follow a
+    /// successful write, and a failed one left a paid render uncounted.
+    #[test]
+    fn a_billed_image_is_recorded_even_when_the_write_fails() {
+        let dir = std::env::temp_dir().join(format!("lucida-billed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A regular file where a directory has to be: the write cannot succeed.
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"").unwrap();
+        let unwritable = blocker.join("cat.png");
+
+        let mut recorded = None;
+        let result = write_billed(&unwritable, b"paid for", |path, unsaved| {
+            recorded = Some((path.to_string(), unsaved.map(|e| format!("{e:#}"))));
+        });
+        assert!(result.is_err(), "the write was expected to fail");
+        let (path, unsaved) = recorded.expect("a failed write recorded nothing");
+        assert_eq!(path, unwritable.to_string_lossy());
+        assert!(unsaved.is_some(), "recorded as saved when it was not");
+
+        let mut recorded = None;
+        let written = write_billed(&dir.join("cat.png"), b"paid for", |path, unsaved| {
+            recorded = Some((path.to_string(), unsaved.is_some()));
+        })
+        .unwrap();
+        assert_eq!(recorded, Some((written.to_string_lossy().into_owned(), false)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A single render keeps the name it was given — that is what `--out` means,
     /// and suffixing it would break every existing caller. Only a batch numbers.
     #[test]
@@ -2510,5 +2770,115 @@ mod tests {
         assert_eq!(image_dimensions(&[0x89, b'P', b'N', b'G'], "image/png"), None);
         assert_eq!(image_dimensions(&[0xFF, 0xD8], "image/jpeg"), None);
         assert_eq!(image_dimensions(&[0; 64], "image/webp"), None);
+    }
+
+    /// A video provider that answers every poll from a script, then keeps
+    /// saying "pending" — a render that never finishes.
+    struct Scripted(std::sync::Mutex<Vec<Result<video::VideoStatus>>>);
+
+    impl provider::VideoProvider for Scripted {
+        fn start(&self, _: &video::VideoRequest) -> Result<String> {
+            unreachable!("a wait never starts a render")
+        }
+        fn poll(&self, _: &str) -> Result<video::VideoStatus> {
+            let mut replies = self.0.lock().unwrap();
+            if replies.is_empty() {
+                Ok(video::VideoStatus::Pending)
+            } else {
+                replies.remove(0)
+            }
+        }
+    }
+
+    fn quick(deadline_ms: u64) -> Pacing {
+        let ms = std::time::Duration::from_millis;
+        Pacing { deadline: ms(deadline_ms), first_interval: ms(5), max_interval: ms(10) }
+    }
+
+    /// The wait running out is an outcome, not an error: it exited 1 while the
+    /// render was still going and billed, and a wrapper that retries on 1 paid
+    /// twice. Returning `Ok` is also what keeps the ledger entry, because the
+    /// caller only retires an operation from an `Err`.
+    #[test]
+    fn a_wait_that_runs_out_is_pending_and_not_an_error() {
+        let client = Scripted(Default::default());
+        let waited = await_video(&client, "kling", "op-1", quick(40)).expect("not an error");
+        assert!(matches!(waited, Waited::StillRunning));
+    }
+
+    #[test]
+    fn a_render_that_finishes_in_time_is_returned() {
+        let client = Scripted(std::sync::Mutex::new(vec![
+            Ok(video::VideoStatus::Pending),
+            Ok(video::VideoStatus::Done(vec![1, 2, 3])),
+        ]));
+        match await_video(&client, "kling", "op-1", quick(5_000)).unwrap() {
+            Waited::Done(bytes) => assert_eq!(bytes, vec![1, 2, 3]),
+            Waited::StillRunning => panic!("it finished, the wait said it had not"),
+        }
+    }
+
+    /// Both the document and the prose carry the id and the provider, and the
+    /// document is the one `lucida check` emits.
+    #[test]
+    fn a_wait_that_ran_out_names_the_render_and_its_provider() {
+        let document = pending_document("kling", "op-1");
+        assert_eq!(document["status"], "pending");
+        assert_eq!(document["operation"], "op-1");
+        assert_eq!(document["provider"], "kling");
+        assert_eq!(document["exit_code"], out::PENDING);
+        assert_eq!(document["ok"], true);
+
+        let notice = still_running_notice("kling", "op-1");
+        assert!(notice.contains("lucida check --provider kling op-1"), "{notice}");
+        assert!(notice.contains("do not start another"), "{notice}");
+    }
+
+    /// A poll that errors keeps exit 1, and its message says how to ask again —
+    /// except a failure the provider called final, which has nothing to collect
+    /// and must stay the type the ledger looks for.
+    #[test]
+    fn a_poll_error_says_how_to_ask_again() {
+        let client = Scripted(std::sync::Mutex::new(vec![Err(anyhow::anyhow!("502 from the gateway"))]));
+        let error = await_video(&client, "runway", "op-2", quick(5_000)).expect_err("an error");
+        let text = format!("{error:#}");
+        assert!(text.contains("502 from the gateway"), "{text}");
+        assert!(text.contains("lucida check --provider runway op-2"), "{text}");
+        assert_eq!(out::code_for(&error), out::ERROR);
+
+        let client = Scripted(std::sync::Mutex::new(vec![Err(video::terminal("moderation"))]));
+        let error = await_video(&client, "runway", "op-2", quick(5_000)).expect_err("an error");
+        assert!(error.downcast_ref::<video::TerminalFailure>().is_some(), "retired renders must stay retirable");
+    }
+
+    /// Images 1..k-1 of a batch that failed at k were written (and, on a paid
+    /// provider, billed), and the error is the only thing that reaches the
+    /// caller.
+    #[test]
+    fn a_batch_that_fails_partway_reports_what_it_wrote() {
+        let mut calls = 0;
+        let error = render_batch(Path::new("out.png"), 4, |destination| {
+            calls += 1;
+            if calls == 3 {
+                anyhow::bail!("the provider said no");
+            }
+            Ok(serde_json::json!({ "path": destination.to_string_lossy() }))
+        })
+        .expect_err("the third image fails");
+
+        assert_eq!(out::written_before(&error).unwrap(), ["out-1.png", "out-2.png"]);
+        let text = format!("{error:#}");
+        assert!(text.contains("out-1.png") && text.contains("out-2.png"), "{text}");
+        assert!(text.contains("the provider said no"), "{text}");
+        assert_eq!(out::code_for(&error), out::ERROR, "the exit code must not move");
+    }
+
+    /// A first-image failure wrote nothing, so there is nothing to report and
+    /// the error stays exactly as it was.
+    #[test]
+    fn a_batch_that_fails_at_once_adds_nothing() {
+        let error = render_batch(Path::new("out.png"), 2, |_| anyhow::bail!("no key")).unwrap_err();
+        assert!(out::written_before(&error).is_none());
+        assert_eq!(format!("{error:#}"), "no key");
     }
 }

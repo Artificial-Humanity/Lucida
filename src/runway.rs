@@ -46,9 +46,9 @@
 
 use crate::provider::{
     Aspect, AspectSupport, Capabilities, DurationSupport, GeneratedImage, ImageProvider,
-    ImageRequest, MaskSupport, Provenance, VideoCapabilities, VideoProvider,
+    ImageRequest, MaskSupport, Provenance, VideoCapabilities, VideoProvider, abandoned,
 };
-use crate::video::{VideoRequest, VideoStatus};
+use crate::video::{TerminalFailure, VideoRequest, VideoStatus, terminal};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -255,6 +255,9 @@ pub struct Client {
     http: reqwest::blocking::Client,
     /// `API_ROOT` in production; a recorded-response server in tests.
     base: String,
+    /// [`IMAGE_DEADLINE`], except in a test that needs the wait to run out
+    /// without spending ten minutes watching it.
+    image_deadline: Duration,
 }
 
 impl Client {
@@ -286,6 +289,7 @@ impl Client {
             key,
             http,
             base: API_ROOT.to_string(),
+            image_deadline: IMAGE_DEADLINE,
         })
     }
 
@@ -294,6 +298,7 @@ impl Client {
         Self {
             key: "test-key".into(),
             base: base.to_string(),
+            image_deadline: IMAGE_DEADLINE,
             http: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .connect_timeout(crate::retry::CONNECT_TIMEOUT)
@@ -477,8 +482,12 @@ impl ImageProvider for Client {
             .ok_or_else(|| anyhow!("Runway accepted the job but returned no task id: {payload}"))?
             .to_string();
 
+        // Billed from here on, so a download that fails is as abandoned as a
+        // wait that did — the render was paid for either way.
         let url = self.await_task(&id)?;
-        let bytes = self.download(&url, "image")?;
+        let bytes = self
+            .download(&url, "image")
+            .map_err(|error| abandoned(&id, error))?;
         let mime_type = crate::sniff_mime(&bytes).unwrap_or("image/png").to_string();
 
         Ok(GeneratedImage {
@@ -535,22 +544,38 @@ impl Client {
 
     /// Polls an image task until it resolves. The video lane polls from the
     /// caller instead, because a video outlives a session and an image does not.
+    ///
+    /// The task is billed by the time this runs, so every way out of the wait
+    /// is marked [`abandoned`] for the caller to record — except Runway's own
+    /// `FAILED` or `CANCELLED`, a verdict on the render rather than on the
+    /// waiting, which is not known to bill.
     fn await_task(&self, id: &str) -> Result<String> {
         let started = Instant::now();
         let mut interval = Duration::from_millis(500);
+        let billed = |error: anyhow::Error| abandoned(id, error);
         loop {
-            // Between polls only: the render is billed by now, so a cancellation
-            // stops the waiting, not the charge.
-            crate::cancel::check()?;
-            if started.elapsed() > IMAGE_DEADLINE {
-                bail!(
+            // Checked before the first poll as well, so a client that has gone
+            // stops costing a poll at once. The render is billed by now, so a
+            // cancellation stops the waiting, not the charge — and the error
+            // carries the task id, as the deadline's below does. It used to
+            // return `cancel::check`'s bare message, which named nothing.
+            crate::cancel::check().map_err(|e| {
+                billed(anyhow!("{e} Its Runway task id is {id}."))
+            })?;
+            if started.elapsed() >= self.image_deadline {
+                return Err(billed(anyhow!(
                     "gave up after {} minutes. The render may still complete; its \
                      Runway task id is {id}.",
-                    IMAGE_DEADLINE.as_secs() / 60
-                );
+                    self.image_deadline.as_secs() / 60
+                )));
             }
-            if let Task::Done(url) = self.task(id)? {
-                return Ok(url);
+            match self.task(id) {
+                Ok(Task::Done(url)) => return Ok(url),
+                Ok(Task::Pending) => {}
+                Err(error) if error.downcast_ref::<TerminalFailure>().is_some() => {
+                    return Err(error);
+                }
+                Err(error) => return Err(billed(error)),
             }
             std::thread::sleep(interval);
             interval = (interval * 2).min(Duration::from_secs(3));
@@ -581,7 +606,8 @@ impl Client {
                     .as_str()
                     .or_else(|| payload["failureCode"].as_str())
                     .unwrap_or("no reason given");
-                bail!("the render failed: {reason}");
+                // Runway's own terminal states, not an inference from silence.
+                Err(terminal(format!("the render failed: {reason}")))
             }
             // PENDING, RUNNING, THROTTLED — all still in flight.
             _ => Ok(Task::Pending),
@@ -867,6 +893,27 @@ mod tests {
         assert_eq!(requests[3].header("authorization"), None, "the key went to object storage");
     }
 
+    /// A cancellation that lands after the submit has been billed still names
+    /// the task id, the way the deadline error does. It used to return
+    /// `cancel::check`'s bare message, which gave no way to find the render.
+    #[test]
+    fn a_cancellation_after_the_submit_names_the_task_id() {
+        let server = serve(vec![Reply::json(r#"{"id":"img-9"}"#)]);
+        let request = ImageRequest {
+            prompt: "a lighthouse at dusk".into(),
+            model: "gen4_image".into(),
+            ..Default::default()
+        };
+        let token = crate::cancel::Token::new();
+        token.cancel();
+        let error = crate::cancel::with(token, || wired(&server).generate(&request))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(error.contains("img-9"), "must name the task id: {error}");
+        assert_eq!(server.finish().len(), 1, "a cancelled wait must not poll");
+    }
+
     /// A local reference file travels as a data URI — the endpoint takes
     /// `https://`, `runway://` uploads or `data:image/`, and the last needs no
     /// second round trip.
@@ -1103,5 +1150,101 @@ mod tests {
     fn a_rejected_key_says_so() {
         let explained = explain_error(401, r#"{"error":"Unauthorized"}"#);
         assert!(explained.contains("RUNWAY_API_KEY"), "{explained}");
+    }
+
+    /// The ledger retires an operation only on a failure the provider reported
+    /// as final, and recognises it by this type. FAILED and CANCELLED are the
+    /// provider saying so; a rejected poll says nothing about the render.
+    #[test]
+    fn a_failed_task_is_a_terminal_failure_and_a_rejected_poll_is_not() {
+        let id = "4f1a2b3c-0000-4000-8000-000000000000";
+        for state in ["FAILED", "CANCELLED"] {
+            let server = serve(vec![Reply::json(&format!(
+                r#"{{"status":"{state}","failure":"content moderation"}}"#
+            ))]);
+            let error = wired(&server).poll(id).err().expect("a failed task must be an error");
+            let failure = error
+                .downcast_ref::<crate::video::TerminalFailure>()
+                .unwrap_or_else(|| panic!("`{state}` was not marked terminal: {error:#}"));
+            assert!(failure.0.contains("content moderation"), "{}", failure.0);
+            server.finish();
+        }
+
+        let server = serve(vec![Reply::status(401, r#"{"error":"Unauthorized"}"#)]);
+        let error = wired(&server).poll(id).err().expect("a rejected poll must be an error");
+        assert!(
+            error.downcast_ref::<crate::video::TerminalFailure>().is_none(),
+            "a rejected poll retired the operation: {error:#}"
+        );
+        server.finish();
+    }
+
+    /// Renders `request` the way both image call sites do — through
+    /// `generate_billed` — and returns the error with the ledger entries that
+    /// would follow it, built in memory so the suite never writes to the
+    /// machine's real ledger.
+    fn billed_entries(client: &Client, request: &ImageRequest) -> (anyhow::Error, Vec<Value>) {
+        let mut entries = Vec::new();
+        let error = crate::generate_billed(client, request, |abandoned| {
+            entries.push(crate::ledger::abandoned_entry(
+                "runway",
+                &request.model,
+                &request.prompt,
+                abandoned,
+                0.08,
+            ));
+        })
+        .expect_err("the render was meant to fail");
+        (error, entries)
+    }
+
+    fn lighthouse() -> ImageRequest {
+        ImageRequest {
+            prompt: "a lighthouse at dusk".into(),
+            model: "gen4_image".into(),
+            ..Default::default()
+        }
+    }
+
+    /// A wait that runs out after the task was billed leaves exactly one
+    /// `abandoned` entry with the estimate and the task id. It left none, so
+    /// the budget never counted a render that may well have finished.
+    #[test]
+    fn an_image_wait_that_runs_out_is_recorded_as_spend() {
+        let server = serve(vec![Reply::json(r#"{"id":"img-7"}"#)]);
+        let mut client = wired(&server);
+        client.image_deadline = Duration::ZERO;
+
+        let (error, entries) = billed_entries(&client, &lighthouse());
+
+        let message = format!("{error:#}");
+        assert!(message.contains("gave up") && message.contains("img-7"), "{message}");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["status"], crate::ledger::ABANDONED);
+        assert_eq!(entries[0]["estimated_usd"], 0.08);
+        assert_eq!(entries[0]["provider"], "runway");
+        assert_eq!(entries[0]["handle"], "img-7");
+        assert!(entries[0].get("operation").is_none(), "`ops` would list it: {entries:?}");
+        assert_eq!(server.finish().len(), 1, "an expired wait must not poll");
+    }
+
+    /// A submit Runway refused was never billed, and a task Runway itself
+    /// reports as failed is its verdict rather than an abandoned wait — neither
+    /// is counted.
+    #[test]
+    fn a_refused_submit_or_a_failed_task_is_not_recorded_as_spend() {
+        let server = serve(vec![Reply::status(400, r#"{"error":"Invalid asset aspect ratio"}"#)]);
+        let (_, entries) = billed_entries(&wired(&server), &lighthouse());
+        assert!(entries.is_empty(), "an unbilled submit was counted: {entries:?}");
+        server.finish();
+
+        let server = serve(vec![
+            Reply::json(r#"{"id":"img-8"}"#),
+            Reply::json(r#"{"status":"FAILED","failure":"content moderation"}"#),
+        ]);
+        let (error, entries) = billed_entries(&wired(&server), &lighthouse());
+        assert!(format!("{error:#}").contains("content moderation"), "{error:#}");
+        assert!(entries.is_empty(), "a failed task was counted as abandoned: {entries:?}");
+        server.finish();
     }
 }

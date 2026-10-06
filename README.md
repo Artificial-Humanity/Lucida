@@ -268,11 +268,12 @@ The `--json` flag emits a single JSON response object to stdout. Exit codes indi
 | `0` | Success | Operation completed successfully |
 | `1` | Error | Execution failure |
 | `2` | Refused | Pre-flight refusal (unsupported capability or budget limit exceeded) |
-| `3` | Pending | Asynchronous task in progress |
+| `3` | Pending | Asynchronous task in progress: `lucida check`, or `lucida video` when its 15-minute wait runs out with the render still going (already billed — collect it with `lucida check`, do not re-run) |
 
 ### Budget and ledger
 
 * **Budget enforcement:** `LUCIDA_BUDGET` sets a rolling 24-hour spending cap in USD. Requests exceeding the cap fail immediately with exit code `2`.
+  The value must be a plain number (`5`, `2.50`). One that is not (`$5`, `5 USD`), or a budget set together with `LUCIDA_NO_LEDGER` or where the ledger has nowhere to live (no home or config directory — the ledger is where spend is counted), refuses every paid render with exit code `2` rather than being ignored. Free renders are never refused. The cap is enforced across concurrent MCP calls in one process, but not between separate `lucida` processes.
 * **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance.
 * **Ledger tracking:** Completed and pending operations are recorded to a JSON ledger adjacent to the configuration file. Inspected via `lucida history` or `lucida ops`. Set `LUCIDA_NO_LEDGER=1` to disable recording.
 
