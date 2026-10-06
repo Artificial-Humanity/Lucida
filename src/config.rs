@@ -345,11 +345,8 @@ pub fn source() -> Option<&'static Path> {
 /// `LUCIDA_CONFIG` names a file directly and wins outright, which is what makes
 /// the whole thing testable and lets a launcher point at a managed location.
 pub fn search_paths() -> Vec<PathBuf> {
-    if let Some(explicit) = std::env::var("LUCIDA_CONFIG")
-        .ok()
-        .filter(|p| !p.trim().is_empty())
-    {
-        return vec![PathBuf::from(explicit)];
+    if let Some(explicit) = explicit_path(std::env::var("LUCIDA_CONFIG").ok()) {
+        return explicit;
     }
 
     let mut paths = Vec::new();
@@ -388,6 +385,22 @@ pub fn search_paths() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+/// What `LUCIDA_CONFIG` means, given its value: the whole search list, or `None`
+/// where it is unset or blank and the ordinary search applies.
+///
+/// Takes the value rather than reading it, so the rule can be tested without
+/// touching the process environment. The test that used to pin it called
+/// `set_var` on a variable every other test's `search_paths()` also reads;
+/// tests run on parallel threads, so a neighbour could resolve the shared
+/// `OnceLock` to the test's path while it was set. The process-level half —
+/// that the variable really is read, and wins — is in `tests/cli.rs`, where each
+/// run has an environment of its own.
+fn explicit_path(value: Option<String>) -> Option<Vec<PathBuf>> {
+    value
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| vec![PathBuf::from(p)])
 }
 
 /// The preferred path, for messages that tell someone where to put a key.
@@ -503,27 +516,6 @@ fn warn_if_readable_by_others(_path: &Path) {}
 /// using it.
 pub fn write_replacing(path: &Path, body: &str, private: bool) -> Result<()> {
     crate::write_atomically(path, body.as_bytes(), private)
-}
-
-/// Restricts a file to its owner.
-///
-/// Done rather than left to the umask because these files are intended to hold an
-/// API key, and the default umask on most systems leaves them readable by the
-/// whole group.
-#[cfg(unix)]
-pub fn restrict_to_owner(path: &Path) -> Result<()> {
-    // Imported here rather than at the top of the file: this is the only caller
-    // in the module and it does not exist on Windows, so a file-level import
-    // becomes an unused-import error there — which is exactly how CI caught it.
-    use anyhow::Context;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restricting permissions on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-pub fn restrict_to_owner(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 /// A starter file, written by `lucida config --init`.
@@ -942,15 +934,14 @@ mod tests {
 
     #[test]
     fn an_explicit_config_path_wins_outright() {
-        let _env = env_lock();
-        let saved = EnvVars::set(&[(
-            "LUCIDA_CONFIG",
-            Some("/tmp/lucida-test-config.env".as_ref()),
-        )]);
-        let paths = search_paths();
-        drop(saved);
-
-        assert_eq!(paths, vec![PathBuf::from("/tmp/lucida-test-config.env")]);
+        assert_eq!(
+            explicit_path(Some("/tmp/lucida-test-config.env".into())),
+            Some(vec![PathBuf::from("/tmp/lucida-test-config.env")])
+        );
+        // Unset, and exported-but-blank, both fall through to the ordinary
+        // search — the same reading of "empty means absent" that `var` applies.
+        assert_eq!(explicit_path(None), None);
+        assert_eq!(explicit_path(Some("  ".into())), None);
     }
 
     /// Held by every test in this module that changes the process environment.

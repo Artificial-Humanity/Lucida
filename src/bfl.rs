@@ -1161,6 +1161,7 @@ mod tests {
         let error = wired(&server).generate(&request).unwrap_err().to_string();
         assert!(error.contains("out of credits"), "{error}");
         assert!(error.contains("dashboard.bfl.ai"));
+        assert_eq!(server.finish().len(), 1, "a 402 must not be retried or polled");
     }
 
     /// Renders `request` the way both image call sites do — through

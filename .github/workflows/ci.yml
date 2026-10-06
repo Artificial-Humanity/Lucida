@@ -10,6 +10,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read by default, for the reason the `audit` job's comment below gives: this
+# repository's default workflow permissions are outside the repository and
+# unversioned, so a workflow that states the scope it needs does not depend on
+# them. Only `audit` needs more, and it grants itself that below.
+permissions:
+  contents: read
+
 jobs:
   test:
     # All three release platforms, because the bug that prompted this file was
@@ -100,7 +107,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2
+      # Pinned to the commit `v2` resolved to on 2026-10-04, the SHA the comment
+      # above cites as 69366f3. `v2` is a BRANCH of that repository
+      # (refs/heads/v2), so it moves with every push; the same commit is also the
+      # tag `v2.0.0`, which is what the trailing comment names. Following the
+      # branch was a pin in name only, and this is the job that holds
+      # `checks: write`.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ github.token }}
 

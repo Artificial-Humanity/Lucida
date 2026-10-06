@@ -691,29 +691,58 @@ fn writable(dir: &Path, exe: &Path) -> Result<()> {
 /// Written next to the target rather than in a temp directory, so the final step
 /// is a rename within one filesystem — atomic, and with no copy across devices
 /// that could leave a half-written binary at the destination.
+///
+/// The staged file has a name of its own, from the same pid-and-counter scheme
+/// every other atomic write uses. It was once one fixed name, and two updates
+/// running together (two terminals, or an editor integration and a shell) wrote
+/// through the same file: whichever renamed first installed whatever bytes the
+/// other had got to, and the loser then renamed a file that was gone. It is also
+/// removed on every path that fails, which the fixed name never was — a failed
+/// update left a 7 MB dot-file behind for the next one to trip over.
 fn install_over(exe: &Path, dir: &Path, bytes: &[u8]) -> Result<()> {
-    let staged = dir.join(".lucida-update-staged");
-    std::fs::write(&staged, bytes).with_context(|| format!("writing {}", staged.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-            .context("making the new binary executable")?;
+    let staged = crate::staging_path(exe);
+    let result = stage(&staged, bytes).and_then(|()| place(exe, dir, &staged));
+    if result.is_err() {
+        // After a successful rename there is nothing at `staged`, so this only
+        // ever removes a leftover.
+        let _ = std::fs::remove_file(&staged);
     }
+    result
+}
 
+/// Writes the new binary to `staged`, executable, and flushed to disk.
+///
+/// `create_new`, so a staged file that is somehow already there is an error and
+/// not something written through — the thing a shared name made possible.
+fn stage(staged: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    // The mode is ignored where there is none to set.
+    let mut file = crate::create_staged(staged, Some(0o755))
+        .with_context(|| format!("creating {}", staged.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", staged.display()))
+}
+
+/// Renames the staged binary over `exe`. The caller removes `staged` on error.
+fn place(exe: &Path, dir: &Path, staged: &Path) -> Result<()> {
     // Windows refuses to replace a file that is being executed, but it does
     // allow renaming one — so the running binary is moved aside first and the
     // replacement takes its name. The displaced file cannot be deleted while it
-    // runs; it is cleaned up on the next update instead.
+    // runs, and an older Claude session can keep running it long after this
+    // update finishes; so it gets a name of its own, and the next update sweeps
+    // away whichever earlier ones have since been released. One fixed name made
+    // the second update fail: the delete of a still-running file was ignored,
+    // and the rename onto it was then refused as access denied.
     #[cfg(windows)]
     {
-        let displaced = dir.join(".lucida-update-old.exe");
-        let _ = std::fs::remove_file(&displaced);
+        sweep_displaced(dir, None);
+        let displaced = displaced_path(dir, std::process::id(), stamp());
         std::fs::rename(exe, &displaced).with_context(|| {
             format!("moving the running binary aside: {}", exe.display())
         })?;
-        if let Err(e) = std::fs::rename(&staged, exe) {
+        if let Err(e) = std::fs::rename(staged, exe) {
             // Put it back, so a failure here does not leave the machine with no
             // lucida at all.
             let _ = std::fs::rename(&displaced, exe);
@@ -722,10 +751,71 @@ fn install_over(exe: &Path, dir: &Path, bytes: &[u8]) -> Result<()> {
     }
 
     #[cfg(not(windows))]
-    std::fs::rename(&staged, exe)
-        .with_context(|| format!("installing over {}", exe.display()))?;
+    {
+        let _ = dir;
+        std::fs::rename(staged, exe)
+            .with_context(|| format!("installing over {}", exe.display()))?;
+    }
 
     Ok(())
+}
+
+/// What a displaced binary's name starts and ends with. The fixed name an earlier
+/// version used is `{PREFIX}{SUFFIX}`, so one pattern sweeps both generations.
+// Only the Windows install path displaces a binary, but the naming and the sweep
+// are plain filesystem logic, so they are built — and tested — everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+const DISPLACED_PREFIX: &str = ".lucida-update-old";
+#[cfg_attr(not(windows), allow(dead_code))]
+const DISPLACED_SUFFIX: &str = ".exe";
+
+/// Where the running binary is moved aside to, unique per process and moment.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn displaced_path(dir: &Path, pid: u32, stamp: u128) -> PathBuf {
+    dir.join(format!("{DISPLACED_PREFIX}-{pid}-{stamp}{DISPLACED_SUFFIX}"))
+}
+
+/// Nanoseconds since the epoch, to tell one displaced copy from another even if a
+/// process id is reused.
+#[cfg(windows)]
+fn stamp() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// Whether `name` is a binary some update displaced, of either naming generation.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_displaced(name: &str) -> bool {
+    name.strip_prefix(DISPLACED_PREFIX)
+        .and_then(|rest| rest.strip_suffix(DISPLACED_SUFFIX))
+        .is_some_and(|middle| {
+            // Either nothing (the old fixed name) or `-pid-stamp`; not some other
+            // file that merely begins the same way.
+            middle.is_empty()
+                || middle
+                    .strip_prefix('-')
+                    .is_some_and(|ids| ids.chars().all(|c| c.is_ascii_digit() || c == '-'))
+        })
+}
+
+/// Removes displaced binaries nothing is running any more, best effort.
+///
+/// A copy a session still runs cannot be deleted on Windows; that failure is the
+/// expected case and is ignored, and the file is left for the next update.
+/// `keep` is spared, for a caller that has just made one.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn sweep_displaced(dir: &Path, keep: Option<&Path>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let displaced = entry.file_name().to_str().is_some_and(is_displaced);
+        if displaced && keep != Some(path.as_path()) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Compares dotted versions numerically.
@@ -784,6 +874,105 @@ fn verify(bytes: &[u8], published: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testserver::{Reply, serve};
+
+    /// A directory of its own for a test, removed by the caller.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lucida-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn two_updates_never_stage_at_the_same_path() {
+        let exe = Path::new("/somewhere/lucida");
+        let (a, b) = (crate::staging_path(exe), crate::staging_path(exe));
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), exe.parent(), "staged beside the target, for an atomic rename");
+    }
+
+    #[test]
+    fn an_install_leaves_only_the_new_binary() {
+        let dir = scratch("install-ok");
+        let exe = dir.join("lucida");
+        std::fs::write(&exe, b"old").unwrap();
+        install_over(&exe, &dir, b"new").unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        // Windows keeps the displaced binary beside it; elsewhere nothing else.
+        #[cfg(not(windows))]
+        assert_eq!(names(&dir), ["lucida"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "the new binary must be executable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Unix only: Windows would move the occupied name aside and succeed.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_install_removes_what_it_staged() {
+        let dir = scratch("install-fail");
+        // A non-empty directory cannot be renamed over, so the last step fails
+        // after the whole binary has been written.
+        let exe = dir.join("lucida");
+        std::fs::create_dir_all(exe.join("occupied")).unwrap();
+        assert!(install_over(&exe, &dir, b"new").is_err());
+        assert_eq!(names(&dir), ["lucida"], "a staged file was left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_displaced_copy_has_a_name_of_its_own() {
+        let dir = Path::new("/bin");
+        assert_ne!(displaced_path(dir, 1, 5), displaced_path(dir, 2, 5));
+        assert_ne!(displaced_path(dir, 1, 5), displaced_path(dir, 1, 6));
+        let name = displaced_path(dir, 1, 5);
+        assert!(is_displaced(name.file_name().unwrap().to_str().unwrap()));
+    }
+
+    #[test]
+    fn only_displaced_binaries_are_recognised() {
+        assert!(is_displaced(".lucida-update-old.exe"), "the fixed name of earlier versions");
+        assert!(is_displaced(".lucida-update-old-4242-1700000000000.exe"));
+        assert!(!is_displaced("lucida.exe"));
+        assert!(!is_displaced(".lucida-update-old-notes.exe"));
+        assert!(!is_displaced(".lucida-update-old-1-2.txt"));
+        assert!(!is_displaced(".lucida-update-probe"));
+    }
+
+    #[test]
+    fn the_sweep_removes_old_displaced_copies_and_nothing_else() {
+        let dir = scratch("sweep");
+        for name in [
+            ".lucida-update-old.exe",
+            ".lucida-update-old-1-1.exe",
+            ".lucida-update-old-2-2.exe",
+            "lucida.exe",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        sweep_displaced(&dir, Some(&dir.join(".lucida-update-old-2-2.exe")));
+        assert_eq!(
+            names(&dir),
+            [".lucida-update-old-2-2.exe", "lucida.exe", "notes.txt"]
+        );
+        // A directory that is not there is not an error.
+        sweep_displaced(&dir.join("absent"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn versions_compare_numerically_not_as_text() {

@@ -528,6 +528,7 @@ mod tests {
         };
         let image = wired(&server).generate(&request).unwrap();
         assert_eq!(image.seed, Some(742048682));
+        assert_eq!(server.finish().len(), 1);
     }
 
     /// A variant spelling is not a URL path: it reaches the `sd3` endpoint and
