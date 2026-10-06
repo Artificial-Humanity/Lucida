@@ -213,7 +213,18 @@ where
         let request: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("skipping unparseable line: {e}");
+                // Dropping the line left the client waiting for an answer that
+                // was never coming, indistinguishable from a server that hung.
+                // JSON-RPC has a reply for exactly this, and because the
+                // request could not be read there is no id to echo: the spec
+                // says to send null.
+                eprintln!("unparseable line: {e}");
+                respond_error(
+                    &out,
+                    &Value::Null,
+                    PARSE_ERROR,
+                    &format!("the line is not valid JSON ({e}); nothing was run"),
+                );
                 continue;
             }
         };
@@ -261,7 +272,7 @@ where
                 respond_error(
                     &out,
                     &id,
-                    -32600,
+                    INVALID_REQUEST,
                     &format!(
                         "request id {id} belongs to a tools/call that has not finished yet. \
                          JSON-RPC ids must be unique among outstanding requests. This call \
@@ -332,14 +343,46 @@ fn respond<W: Write>(out: &Out<W>, id: &Value, result: Result<Value>) {
     match result {
         Ok(result) => write_reply(out, json!({ "jsonrpc": "2.0", "id": id, "result": result })),
         Err(e) => {
-            // -32601 is "method not found", which clients may probe for
-            // (resources/list, prompts/list); everything else is -32603.
-            let message = e.to_string();
-            let code = if message.starts_with("unknown method") { -32601 } else { -32603 };
-            respond_error(out, id, code, &message);
+            // The code comes from the error's type, never from its wording: the
+            // message used to be matched with `starts_with("unknown method")`,
+            // so rewording it would have quietly turned -32601 into -32603.
+            // Anything that did not say what it was is an internal error.
+            let code = e.downcast_ref::<RpcError>().map_or(INTERNAL_ERROR, |typed| typed.code);
+            respond_error(out, id, code, &e.to_string());
         }
     }
 }
+
+// The JSON-RPC 2.0 error codes this server uses.
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+/// Clients probe for methods this server lacks (resources/list, prompts/list),
+/// and this is the code that tells them to stop.
+const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
+
+/// An error that knows which JSON-RPC code it is. `respond` downcasts to this;
+/// an `anyhow::Error` of any other type is reported as -32603.
+#[derive(Debug)]
+struct RpcError {
+    code: i64,
+    message: String,
+}
+
+impl RpcError {
+    fn failure(code: i64, message: String) -> anyhow::Error {
+        anyhow::Error::new(Self { code, message })
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RpcError {}
 
 /// Writes one JSON-RPC error reply with a code chosen by the caller.
 fn respond_error<W: Write>(out: &Out<W>, id: &Value, code: i64, message: &str) {
@@ -366,19 +409,25 @@ fn dispatch(method: &str, params: &Value) -> Result<Value> {
             "serverInfo": { "name": "lucida", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({
-            "tools": [
-                image_schema(),
-                providers_schema(),
-                start_video_schema(),
-                check_video_schema(),
-                video_providers_schema(),
-                list_operations_schema(),
-            ]
-        })),
+        "tools/list" => Ok(json!({ "tools": tool_schemas() })),
         "tools/call" => call_tool(params),
-        other => anyhow::bail!("unknown method: {other}"),
+        other => Err(RpcError::failure(METHOD_NOT_FOUND, format!("unknown method: {other}"))),
     }
+}
+
+/// Every tool's schema, in the order `tools/list` advertises them.
+///
+/// The one place the schemas are gathered, because two things read them: the
+/// listing, and the refusal of an argument a tool does not declare.
+fn tool_schemas() -> Vec<Value> {
+    vec![
+        image_schema(),
+        providers_schema(),
+        start_video_schema(),
+        check_video_schema(),
+        video_providers_schema(),
+        list_operations_schema(),
+    ]
 }
 
 /// Describes every provider from its own declared capabilities.
@@ -513,7 +562,7 @@ fn image_schema() -> Value {
                 "provider": {
                     "type": "string",
                     "enum": provider_enum(),
-                    "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
+                    "description": format!("Which backend to use. {}", default_provider_note::<Backend>())
                 },
                 "model": {
                     "type": "string",
@@ -533,12 +582,15 @@ fn image_schema() -> Value {
                     // disagree about which, and the others take any ratio at all.
                     "description": format!(
                         "W:H, e.g. 16:9. google accepts only: {}. stability accepts a \
-                         DIFFERENT nine: {}. comfyui and bfl accept any ratio; on \
+                         DIFFERENT nine: {}. comfyui accepts any ratio, and so does bfl \
+                         except {}, which take only: {}. On \
                          openai, gpt-image-2 takes any ratio and its siblings only \
                          1:1, 2:3 and 3:2. runway names its shapes as pixel pairs, \
                          which are also the output size: {}.",
                         genai::ASPECT_RATIOS.join(", "),
                         crate::stability::ASPECT_RATIOS.join(", "),
+                        crate::provider::join_and(&crate::bfl::ratio_only_models()),
+                        ratio_only_bfl_ratios(),
                         describe_aspect(
                             capabilities_for(Backend::Runway, crate::runway::DEFAULT_IMAGE_MODEL).aspect
                         )
@@ -546,7 +598,16 @@ fn image_schema() -> Value {
                 },
                 "size": {
                     "type": "string",
-                    "description": "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a tier; comfyui and bfl use the number; openai's gpt-image-2 scales its pixel budget by it. NOT supported by stability, runway (whose pixel-pair aspect ratio is the size) or the other openai models, which render fixed sizes — passing it there is an error."
+                    "description": format!(
+                        "Long edge in pixels, or a tier (1K, 2K, 4K). google rounds to a \
+                         tier; comfyui and bfl ({}) use the number; openai's gpt-image-2 \
+                         scales its pixel budget by it. NOT supported by stability, runway \
+                         (whose pixel-pair aspect ratio is the size), bfl's {} (which take \
+                         an aspect ratio from a list instead) or the other openai models, \
+                         which render fixed sizes — passing it there is an error.",
+                        crate::provider::join_and(&crate::bfl::sized_models()),
+                        crate::provider::join_and(&crate::bfl::ratio_only_models())
+                    )
                 },
                 "negative_prompt": {
                     "type": "string",
@@ -566,7 +627,7 @@ fn image_schema() -> Value {
                 },
                 "workflow": {
                     "type": "string",
-                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped. Cannot be combined with `model` or `reference_images` — the workflow names its own checkpoints and inputs."
+                    "description": "Path to a ComfyUI workflow in API format, rendered instead of the built-in graph. comfyui only. Tokens %prompt% %negative% %seed% %width% %height% %steps% %cfg% mark where values go; a token the file omits means that option cannot be honoured and is refused rather than dropped. Cannot be combined with `model`, `reference_images` or `mask` — the workflow names its own checkpoints and inputs."
                 },
                 "mask": {
                     "type": "string",
@@ -595,7 +656,8 @@ fn image_schema() -> Value {
                     )
                 }
             },
-            "required": ["prompt", "output_path"]
+            "required": ["prompt", "output_path"],
+            "additionalProperties": false
         }
     })
 }
@@ -616,8 +678,86 @@ fn providers_schema() -> Value {
             "before generate_image when the choice of provider matters, or after ",
             "a parameter is rejected."
         ),
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
+}
+
+/// The video providers for which `predicate` holds, as prose.
+///
+/// The video twin of [`providers_where`], over `VideoBackend::ALL`. It reads each
+/// provider's *default* model's capabilities, which is the right question for a
+/// per-provider claim; the one model-level exception (`veo-lite` and negative
+/// prompts) is said beside the list that cannot carry it.
+fn video_providers_where(predicate: fn(&crate::provider::VideoCapabilities) -> bool) -> String {
+    let names: Vec<&str> = VideoBackend::ALL
+        .iter()
+        .filter(|b| predicate(&video_capabilities_for(**b, b.default_model())))
+        .map(|b| b.name())
+        .collect();
+    crate::provider::join_and(&names)
+}
+
+/// One clause per video provider, `name: what it offers`, from its own table.
+///
+/// For the parameters every provider takes but in a different shape — aspect
+/// ratio and duration — where a list of who supports it would say nothing. This
+/// is the shape the hand-written text had, covering two of three providers: it
+/// was true of google and runway and silent about kling.
+fn video_per_provider(
+    describe: fn(&crate::provider::VideoCapabilities) -> String,
+) -> String {
+    VideoBackend::ALL
+        .iter()
+        .map(|b| format!("{}: {}", b.name(), describe(&video_capabilities_for(*b, b.default_model()))))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The quality tiers each provider that has any offers, as `kling takes std, pro
+/// or master`. Empty tables are skipped, which is what "where the provider has
+/// one" means.
+fn video_modes() -> String {
+    let clauses: Vec<String> = VideoBackend::ALL
+        .iter()
+        .filter_map(|b| {
+            let modes = video_capabilities_for(*b, b.default_model()).modes;
+            // Empty means the provider has no tiers, and is skipped.
+            let (last, rest) = modes.split_last()?;
+            Some(if rest.is_empty() {
+                format!("{} takes {last}", b.name())
+            } else {
+                format!("{} takes {} or {last}", b.name(), rest.join(", "))
+            })
+        })
+        .collect();
+    if clauses.is_empty() { "none offers any".to_string() } else { clauses.join("; ") }
+}
+
+/// What `provider` does when it is omitted, as a sentence both schemas share.
+///
+/// This read "defaulting to google", which is the built-in fallback and not the
+/// behaviour: with neither `provider` nor `model` given, `resolve_default` walks
+/// the user's preference list first, so on a machine configured for another
+/// provider the schema said the wrong thing about the machine it was read on.
+/// The setting and the fallback both come from the `Preferred` impl that
+/// `resolve_default` itself reads. A `model` that is given decides on its own,
+/// before any of that, and is said first because it is the case an agent meets.
+///
+/// All three ways a set preference can fail are `out::Refused` in
+/// `provider::preference_list` and `resolve_default`. Two of them were plain
+/// errors (exit 1) while this sentence called them refused, so the word was
+/// true of one case in three.
+fn default_provider_note<T: crate::provider::Preferred>() -> String {
+    format!(
+        "Inferred from `model` when one is given. With neither, the first provider \
+         in {setting} that is usable (its credential is configured, or it needs \
+         none), or {built_in} when that setting is unset or blank. If the setting \
+         is set but names no provider at all (only commas), names one that does \
+         not exist, or none of its providers is usable, the call is refused \
+         (exit 2, nothing spent) rather than falling back to {built_in}.",
+        setting = T::SETTING,
+        built_in = T::BUILT_IN.provider_name()
+    )
 }
 
 /// Video is split into start and check because a Veo render takes minutes —
@@ -685,36 +825,59 @@ fn start_video_schema() -> Value {
                 "provider": {
                     "type": "string",
                     "enum": video_provider_enum(),
-                    "description": "Which backend to use. Inferred from `model` when omitted, defaulting to google."
+                    "description": format!("Which backend to use. {}", default_provider_note::<VideoBackend>())
                 },
                 "mode": {
                     "type": "string",
-                    "description": "Quality tier, where the provider has one. kling takes std, pro or master; the others have none and passing one there is an error."
+                    "description": format!(
+                        "Quality tier, where the provider has one: {}. The others have \
+                         none, and passing one there is an error.",
+                        video_modes()
+                    )
                 },
                 "aspect_ratio": {
                     "type": "string",
                     // Deliberately not an enum: google names `16:9`, runway
-                    // names the pixel pair `1280:720`, and both are accepted.
-                    "description": format!(
-                        "W:H. google accepts {}. runway names geometry in pixels — {} \
-                         — and a simplified ratio is mapped to the pair that is that \
-                         ratio, so 16:9 works on both.",
-                        describe_aspect(video_capabilities_for(VideoBackend::Google, "").aspect),
-                        describe_aspect(video_capabilities_for(VideoBackend::Runway, crate::runway::DEFAULT_MODEL).aspect)
-                    )
+                    // names the pixel pair `1280:720`, and each is accepted by
+                    // the provider that names it. Per provider, from the table.
+                    "description": format!("W:H. {}.", video_per_provider(|c| describe_aspect(c.aspect)))
                 },
                 "duration": {
                     "type": "integer",
                     "description": format!(
-                        "Seconds of output, and the parameter that decides the bill. \
-                         google: {}. runway: {}.",
-                        video_capabilities_for(VideoBackend::Google, "").duration.describe(),
-                        video_capabilities_for(VideoBackend::Runway, crate::runway::DEFAULT_MODEL).duration.describe()
+                        "Seconds of output, and the parameter that decides the bill. {}.",
+                        video_per_provider(|c| c.duration.describe())
                     )
                 },
-                "resolution": { "type": "string", "description": "e.g. 720p or 1080p. google only; on runway the aspect ratio decides the pixel count." },
-                "negative_prompt": { "type": "string", "description": "What to keep out of the shot. google only, and not on veo-lite." },
-                "seed": { "type": "integer", "description": "Renders the same video again. runway only; google exposes none." },
+                "resolution": {
+                    "type": "string",
+                    "description": format!(
+                        "e.g. 720p or 1080p. Supported by {}. Elsewhere the shape you ask \
+                         for decides the pixel count, and passing one is an error.",
+                        video_providers_where(|c| c.resolution)
+                    )
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    // `veo-lite` is the one exception that is a model, not a
+                    // provider, so it cannot come from the table and a test
+                    // holds it against the guard in `video.rs` instead.
+                    "description": format!(
+                        "What to keep out of the shot. Supported by {}, except that \
+                         google's veo-lite refuses one. Anywhere else passing it is an \
+                         error rather than a no-op.",
+                        video_providers_where(|c| c.negative_prompt)
+                    )
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": format!(
+                        "Renders the same video again. Supported by {}; every other \
+                         provider exposes none, so results there cannot be reproduced \
+                         and passing one is an error.",
+                        video_providers_where(|c| c.seed)
+                    )
+                },
                 "model": {
                     "type": "string",
                     "description": format!(
@@ -727,9 +890,18 @@ fn start_video_schema() -> Value {
                     )
                 }
             },
-            "required": ["prompt"]
+            "required": ["prompt"],
+            "additionalProperties": false
         }
     })
+}
+
+/// The ratios BFL's ratio-only models offer, from their capabilities.
+fn ratio_only_bfl_ratios() -> String {
+    crate::bfl::ratio_only_models()
+        .first()
+        .map(|m| describe_aspect(capabilities_for(Backend::Bfl, m).aspect))
+        .unwrap_or_default()
 }
 
 /// One line describing an aspect-ratio capability, shared by both schemas.
@@ -763,7 +935,8 @@ fn check_video_schema() -> Value {
                 "provider": { "type": "string", "enum": video_provider_enum(), "description": "Which provider started it. Inferred from the id's shape when omitted." },
                 "output_path": { "type": "string", "description": "Where to write the finished video. An .mp4 extension is applied if missing." }
             },
-            "required": ["operation", "output_path"]
+            "required": ["operation", "output_path"],
+            "additionalProperties": false
         }
     })
 }
@@ -789,7 +962,7 @@ fn video_providers_schema() -> Value {
             "carries. Spends nothing. Call this before start_video when the choice ",
             "of provider or model matters, or after a parameter is rejected."
         ),
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
 
@@ -875,7 +1048,7 @@ fn list_operations_schema() -> Value {
             "started earlier — by you, by a previous session, or from the shell — ",
             "and its id is no longer to hand. Spends nothing; reads a local file."
         ),
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
 
@@ -935,10 +1108,19 @@ fn call_tool(params: &Value) -> Result<Value> {
     let args = &params["arguments"];
 
     if !TOOL_NAMES.contains(&name) {
-        anyhow::bail!(
-            "unknown tool: {name}. This server offers: {}",
-            TOOL_NAMES.join(", ")
-        );
+        // A call naming a tool that does not exist is invalid params for
+        // `tools/call` (the MCP spec's own example), not an internal fault.
+        return Err(RpcError::failure(
+            INVALID_PARAMS,
+            format!(
+                "unknown tool: {name}. This server offers: {}",
+                TOOL_NAMES.join(", ")
+            ),
+        ));
+    }
+
+    if let Err(refusal) = refuse_unknown_arguments(name, args) {
+        return wrap(Err(refusal));
     }
 
     match name {
@@ -952,6 +1134,53 @@ fn call_tool(params: &Value) -> Result<Value> {
         // the constant is for.
         other => anyhow::bail!("`{other}` is advertised but not implemented"),
     }
+}
+
+/// Refuses an argument the tool's own schema does not declare.
+///
+/// Reading arguments by name means a key nobody asked for is never read, so a
+/// misspelling is not an error anywhere downstream — it is just absent.
+/// `"reference_image": "photo.png"`, singular, rendered a fresh generation and
+/// reported success: the edit-that-becomes-a-generation failure `optional`
+/// exists to prevent, arriving by the other door. The accepted names are read
+/// from the schema `tools/list` serves rather than listed again here, so what a
+/// client was told it may send and what the server accepts cannot differ.
+fn refuse_unknown_arguments(tool: &str, args: &Value) -> Result<()> {
+    let Some(given) = args.as_object() else {
+        return Ok(());
+    };
+    let schema = tool_schemas()
+        .into_iter()
+        .find(|schema| schema["name"] == tool)
+        .ok_or_else(|| anyhow::anyhow!("`{tool}` is advertised without a schema"))?;
+    let accepted: Vec<&str> = schema["inputSchema"]["properties"]
+        .as_object()
+        .map(|properties| properties.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    let unknown: Vec<&str> = given
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !accepted.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+
+    let names = unknown.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", ");
+    let offered = if accepted.is_empty() {
+        format!("`{tool}` takes no arguments")
+    } else {
+        format!(
+            "`{tool}` accepts: {}",
+            accepted.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", ")
+        )
+    };
+    anyhow::bail!(
+        "{} not an argument of `{tool}`. {offered}. It was refused rather than \
+         ignored, so nothing has been run or billed — fix the name, or leave it out.",
+        if unknown.len() == 1 { format!("{names} is") } else { format!("{names} are") }
+    )
 }
 
 /// Errors are returned as isError content rather than as JSON-RPC errors, so the
@@ -1081,13 +1310,15 @@ fn generate_image(args: &Value) -> Result<String> {
     // nowhere to go. Refused here rather than in the provider because by the
     // time the request reaches comfyui the default model has been filled in
     // and an explicit one is indistinguishable from it.
+    // A refusal, since nothing has been sent.
     if workflow.is_some() && requested_model.is_some() {
-        anyhow::bail!(
+        return Err(anyhow::Error::new(crate::out::Refused(
             "`workflow` and `model` cannot be combined: a supplied workflow \
              names its own checkpoints, so there is nowhere to put a model id. \
              Name the model inside the workflow file, or drop `workflow` to \
              use the built-in graph."
-        );
+                .to_string(),
+        )));
     }
 
     let (backend, default_source) = match opt_str(args, "provider")? {
@@ -1210,10 +1441,10 @@ fn generate_image(args: &Value) -> Result<String> {
     if price != crate::spend::Price::Free {
         text.push_str(&format!("\n\nCost: {}.", price.describe()));
     }
-    if let Some(commentary) = &image.commentary
-        && !commentary.is_empty()
-    {
-        text.push_str(&format!("\n\nModel commentary: {commentary}"));
+    if let Some(commentary) = &image.commentary {
+        if !commentary.is_empty() {
+            text.push_str(&format!("\n\nModel commentary: {commentary}"));
+        }
     }
     Ok(text)
 }
@@ -1465,6 +1696,44 @@ mod tests {
         }
     }
 
+    /// BFL's endpoints disagree about geometry: FLUX.2, FLUX.1.1 and dev take
+    /// pixels, Kontext and Ultra take an `aspect_ratio` from a list and no size.
+    /// The schema said "comfyui and bfl accept any ratio" and "use the number"
+    /// of the provider as a whole, which sent an agent to `--size` on a model
+    /// that refuses it. Both clauses are generated from the per-model
+    /// capabilities; this holds each model named on the right side of each.
+    #[test]
+    fn the_schema_says_which_bfl_models_take_a_size() {
+        let schema = image_schema();
+        let props = &schema["inputSchema"]["properties"];
+        let aspect = props["aspect_ratio"]["description"].as_str().unwrap();
+        let size = props["size"]["description"].as_str().unwrap();
+
+        let ratio_only = crate::bfl::ratio_only_models();
+        let sized = crate::bfl::sized_models();
+        assert!(!ratio_only.is_empty() && !sized.is_empty());
+        for model in &ratio_only {
+            assert!(aspect.contains(model), "`{model}` is missing from aspect_ratio: {aspect}");
+            assert!(size.contains(model), "`{model}` is missing from size: {size}");
+        }
+        for model in &sized {
+            assert!(size.contains(model), "`{model}` is missing from size: {size}");
+            assert!(
+                !aspect.contains(&format!("{model},")) && !aspect.contains(&format!("{model} and")),
+                "`{model}` takes any ratio and must not be listed as ratio-only: {aspect}"
+            );
+        }
+        // The ratio list is the one the ratio-only models themselves offer.
+        let AspectSupport::Named(ratios) =
+            capabilities_for(Backend::Bfl, ratio_only[0]).aspect
+        else {
+            panic!("ratio-only models name their ratios");
+        };
+        assert!(aspect.contains(&ratios.join(", ")), "{aspect}");
+        // And the old blanket claim about the provider is gone.
+        assert!(!aspect.contains("comfyui and bfl accept any ratio"), "{aspect}");
+    }
+
     /// The schema must not re-acquire a hard enum on a parameter whose legal
     /// values differ per provider — that is exactly the lie this design removes.
     #[test]
@@ -1554,6 +1823,138 @@ mod tests {
         }
     }
 
+    /// The video counterpart: every parameter only some video providers honour
+    /// says which, and the answer is read off `VideoCapabilities` rather than
+    /// off a phrase.
+    ///
+    /// The image test above pins `comfyui`, which is one provider's name in one
+    /// table. This is checked in both directions against the whole of
+    /// `VideoBackend::ALL`, because the failure it holds was a hand-written
+    /// "google only" that went on being believed after kling declared
+    /// `negative_prompt: true` — an agent reading it would never have asked
+    /// kling for one, and nothing would have said the answer was yes.
+    #[test]
+    fn restricted_video_parameters_name_their_provider() {
+        let schema = start_video_schema();
+        let props = &schema["inputSchema"]["properties"];
+        let text = |field: &str| -> String {
+            props[field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("`{field}` has no description"))
+                .to_string()
+        };
+
+        type Honoured = fn(&crate::provider::VideoCapabilities) -> bool;
+        let flags: [(&str, Honoured); 3] = [
+            ("negative_prompt", |c| c.negative_prompt),
+            ("seed", |c| c.seed),
+            ("resolution", |c| c.resolution),
+        ];
+        for (field, honoured) in flags {
+            // The generated clause itself, not the description around it: the
+            // negative_prompt text names google again in its veo-lite sentence,
+            // so `contains` on the whole string could never fail for google.
+            // The clause must be exactly the providers that honour the
+            // parameter, and end where the list ends.
+            let description = text(field);
+            let honouring: Vec<&str> = VideoBackend::ALL
+                .iter()
+                .filter(|b| honoured(&video_capabilities_for(**b, b.default_model())))
+                .map(|b| b.name())
+                .collect();
+            let clause = format!("Supported by {}", crate::provider::join_and(&honouring));
+            let at = description
+                .find(&clause)
+                .unwrap_or_else(|| panic!("`{field}` must open its list with `{clause}`: {description}"));
+            let after = description[at + clause.len()..].chars().next();
+            assert!(
+                matches!(after, Some(',' | ';' | '.')),
+                "`{field}` names more providers than honour it (`{clause}` runs on): {description}"
+            );
+        }
+
+        // Quality tiers carry their own names, since the tier list is the thing
+        // an agent has to pass.
+        let mode = text("mode");
+        for backend in VideoBackend::ALL {
+            let caps = video_capabilities_for(*backend, backend.default_model());
+            assert_eq!(mode.contains(backend.name()), !caps.modes.is_empty(), "{mode}");
+            for tier in caps.modes {
+                assert!(mode.contains(tier), "`{tier}` is missing from `mode`: {mode}");
+            }
+        }
+
+        // Aspect and duration are offered by everyone, in different shapes, so
+        // each provider is named beside its own description of the shape.
+        let aspect = text("aspect_ratio");
+        let duration = text("duration");
+        for backend in VideoBackend::ALL {
+            let caps = video_capabilities_for(*backend, backend.default_model());
+            assert!(
+                aspect.contains(&format!("{}: {}", backend.name(), describe_aspect(caps.aspect))),
+                "`aspect_ratio` does not give {}'s shapes: {aspect}",
+                backend.name()
+            );
+            assert!(
+                duration.contains(&format!("{}: {}", backend.name(), caps.duration.describe())),
+                "`duration` does not give {}'s lengths: {duration}",
+                backend.name()
+            );
+        }
+
+        // The one model-level exception cannot come from a per-provider table,
+        // so it stays hand-written and is held here against the guard it
+        // describes: `veo-lite` is a real alias, and it is the `lite` the guard
+        // in `video.rs` refuses a negative prompt for.
+        assert!(text("negative_prompt").contains("veo-lite"));
+        assert!(crate::video::resolve_video_model("veo-lite").contains("lite"));
+    }
+
+    /// A `provider` description may not name a default the code does not use.
+    ///
+    /// It read "defaulting to google" while `resolve_default` walked
+    /// `LUCIDA_IMAGE_PROVIDERS` first — so an agent on a machine configured for
+    /// another provider was told the wrong thing about its own machine. The
+    /// setting and the built-in fallback are both read from the `Preferred`
+    /// impl that `resolve_default` uses, so the sentence moves when they do.
+    #[test]
+    fn the_provider_description_names_the_setting_that_picks_the_default() {
+        use crate::provider::Preferred;
+
+        let described = |schema: Value| -> String {
+            schema["inputSchema"]["properties"]["provider"]["description"]
+                .as_str()
+                .expect("provider has a description")
+                .to_string()
+        };
+
+        let image = described(image_schema());
+        assert!(image.contains(Backend::SETTING), "{image}");
+        assert!(image.contains(Backend::BUILT_IN.name()), "{image}");
+
+        let video = described(start_video_schema());
+        assert!(video.contains(VideoBackend::SETTING), "{video}");
+        assert!(video.contains(VideoBackend::BUILT_IN.name()), "{video}");
+
+        // The old claim was unconditional, and it is the unconditional form
+        // that is false.
+        for text in [&image, &video] {
+            assert!(!text.contains("defaulting to"), "{text}");
+            // The rule `resolve_default` is built around: a preference is an
+            // order, never a fallback chain, so a setting nothing satisfies
+            // refuses instead of quietly reaching the built-in provider. Without
+            // this sentence a reader would take the built-in for a safety net.
+            assert!(text.contains("the call is refused"), "{text}");
+            assert!(text.contains("rather than falling back to"), "{text}");
+            // All three refusals are named, the empty list among them.
+            assert!(text.contains("names no provider at all"), "{text}");
+            assert!(text.contains("does not exist"), "{text}");
+            assert!(text.contains("none of its providers is usable"), "{text}");
+            // ComfyUI needs no credential and is usable without one.
+            assert!(text.contains("or it needs none"), "{text}");
+        }
+    }
+
     /// Checked without calling the tools, so the suite needs no network and no
     /// credentials — `image_providers` would otherwise probe both backends.
     #[test]
@@ -1574,6 +1975,104 @@ mod tests {
         assert!(called.unwrap_err().to_string().contains("unknown tool"));
     }
 
+    /// What `respond` writes for `result`, as the one reply it is.
+    fn replied(result: Result<Value>) -> Value {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        respond(&out, &json!(1), result);
+        let written = out.lock().unwrap().clone();
+        serde_json::from_slice(&written).unwrap()
+    }
+
+    /// The code is carried by the error's type. These messages are the exact
+    /// wording the old `starts_with` check keyed on, so a pass here is the
+    /// proof that wording no longer decides anything.
+    #[test]
+    fn the_code_comes_from_the_type_of_the_error_not_its_wording() {
+        let untyped = replied(Err(anyhow::anyhow!("unknown method: resources/list")));
+        assert_eq!(untyped["error"]["code"], INTERNAL_ERROR, "{untyped}");
+
+        let typed = replied(dispatch("resources/list", &Value::Null));
+        assert_eq!(typed["error"]["code"], METHOD_NOT_FOUND, "{typed}");
+
+        let reworded = replied(Err(RpcError::failure(INVALID_PARAMS, "something else".into())));
+        assert_eq!(reworded["error"]["code"], INVALID_PARAMS, "{reworded}");
+    }
+
+    #[test]
+    fn an_unknown_tool_is_invalid_params() {
+        let called = replied(call_tool(&json!({ "name": "paint_a_fresco", "arguments": {} })));
+        assert_eq!(called["error"]["code"], INVALID_PARAMS, "{called}");
+    }
+
+    /// A line that is not JSON is answered, with the id JSON-RPC prescribes when
+    /// the request could not be read.
+    #[test]
+    fn an_unparseable_line_is_answered_with_a_parse_error() {
+        let replies = drive("not json at all\n", |_| Ok(json!({})));
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["error"]["code"], PARSE_ERROR, "{}", replies[0]);
+        assert_eq!(replies[0]["id"], Value::Null);
+    }
+
+    /// The misspelling that turned an edit into a fresh generation.
+    ///
+    /// `workflow` with `model` is a refusal `generate_image` raises before it
+    /// touches a provider, so if the argument check ever stopped running this
+    /// test would fail on the wrong message — not render. A test of this guard
+    /// that passed a valid call would, on a machine holding credentials, spend
+    /// money the moment the guard broke; the first version of it did.
+    #[test]
+    fn a_misspelt_argument_is_refused_naming_it_and_what_is_accepted() {
+        let called = call_tool(&json!({
+            "name": "generate_image",
+            "arguments": {
+                "prompt": "a fox",
+                "output_path": "fox.png",
+                "workflow": "graph.json",
+                "model": "klein",
+                "reference_image": "photo.png"
+            }
+        }))
+        .unwrap();
+        assert_eq!(called["isError"], true, "{called}");
+        let text = called["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`reference_image`"), "{text}");
+        assert!(text.contains("`reference_images`"), "{text}");
+        assert!(text.contains("refused rather than ignored"), "{text}");
+    }
+
+    /// A tool that takes nothing says so, rather than listing nothing.
+    #[test]
+    fn an_argument_to_a_tool_that_takes_none_is_refused() {
+        let called = call_tool(&json!({ "name": "list_operations", "arguments": { "all": true } })).unwrap();
+        assert_eq!(called["isError"], true, "{called}");
+        let text = called["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("takes no arguments"), "{text}");
+    }
+
+    /// The accepted set is read from the schema, so every property a schema
+    /// declares is accepted by construction — and each schema says it is closed,
+    /// which is what a validating client enforces before the call is sent.
+    #[test]
+    fn every_declared_property_is_accepted_and_every_schema_is_closed() {
+        for schema in tool_schemas() {
+            let name = schema["name"].as_str().unwrap();
+            assert_eq!(schema["inputSchema"]["additionalProperties"], false, "{name}");
+
+            let declared = schema["inputSchema"]["properties"].as_object().unwrap();
+            let args: serde_json::Map<String, Value> =
+                declared.keys().map(|key| (key.clone(), Value::Null)).collect();
+            assert!(
+                refuse_unknown_arguments(name, &Value::Object(args)).is_ok(),
+                "{name} refused an argument its own schema declares"
+            );
+            assert!(
+                refuse_unknown_arguments(name, &json!({ "no_such_argument": 1 })).is_err(),
+                "{name} accepted an argument its schema does not declare"
+            );
+        }
+    }
+
     /// The last silent drop: a workflow names its own checkpoints, so an
     /// explicit model would be discarded without a word. Refused here, where
     /// "explicit" is still visible — and before any client exists, so the test
@@ -1586,8 +2085,11 @@ mod tests {
             "workflow": "graph.json",
             "model": "klein"
         }))
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        // A refusal, as the README says: nothing was sent, and retrying the
+        // same call cannot succeed.
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED, "{error:#}");
+        let error = error.to_string();
         assert!(error.contains("workflow"), "must name the conflict: {error}");
         assert!(error.contains("model"));
     }

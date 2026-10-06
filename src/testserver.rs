@@ -76,6 +76,9 @@ pub struct Reply {
     content_type: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// What `Content-Length` claims, when that is deliberately not the body's
+    /// length — see [`Reply::truncated`].
+    declared_length: Option<usize>,
 }
 
 impl Reply {
@@ -85,6 +88,7 @@ impl Reply {
             content_type: "application/json".to_string(),
             headers: Vec::new(),
             body: body.as_bytes().to_vec(),
+            declared_length: None,
         }
     }
 
@@ -94,6 +98,7 @@ impl Reply {
             content_type: "application/json".to_string(),
             headers: Vec::new(),
             body: body.as_bytes().to_vec(),
+            declared_length: None,
         }
     }
 
@@ -103,7 +108,18 @@ impl Reply {
             content_type: content_type.to_string(),
             headers: Vec::new(),
             body: body.to_vec(),
+            declared_length: None,
         }
+    }
+
+    /// Promises `declared` bytes and sends fewer before closing the connection,
+    /// so the client gets its status line and headers and then fails reading
+    /// the body — the one failure a download can have after the request itself
+    /// has succeeded, which no status code can script.
+    pub fn truncated(mut self, declared: usize) -> Self {
+        assert!(declared > self.body.len(), "a truncated reply must promise more than it sends");
+        self.declared_length = Some(declared);
+        self
     }
 
     /// Adds a response header, transcribed from a real reply — how a recording
@@ -208,10 +224,10 @@ fn serve_with_deadline(replies: Vec<Reply>, deadline: Duration) -> Server {
     let replies: Vec<Reply> = replies
         .into_iter()
         .map(|mut reply| {
-            if let Ok(text) = std::str::from_utf8(&reply.body)
-                && text.contains("{{server}}")
-            {
-                reply.body = text.replace("{{server}}", &url).into_bytes();
+            if let Ok(text) = std::str::from_utf8(&reply.body) {
+                if text.contains("{{server}}") {
+                    reply.body = text.replace("{{server}}", &url).into_bytes();
+                }
             }
             reply
         })
@@ -339,7 +355,7 @@ fn handle_connection(
         "HTTP/1.1 {} recorded\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         reply.status,
         reply.content_type,
-        reply.body.len()
+        reply.declared_length.unwrap_or(reply.body.len())
     );
     for (name, value) in &reply.headers {
         head.push_str(&format!("{name}: {value}\r\n"));

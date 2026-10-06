@@ -30,6 +30,10 @@ ignored you. This is unusual and it is worth relying on:
 
 - Do not defensively strip parameters you are unsure about. Ask for what you
   want; if it cannot be honoured you get told, before anything is spent.
+- A misspelt argument name is refused the same way: over MCP, `reference_image`
+  for `reference_images` comes back as an error naming the key and listing what
+  the tool accepts. Nothing was rendered or billed, so correct the name and call
+  again.
 - Do not treat such an error as failure. It is a routing hint — the message
   names the provider to switch to.
 - Do not pre-filter by consulting a table you remember. Let the call fail and
@@ -62,7 +66,10 @@ and naming a provider without a model gets that provider's own default. Naming
 neither consults the user's ordered preference, if they set one, and takes the
 first provider they hold a credential for — **a preference, never a fallback**:
 if that provider then refuses a parameter, the answer is the refusal, not a
-quiet hop to the next name on the list.
+quiet hop to the next name on the list. A preference that names no provider,
+names one that does not exist, or lists none the user holds a key for is
+refused (exit 2) rather than falling back to the built-in default; the fix is
+the user's setting, not a retry.
 
 ## Ask the user which one, when the choice is theirs to make
 
@@ -152,7 +159,8 @@ than hidden, so read what comes back rather than assuming the request was met.
   `reference_images` writes wherever you tell it.
 - **The written path is authoritative, not the one you asked for.** File
   extensions are corrected to match the bytes actually returned, so a request
-  for `.png` may be written as `.jpg`. The CLI prints the real path on stdout
+  for `.png` may be written as `.jpg`. A name whose last suffix is not a
+  format (`hero.v1`) keeps it and gains the extension (`hero.v1.png`). The CLI prints the real path on stdout
   alone, which is why `$(lucida generate …)` composes; the MCP result reports it
   too. Use what comes back when referencing the file afterwards.
 - **What a mask guarantees differs by provider, so read the capability report
@@ -162,6 +170,12 @@ than hidden, so read what comes back rather than assuming the request was met.
   remedy in the first case and a way to degrade an exact render in the second —
   so check rather than assume. The mask entry in the capability report states
   which kind you have.
+  A mask is a PNG or WebP whose *transparent* pixels mark what to change; a
+  provider that reads it from the alpha channel refuses a mask with none, and one
+  that keeps the source's shape refuses `--aspect` / `--size` alongside a mask.
+- **How many reference images an edit takes can differ per model.** More than
+  the model takes is refused before anything is sent, naming its ceiling,
+  rather than trimmed into an edit built from part of what you gave.
 - **A local render can take minutes and reports elapsed time while it works.**
   It has not hung.
 - **A slow render does not block the server.** Other tool calls run alongside it
@@ -202,8 +216,10 @@ silent substitution. The probe says which.
 
 ## From a shell, in a script
 
-`--json` puts one object on stdout for any subcommand, including on failure, so
-there is one shape to parse either way. The exit code distinguishes four
+`--json` puts one object on stdout for every subcommand that produces a result,
+including on failure, so there is one shape to parse either way. (`models`,
+`config`, `skill`, `setup` and `update` print text only: `--json` on them exits `2`
+before they do anything.) The exit code distinguishes four
 outcomes: `0` done, `1` something went wrong, `2` refused before anything was
 spent, `3` still working. **Do not retry a 2** — it is an answer rather than a
 failure, and the message names what to do instead. A `lucida video` whose wait

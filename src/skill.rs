@@ -32,8 +32,27 @@
 /// disagree with the repository and cannot go missing at runtime.
 pub const SKILL: &str = include_str!("../skills/lucida/SKILL.md");
 
-pub fn print() {
-    print!("{SKILL}");
+/// Prints the skill to stdout.
+///
+/// A closed pipe is the reader saying it has seen enough — `lucida skill | head -1`
+/// — which is a success, not a fault. `print!` turns it into a panic (exit 101,
+/// with a backtrace on stderr) because Rust ignores SIGPIPE and the write comes
+/// back as `BrokenPipe`. Anything else going wrong with the write is a real
+/// failure and is returned.
+pub fn print() -> anyhow::Result<()> {
+    write_skill(&mut std::io::stdout().lock()).map_err(|e| anyhow::anyhow!("could not write the skill: {e}"))
+}
+
+/// The write itself, over any sink so a closed pipe can be tested without one.
+///
+/// Flushed inside the match because stdout is line-buffered: the last bytes can
+/// be the ones that meet the closed pipe, and a flush left to the drop at exit
+/// would fail where nothing can report it.
+fn write_skill(sink: &mut impl std::io::Write) -> std::io::Result<()> {
+    match sink.write_all(SKILL.as_bytes()).and_then(|()| sink.flush()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +161,31 @@ mod tests {
                  capability fact, and it belongs in image_providers"
             );
         }
+    }
+
+    /// A reader that goes away is a success; any other write failure is not.
+    ///
+    /// Held on a sink that fails on demand because the process-level test can only
+    /// close the pipe and hope it does so before the child writes — this one fails
+    /// every time.
+    #[test]
+    fn a_closed_pipe_is_success_and_any_other_failure_is_not() {
+        struct Failing(std::io::ErrorKind);
+        impl std::io::Write for Failing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(self.0.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(self.0.into())
+            }
+        }
+
+        assert!(write_skill(&mut Failing(std::io::ErrorKind::BrokenPipe)).is_ok());
+        assert!(write_skill(&mut Failing(std::io::ErrorKind::StorageFull)).is_err());
+
+        let mut written = Vec::new();
+        write_skill(&mut written).unwrap();
+        assert_eq!(written, SKILL.as_bytes(), "the bytes were altered on the way out");
     }
 
     /// `lucida skill` promises the bytes the repository holds, and that promise

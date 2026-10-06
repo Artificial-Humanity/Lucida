@@ -75,8 +75,20 @@ impl Client {
         // Read through `config`, not the environment directly, so a GUI-launched
         // MCP server can be pointed at a remote ComfyUI too — the same problem
         // that made the Google key invisible applies to every setting here.
-        let configured =
-            crate::config::var("LUCIDA_COMFYUI_URL").unwrap_or_else(|| DEFAULT_URL.to_string());
+        //
+        // Except that under `cfg(test)` there is no default. Every setting is
+        // sealed from unit tests (see `config::var`), and on the machine this is
+        // developed on the default is not a placeholder: a real ComfyUI answers
+        // there, so falling back to it would let a test reach a real provider
+        // exactly as the sealed keys now cannot.
+        let configured = match crate::config::var("LUCIDA_COMFYUI_URL") {
+            Some(url) => url,
+            None if cfg!(test) => bail!(
+                "no LUCIDA_COMFYUI_URL injected, and a unit test does not fall back to \
+                 {DEFAULT_URL} — on a developer's machine a real ComfyUI may be there"
+            ),
+            None => DEFAULT_URL.to_string(),
+        };
         let (base, url_credentials) = split_credentials(configured.trim_end_matches('/'));
 
         // An explicit variable beats credentials embedded in the URL, which are
@@ -300,7 +312,13 @@ impl Client {
     /// door built to let callers past the design. So the tokens found in the file
     /// become the capability set for that render, and anything asked for and not
     /// marked is refused before submitting.
-    fn apply_workflow(path: &str, req: &ImageRequest, seed: u64) -> Result<Value> {
+    ///
+    /// The second half of the answer is whether the file carries `%seed%` at
+    /// all. A workflow without one renders with whatever seed its own graph
+    /// names, so the seed Lucida picked was never used, and reporting it back
+    /// (or recording it) would hand the caller a number that cannot reproduce
+    /// the render.
+    fn apply_workflow(path: &str, req: &ImageRequest, seed: u64) -> Result<(Value, bool)> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading the workflow {path}"))?;
         let graph: Value = serde_json::from_str(&text).with_context(|| {
@@ -368,6 +386,7 @@ impl Client {
             }
         }
 
+        let seeded = text.contains("%seed%");
         let mut filled = text;
         for (token, value, _) in substitutions {
             // Bare tokens become numbers; tokens inside a longer string stay
@@ -380,9 +399,10 @@ impl Client {
             filled = filled.replace(token, &escape_json(value));
         }
 
-        serde_json::from_str(&filled).with_context(|| {
+        let graph = serde_json::from_str(&filled).with_context(|| {
             format!("{path} was not valid JSON after substitution — check quoting around the tokens")
-        })
+        })?;
+        Ok((graph, seeded))
     }
 
     /// A name no other upload will take.
@@ -497,7 +517,8 @@ impl Client {
         mask: Option<&str>,
     ) -> Value {
         let steps = req.steps.unwrap_or(DEFAULT_STEPS);
-        let guidance = req.guidance.unwrap_or(DEFAULT_GUIDANCE);
+        let guidance =
+            crate::provider::guidance_as_written(req.guidance.unwrap_or(DEFAULT_GUIDANCE));
         let negative = req.negative_prompt.clone().unwrap_or_default();
 
         let mut nodes = serde_json::Map::new();
@@ -678,10 +699,23 @@ impl Client {
         let mut last_report = Instant::now();
 
         loop {
-            // Between polls, never between the submit and the first poll: the
-            // job is queued by now, and leaving without saying so would strand
-            // it on someone's GPU.
-            crate::cancel::check()?;
+            // Checked before the first poll as well as between the rest. The
+            // prompt is queued by now, so a cancellation stops the *waiting*,
+            // not the job — and the error carries the prompt id, the one handle
+            // left on what would otherwise sit on someone's GPU. It used to
+            // return `cancel::check`'s bare message, which named nothing, and
+            // then appended to it — which kept that message's "will still be
+            // billed", false on the one lane that bills nothing. So the
+            // flag is read here and the sentence is this lane's own.
+            if crate::cancel::cancelled() {
+                bail!(
+                    "cancelled at the client's request. Its ComfyUI prompt id is \
+                     {prompt_id}; it may still be queued or running — remove it \
+                     from the queue at {} (or interrupt it) to stop it. This lane \
+                     is free, so nothing is billed.",
+                    self.base
+                );
+            }
 
             if started.elapsed() > deadline {
                 bail!(
@@ -774,6 +808,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     seed: true,
     negative_prompt: true,
     references: true,
+    // No ceiling recorded here.
+    max_references: None,
     // The only binding mask anywhere here, and it is binding because Lucida
     // builds this graph: `graph_for` composites the render back through the mask
     // rather than trusting the sampler to stay inside it. Measured at 0.00/255
@@ -789,6 +825,30 @@ pub const CAPABILITIES: Capabilities = Capabilities {
 
 impl ImageProvider for Client {
     fn generate(&self, req: &ImageRequest) -> Result<GeneratedImage> {
+        // A supplied workflow names its own inputs; Lucida has no idea which
+        // node would receive an upload, and composites nothing. Refused first,
+        // ahead of `check_mask`: that function's reasons ("composited back onto
+        // the source", "would select nothing") describe the built-in graph, and
+        // when this refusal came later a workflow edit was refused for a reason
+        // that was not its own. With this first, `check_mask` only ever sees the
+        // built-in path. A refusal (exit 2), since nothing has been sent.
+        if req.workflow.is_some() && (!req.references.is_empty() || req.mask.is_some()) {
+            return Err(anyhow::Error::new(crate::out::Refused(
+                "a workflow cannot be combined with reference images or a mask.\n\n\
+                 Lucida substitutes tokens into a workflow but cannot know which \
+                 node an uploaded image or mask belongs to. Put the image into the \
+                 workflow itself, or drop --workflow to use the built-in editing \
+                 graph."
+                    .to_string(),
+            )));
+        }
+
+        // Refused before anything else: nothing here has touched the server, the
+        // clock or the disk beyond reading the mask's header.
+        if let Some(mask) = &req.mask {
+            check_mask(mask, req)?;
+        }
+
         // A supplied workflow names its own models, so nothing needs resolving
         // against the server — and resolving anyway would fail on an install
         // that has the workflow's checkpoints but not a Flux.2 one.
@@ -813,19 +873,20 @@ impl ImageProvider for Client {
             Some(path) => Some(Self::apply_workflow(path, req, seed)?),
             None => None,
         };
+        // The seed that actually reached the sampler: always ours on the
+        // built-in graph, and ours on a workflow only if it has a `%seed%`.
+        let used_seed = match &workflow {
+            Some((_, seeded)) => seeded.then_some(seed),
+            None => Some(seed),
+        };
+        let workflow = workflow.map(|(graph, _)| graph);
+        let seed_note = match used_seed {
+            Some(seed) => format!(" (seed {seed})"),
+            None => " (the workflow sets its own seed)".to_string(),
+        };
 
+        // A workflow with references was refused at the top.
         let uploaded = if workflow.is_some() {
-            // A supplied workflow names its own inputs; Lucida has no idea which
-            // node would receive an upload.
-            if !req.references.is_empty() {
-                bail!(
-                    "a workflow and reference images cannot be combined.\n\n\
-                     Lucida substitutes tokens into a workflow but cannot know \
-                     which node an uploaded image belongs to. Put the image into \
-                     the workflow itself, or drop --workflow to use the built-in \
-                     editing graph."
-                );
-            }
             Vec::new()
         } else {
             req.references
@@ -837,8 +898,8 @@ impl ImageProvider for Client {
         if uploaded.is_empty() {
             let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
             match &req.workflow {
-                None => eprintln!("Rendering {width}x{height} with {} (seed {seed})…", ckpt.unet),
-                Some(path) => eprintln!("Rendering {width}x{height} via {path} (seed {seed})…"),
+                None => eprintln!("Rendering {width}x{height} with {}{seed_note}…", ckpt.unet),
+                Some(path) => eprintln!("Rendering {width}x{height} via {path}{seed_note}…"),
             }
         } else {
             // The size is decided server-side from the source unless overridden,
@@ -850,7 +911,7 @@ impl ImageProvider for Client {
                 "at the source's size".to_string()
             };
             eprintln!(
-                "Editing with {} reference image(s) {shape}, {} (seed {seed})…",
+                "Editing with {} reference image(s) {shape}, {}{seed_note}…",
                 uploaded.len(),
                 ckpt.unet
             );
@@ -874,7 +935,7 @@ impl ImageProvider for Client {
             bytes,
             mime_type,
             commentary: None,
-            seed: Some(seed),
+            seed: used_seed,
         })
     }
 
@@ -1091,24 +1152,155 @@ fn list_or_none(items: &[String]) -> String {
     }
 }
 
-/// Depth-first search for the first image record in a node's outputs.
+/// Collects every image record in a node's outputs, in the order found.
+fn image_records<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(images) = map.get("images").and_then(Value::as_array) {
+                found.extend(images.iter().filter(|i| i.get("filename").is_some()));
+            }
+            for child in map.values() {
+                image_records(child, found);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| image_records(i, found)),
+        _ => {}
+    }
+}
+
+/// The image the render produced, wherever the graph puts it.
 ///
 /// Which node key holds it depends on the graph, and a `--workflow` override
 /// could put it anywhere, so this looks for the shape rather than a fixed path.
+///
+/// **A record of `"type": "output"` wins over any other.** The history keys its
+/// outputs by node id, which `serde_json` walks in string order, so `"10"` sorts
+/// before `"9"` — and a workflow with a PreviewImage node (`"type": "temp"`)
+/// numbered below its SaveImage handed back the preview, a throwaway frame, as
+/// the result. Any record is still returned if none is an output, because a
+/// workflow that only previews has produced the only image there is.
 fn find_image(value: &Value) -> Option<&Value> {
-    match value {
-        Value::Object(map) => {
-            if let Some(first) = map
-                .get("images")
-                .and_then(Value::as_array)
-                .and_then(|images| images.iter().find(|i| i.get("filename").is_some()))
-            {
-                return Some(first);
+    let mut found = Vec::new();
+    image_records(value, &mut found);
+    found
+        .iter()
+        .find(|record| record["type"].as_str() == Some("output"))
+        .or(found.first())
+        .copied()
+}
+
+/// Whether an image file carries an alpha channel, read from its header alone.
+///
+/// `Some(true)` / `Some(false)` when the format is recognised, `None` when it is
+/// not (so the caller can refuse rather than guess). No decoder: Lucida takes no
+/// image dependency, and the header says everything this question needs except
+/// one thing, which is documented on [`check_mask`].
+///
+/// - **PNG**: colour type 4 (grey+alpha) or 6 (RGBA), or a `tRNS` chunk, which
+///   gives an otherwise opaque grey, RGB or palette image transparent entries.
+///   Chunks are walked up to the first `IDAT`, since `tRNS` must precede it.
+///   `tRNS` on colour types 0 and 2 counting as alpha is a claim about
+///   ComfyUI's decoder, not about PNG: whether it becomes an alpha channel
+///   depends on how the installed ComfyUI's `LoadImage` loader treats `tRNS`,
+///   which this does not check.
+/// - **WebP**: a `VP8X` header with the alpha flag, or a `VP8L` header with the
+///   alpha hint. A bare lossy `VP8 ` image has no alpha.
+/// - **JPEG**: never.
+fn has_alpha(bytes: &[u8]) -> Option<bool> {
+    match crate::sniff_mime(bytes)? {
+        "image/jpeg" => Some(false),
+        "image/png" => {
+            // Signature, then IHDR: length(4) "IHDR"(4) width(4) height(4)
+            // depth(1) colour type(1) — so the colour type sits at 25.
+            if bytes.get(12..16) != Some(b"IHDR".as_slice()) {
+                return None;
             }
-            map.values().find_map(find_image)
+            let colour_type = *bytes.get(25)?;
+            if matches!(colour_type, 4 | 6) {
+                return Some(true);
+            }
+            let mut at: usize = 8;
+            while let Some(header) = bytes.get(at..at.checked_add(8)?) {
+                let length = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+                match &header[4..8] {
+                    b"tRNS" => return Some(true),
+                    b"IDAT" | b"IEND" => return Some(false),
+                    _ => {}
+                }
+                // length + type + data + CRC
+                at = at.checked_add(length)?.checked_add(12)?;
+            }
+            // Ran off the end before any IDAT: truncated, not classifiable.
+            None
         }
-        Value::Array(items) => items.iter().find_map(find_image),
+        "image/webp" => match bytes.get(12..16)? {
+            // The flags byte opens the VP8X payload; 0x10 is the alpha flag.
+            b"VP8X" => Some(bytes.get(20)? & 0x10 != 0),
+            // After the 0x2f signature byte come 14 bits of width, 14 of
+            // height and then the alpha hint: bit 28 of the little-endian word,
+            // which is 0x10 of its fourth byte.
+            b"VP8L" if bytes.get(20) == Some(&0x2f) => Some(bytes.get(24)? & 0x10 != 0),
+            b"VP8 " => Some(false),
+            _ => None,
+        },
         _ => None,
+    }
+}
+
+/// Refuses a mask this lane cannot apply truthfully.
+///
+/// Both halves are refusals because the render would otherwise succeed and say
+/// something false about itself:
+///
+/// - **A mask with no alpha channel.** The graph reads the mask from
+///   `LoadImage`'s alpha output. An image with no alpha yields an all-zero mask,
+///   so nothing is selected, the composite puts the source back unchanged, and
+///   the result is the (rescaled) source reported as an edit under a mask the
+///   capability table calls binding. Lucida's convention is that *transparent
+///   means change*, which is also openai's, so the same file works on both.
+///   Opaque-everywhere RGBA is the one case this cannot see: it has an alpha
+///   channel and no transparent pixel, and finding that out means decoding the
+///   pixels, which takes a dependency Lucida does not carry. It is left to the
+///   caller.
+/// - **A mask together with `--aspect` or `--size`.** A masked edit takes its
+///   latent and its composite destination from the *source's* shape, so the
+///   requested dimensions would reach only the scheduler while the output kept
+///   the source's shape and the progress line claimed the requested one.
+///
+/// Both reasons are about the built-in graph, which is the only path that
+/// reaches here: `generate` refuses a workflow with a mask before calling this.
+fn check_mask(path: &str, req: &ImageRequest) -> Result<()> {
+    let refuse = |message: String| Err(anyhow::Error::new(crate::out::Refused(message)));
+
+    if req.aspect.is_some() || req.size.is_some() {
+        return refuse(
+            "`comfyui` cannot reframe a masked edit, so `--aspect` and `--size` \
+             cannot be honoured together with `--mask`.\n\n\
+             A masked edit is composited back onto the source at the source's own \
+             shape, so the output would keep that shape whatever was asked for. \
+             Drop `--mask` to reframe, or drop `--aspect` / `--size` to edit in place."
+                .to_string(),
+        );
+    }
+
+    let bytes = std::fs::read(path).with_context(|| format!("reading the mask ({path})"))?;
+    match has_alpha(&bytes) {
+        Some(true) => Ok(()),
+        Some(false) => refuse(format!(
+            "the mask {path} has no alpha channel, so `comfyui` would select nothing \
+             and hand back the source unchanged.\n\n\
+             Lucida's mask convention is that **transparent pixels are the ones to \
+             change** and opaque ones are kept; ComfyUI reads that from the alpha \
+             channel. Save the mask as a PNG or WebP with transparency over the \
+             region to edit."
+        )),
+        None => refuse(format!(
+            "the mask {path} is not a PNG or WebP (or is damaged), the two formats that can carry \
+             an alpha channel, so Lucida cannot tell whether `comfyui` would select \
+             anything.\n\n\
+             Masks are read from the alpha channel (transparent = change). Use a \
+             PNG or WebP with transparency over the region to edit."
+        )),
     }
 }
 
@@ -1267,6 +1459,18 @@ mod tests {
             model: "klein".into(),
             ..Default::default()
         }
+    }
+
+    /// The cfg the graph carries is the one written: 7.1, not the
+    /// 7.099999904632568 an `f32` widens to through `json!`.
+    #[test]
+    fn guidance_reaches_the_graph_as_written() {
+        let req = ImageRequest {
+            guidance: Some(7.1),
+            ..request("a fox")
+        };
+        let graph = Client::graph_for(&req, &checkpoint(), 1, &[], None);
+        assert_eq!(graph["guider"]["inputs"]["cfg"].to_string(), "7.1");
     }
 
     #[test]
@@ -1432,7 +1636,7 @@ mod tests {
             seed: Some(7),
             ..Default::default()
         };
-        let g = Client::apply_workflow(path.to_str().unwrap(), &req, 7).unwrap();
+        let (g, _) = Client::apply_workflow(path.to_str().unwrap(), &req, 7).unwrap();
         assert_eq!(g["a"]["inputs"]["text"], "a fox");
         // A bare numeric token becomes a number, not the string "7".
         assert_eq!(g["b"]["inputs"]["noise_seed"], 7);
@@ -1467,7 +1671,7 @@ mod tests {
             seed: Some(1),
             ..Default::default()
         };
-        let g = Client::apply_workflow(path.to_str().unwrap(), &req, 1).unwrap();
+        let (g, _) = Client::apply_workflow(path.to_str().unwrap(), &req, 1).unwrap();
         assert_eq!(g["a"]["inputs"]["text"], r#"a "quoted" sign, back\slash"#);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1582,6 +1786,42 @@ mod tests {
     const QUEUED: &str = r#"{"prompt_id":"p1"}"#;
     const COMPLETED: &str = r#"{"p1":{"status":{"completed":true,"status_str":"success","messages":[]},
         "outputs":{"save":{"images":[{"filename":"lucida_00001_.png","subfolder":"","type":"output"}]}}}}"#;
+
+    /// A cancellation that lands after the prompt is queued names the prompt it
+    /// leaves behind. It used to return `cancel::check`'s bare message, which says
+    /// a render may complete but not which one, so a queued job was stranded on
+    /// someone's GPU with nothing to find it by.
+    #[test]
+    fn a_cancellation_after_the_submit_names_the_prompt_id() {
+        let server = serve(vec![
+            object_info("UNETLoader", "unet_name", "flux2-klein.safetensors"),
+            object_info("CLIPLoader", "clip_name", "flux2_te.safetensors"),
+            object_info("VAELoader", "vae_name", "flux2_vae.safetensors"),
+            Reply::json(QUEUED),
+        ]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "klein".into(),
+            seed: Some(9),
+            ..Default::default()
+        };
+        let token = crate::cancel::Token::new();
+        token.cancel();
+        let error = crate::cancel::with(token, || wired(&server).generate(&request))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(error.contains("p1"), "must name the prompt id: {error}");
+        assert!(error.contains(server.url()), "must say where its queue is: {error}");
+        // The local lane bills nothing, so the shared message's "will still be
+        // billed" was false here and pointed a reader at a charge that does
+        // not exist.
+        assert!(!error.contains("will still be billed"), "{error}");
+        assert!(error.contains("nothing is billed"), "{error}");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4, "a cancelled wait must not poll");
+        assert_eq!(requests[3].path, "/prompt");
+    }
 
     /// The whole conversation, replayed: three `/object_info` lookups, submit,
     /// history, download. The claim only the wire can prove is that the
@@ -1737,5 +1977,229 @@ mod tests {
         assert_eq!(graph["a"]["inputs"]["text"], "a fox");
         assert_eq!(graph["b"]["inputs"]["noise_seed"], 5);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // --- the lane never reports something other than what was asked ---------
+
+    /// A PNG's header, as far as the alpha question reads it: signature, IHDR
+    /// with the given colour type, then `chunks`, then an IDAT.
+    fn png(colour_type: u8, chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+            out.extend((data.len() as u32).to_be_bytes());
+            out.extend(kind);
+            out.extend(data);
+            out.extend([0, 0, 0, 0]); // CRC: never read
+        };
+        let ihdr = vec![0, 0, 0, 4, 0, 0, 0, 4, 8, colour_type, 0, 0, 0];
+        chunk(b"IHDR", &ihdr);
+        for (kind, data) in chunks {
+            chunk(kind, data);
+        }
+        chunk(b"IDAT", &[1, 2, 3]);
+        chunk(b"IEND", &[]);
+        out
+    }
+
+    fn webp(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = b"RIFF".to_vec();
+        out.extend(((payload.len() + 12) as u32).to_le_bytes());
+        out.extend(b"WEBP");
+        out.extend(kind);
+        out.extend((payload.len() as u32).to_le_bytes());
+        out.extend(payload);
+        out
+    }
+
+    #[test]
+    fn a_png_has_alpha_by_colour_type_or_by_a_trns_chunk() {
+        assert_eq!(has_alpha(&png(6, &[])), Some(true), "RGBA");
+        assert_eq!(has_alpha(&png(4, &[])), Some(true), "grey + alpha");
+        assert_eq!(has_alpha(&png(2, &[])), Some(false), "RGB");
+        assert_eq!(has_alpha(&png(0, &[])), Some(false), "grey");
+        assert_eq!(has_alpha(&png(3, &[(b"PLTE", &[0; 6])])), Some(false), "palette");
+        // Transparency declared on an otherwise opaque colour type.
+        assert_eq!(has_alpha(&png(3, &[(b"PLTE", &[0; 6]), (b"tRNS", &[0])])), Some(true));
+        assert_eq!(has_alpha(&png(2, &[(b"tRNS", &[0; 6])])), Some(true));
+    }
+
+    #[test]
+    fn a_webp_has_alpha_by_its_vp8x_flag_or_its_vp8l_hint() {
+        let mut vp8x = vec![0u8; 10];
+        assert_eq!(has_alpha(&webp(b"VP8X", &vp8x)), Some(false));
+        vp8x[0] = 0x10;
+        assert_eq!(has_alpha(&webp(b"VP8X", &vp8x)), Some(true));
+        // A flag that is not the alpha one must not count.
+        vp8x[0] = 0x20;
+        assert_eq!(has_alpha(&webp(b"VP8X", &vp8x)), Some(false));
+
+        let mut vp8l = vec![0x2f, 0, 0, 0, 0];
+        assert_eq!(has_alpha(&webp(b"VP8L", &vp8l)), Some(false));
+        vp8l[4] = 0x10;
+        assert_eq!(has_alpha(&webp(b"VP8L", &vp8l)), Some(true));
+
+        assert_eq!(has_alpha(&webp(b"VP8 ", &[0; 10])), Some(false), "lossy, no alpha");
+    }
+
+    #[test]
+    fn jpeg_never_has_alpha_and_unknown_or_damaged_files_are_unclassified() {
+        assert_eq!(has_alpha(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0]), Some(false));
+        assert_eq!(has_alpha(b"GIF89a......"), None);
+        assert_eq!(has_alpha(b""), None);
+        // A PNG cut off inside its header, and one that ends before any IDAT.
+        assert_eq!(has_alpha(&png(2, &[])[..20]), None);
+        assert_eq!(has_alpha(&png(2, &[])[..40]), None);
+    }
+
+    fn mask_file(name: &str, bytes: &[u8]) -> (std::path::PathBuf, String) {
+        let (dir, _) = workflow_file("{}");
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path.to_string_lossy().into_owned())
+    }
+
+    fn refused(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<crate::out::Refused>().is_some()
+    }
+
+    /// A mask with no alpha used to be uploaded, read as all-zero, and come back
+    /// as the unchanged source reported as an edit under a binding mask.
+    #[test]
+    fn a_mask_with_no_alpha_is_refused_with_the_convention_explained() {
+        let req = ImageRequest { mask: Some("x".into()), ..Default::default() };
+        for (name, bytes) in [
+            ("opaque.png", png(2, &[])),
+            ("photo.jpg", vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0]),
+        ] {
+            let (dir, path) = mask_file(name, &bytes);
+            let error = check_mask(&path, &req).unwrap_err();
+            assert!(refused(&error), "{error:#}");
+            assert!(error.to_string().contains("transparent"), "{error}");
+            assert!(error.to_string().contains("no alpha"), "{error}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        let (dir, path) = mask_file("alpha.png", &png(6, &[]));
+        check_mask(&path, &req).expect("an RGBA mask is accepted");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_mask_that_cannot_be_classified_is_refused_naming_the_formats() {
+        let req = ImageRequest { mask: Some("x".into()), ..Default::default() };
+        let (dir, path) = mask_file("mask.gif", b"GIF89a....");
+        let error = check_mask(&path, &req).unwrap_err();
+        assert!(refused(&error), "{error:#}");
+        assert!(error.to_string().contains("PNG or WebP"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Refused before the server is asked anything, so nothing is resolved,
+    /// uploaded or queued for a render that cannot be what was asked for.
+    #[test]
+    fn a_mask_with_a_shape_is_refused_before_any_request() {
+        let (dir, path) = mask_file("alpha.png", &png(6, &[]));
+        for (aspect, size) in [
+            (Some(crate::provider::Aspect::parse("16:9").unwrap()), None),
+            (None, Some(crate::provider::Size::parse("2K").unwrap())),
+        ] {
+            let server = serve(vec![]);
+            let request = ImageRequest {
+                prompt: "p".into(),
+                model: "klein".into(),
+                references: vec![path.clone()],
+                mask: Some(path.clone()),
+                aspect,
+                size,
+                ..Default::default()
+            };
+            let error = wired(&server).generate(&request).unwrap_err();
+            assert!(refused(&error), "{error:#}");
+            assert!(error.to_string().contains("--aspect"), "{error}");
+            assert!(server.finish().is_empty(), "the server was asked something");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A workflow with a mask or references is refused for the workflow, before
+    /// the mask is looked at.
+    ///
+    /// The mask checks gave their reasons for the built-in graph — "composited
+    /// back onto the source", "would select nothing" — and fired on the workflow
+    /// path too, where Lucida composites nothing and reads no mask. The
+    /// workflow refusal was the true one and came later, as a plain error, so a
+    /// workflow edit with `--aspect` was refused for a reason that was not its
+    /// own. Exit 2 now, since nothing has been sent.
+    #[test]
+    fn a_workflow_with_a_mask_or_references_is_refused_for_the_workflow() {
+        let (dir, mask) = mask_file("alpha.png", &png(6, &[]));
+        let (wdir, workflow) = workflow_file(r#"{"a":{"class_type":"X","inputs":{}}}"#);
+        let workflow = workflow.to_string_lossy().into_owned();
+        for (references, mask, aspect) in [
+            (vec![mask.clone()], Some(mask.clone()), Some(crate::provider::Aspect::parse("16:9").unwrap())),
+            (vec![mask.clone()], Some(mask.clone()), None),
+            (vec![], Some(mask.clone()), None),
+            (vec![mask.clone()], None, None),
+        ] {
+            let server = serve(vec![]);
+            let request = ImageRequest {
+                prompt: "p".into(),
+                references,
+                mask,
+                aspect,
+                workflow: Some(workflow.clone()),
+                ..Default::default()
+            };
+            let error = wired(&server).generate(&request).unwrap_err();
+            assert!(refused(&error), "{error:#}");
+            let text = error.to_string();
+            assert!(text.contains("workflow"), "{text}");
+            assert!(!text.contains("composited"), "{text}");
+            assert!(server.finish().is_empty(), "the server was asked something");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(wdir);
+    }
+
+    #[test]
+    fn a_preview_is_not_taken_for_the_output() {
+        // "10" sorts before "9": the preview used to win on key order alone.
+        let outputs = json!({
+            "10": { "images": [{ "filename": "preview.png", "subfolder": "", "type": "temp" }] },
+            "9":  { "images": [{ "filename": "final.png", "subfolder": "", "type": "output" }] }
+        });
+        assert_eq!(find_image(&outputs).unwrap()["filename"], "final.png");
+
+        // Nothing is an output: a preview is then the only image there is.
+        let only_preview = json!({
+            "10": { "images": [{ "filename": "preview.png", "subfolder": "", "type": "temp" }] }
+        });
+        assert_eq!(find_image(&only_preview).unwrap()["filename"], "preview.png");
+    }
+
+    const NO_SEED: &str = r#"{"a":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%"}},
+        "b":{"class_type":"RandomNoise","inputs":{"noise_seed":1234}}}"#;
+
+    /// The graph used its own seed, so the one Lucida picked reproduces nothing.
+    #[test]
+    fn a_workflow_without_a_seed_token_reports_no_seed() {
+        for (workflow, expected) in [(NO_SEED, None), (MINIMAL, Some(5))] {
+            let (dir, path) = workflow_file(workflow);
+            let server = serve(vec![
+                Reply::json(QUEUED),
+                Reply::json(COMPLETED),
+                Reply::bytes("image/png", b"png-bytes"),
+            ]);
+            let request = ImageRequest {
+                prompt: "a fox".into(),
+                workflow: Some(path.to_string_lossy().into_owned()),
+                seed: expected,
+                ..Default::default()
+            };
+            let image = wired(&server).generate(&request).unwrap();
+            assert_eq!(image.seed, expected);
+            server.finish();
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

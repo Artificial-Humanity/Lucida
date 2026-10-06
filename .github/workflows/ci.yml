@@ -54,6 +54,28 @@ jobs:
           if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           ./scripts/smoke.sh "$BIN"
 
+  # `rust-version` in Cargo.toml says which compiler this crate builds with, and
+  # nothing but a build on that compiler can say whether it is true. It was not:
+  # the field read 1.85 while the source used let-chains, which need 1.88, so
+  # every toolchain between passed cargo's version check and then failed to
+  # parse. The version is read from Cargo.toml rather than written here, so
+  # raising the claim and testing the claim cannot come apart.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check on the declared rust-version
+        run: |
+          msrv=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$msrv" ]; then
+            echo "Cargo.toml has no rust-version, so there is nothing to hold"
+            exit 1
+          fi
+          echo "checking on Rust $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          cargo "+$msrv" check --locked --all-targets
+
   # Six dependencies, all of them load-bearing and one of them a TLS stack. An
   # advisory against any of those is not something to learn about from a user, and
   # nothing else in this repository would ever mention it.

@@ -325,7 +325,7 @@ fn spent_since(entries: &[serde_json::Value], since: i64) -> f64 {
 /// **In-process only.** Two separate `lucida` processes — two shells, or a
 /// shell and the MCP server — each have their own, and can still both pass
 /// against the same ledger. Closing that needs a file lock, and
-/// `std::fs::File::lock` is newer than this crate's MSRV of 1.85; a locking
+/// `std::fs::File::lock` is newer than this crate's MSRV of 1.86; a locking
 /// crate would be a new dependency. So the gap is stated rather than closed.
 struct Held(Mutex<f64>);
 
@@ -493,9 +493,9 @@ fn reserve(
                 "LUCIDA_BUDGET is set (${budget:.2}), but the render ledger has \
                  nowhere to live: none of HOME, USERPROFILE, XDG_CONFIG_HOME or \
                  LUCIDA_CONFIG is set (nor APPDATA, on Windows), so there is no \
-                 config directory to keep it in. The budget is counted from the ledger, so nothing spent would \
-                 ever be counted and the cap cannot hold — this {what} is refused \
-                 rather than sent unmetered.\n\n\
+                 config directory to keep it in. The budget is counted from the \
+                 ledger, so nothing spent would ever be counted and the cap cannot \
+                 hold — this {what} is refused rather than sent unmetered.\n\n\
                  Set HOME, or LUCIDA_CONFIG to a config file whose directory can \
                  hold the ledger, or unset LUCIDA_BUDGET to run without a cap. \
                  comfyui renders locally, costs nothing, and is never refused."
@@ -770,11 +770,11 @@ mod tests {
     /// tool that started declining renders on upgrade would be a bad surprise.
     #[test]
     fn no_budget_means_no_refusal() {
-        // `budget()` reads the environment, which the suite must not mutate; this
-        // asserts the branch that matters through the public shape instead.
-        if budget().is_none() {
-            assert!(check(Price::Unverified, "render").is_ok());
-        }
+        // Unconditional now that a unit test cannot see a budget it was not
+        // given. This read the developer's real environment and config file,
+        // and skipped itself wherever a budget happened to be set.
+        assert_eq!(budget(), None);
+        assert!(check(Price::Unverified, "render").is_ok());
     }
 
     /// A free render is never refused, whatever has already been spent — and the

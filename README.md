@@ -141,8 +141,8 @@ lucida config                           # displays active configuration sources
 | `LUCIDA_COMFYUI_URL` | URL | ComfyUI base URL (default: `http://127.0.0.1:8188`) |
 | `LUCIDA_COMFYUI_AUTH` | credentials | ComfyUI authentication (`user:password`, `Bearer …`, or `Basic …`) |
 | `LUCIDA_COMFYUI_CA` | path | Path to PEM file for a private CA |
-| `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`) |
-| `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`) |
+| `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`). An empty or whitespace-only value counts as unset. Set but naming no provider (`,`), naming an unknown one, or listing none you hold a key for is refused (exit 2), never read as unset |
+| `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`). An empty or whitespace-only value counts as unset. Set but naming no provider (`,`), naming an unknown one, or listing none you hold a key for is refused (exit 2), never read as unset |
 | `LUCIDA_NO_UPDATE_CHECK` | flag | Set to any non-empty value to disable daily update notices |
 | `LUCIDA_NO_LEDGER` | flag | Set to any non-empty value to disable recording renders in the ledger |
 | `LUCIDA_BUDGET` | USD | Rolling 24-hour spending cap in USD (refuses renders exceeding limit) |
@@ -166,11 +166,11 @@ Values defined in a configuration file take precedence over environment variable
 
 * **Provider resolution:** Selected with `--provider <name>`. If omitted, Lucida infers the provider from `--model` or falls back to the order defined in `LUCIDA_IMAGE_PROVIDERS` / `LUCIDA_VIDEO_PROVIDERS`.
 * **Capability inspection:** Run `lucida models --provider <name>` to view accessible models, supported parameters, and remaining account balances.
-* **Mask handling:** `comfyui` performs pixel-binding compositing (unmasked pixels remain byte-identical). `openai` treats masks as advisory guidance.
+* **Mask handling:** `comfyui` performs pixel-binding compositing (unmasked pixels remain byte-identical). `openai` treats masks as advisory guidance. On both, transparent pixels mark the region to change; `comfyui` reads the mask's alpha channel and refuses a PNG, WebP or JPEG without one (it would select nothing), and refuses `--aspect` / `--size` together with a mask, because a masked edit keeps the source's shape.
 
 ## Commands
 
-Use `--help` on any command to view supported options. Pass `--json` for structured machine output.
+Use `--help` on any command to view supported options. Pass `--json` for structured machine output from the commands that produce a result (`generate`, `edit`, `video`, `check`, `ops`, `history`); `models`, `config`, `skill`, `setup` and `update` print text only, so `--json` on them is refused with exit code `2` before they do anything.
 
 <h3 id="configuration-commands">Configuration commands</h3>
 
@@ -204,7 +204,7 @@ Use `--help` on any command to view supported options. Pass `--json` for structu
   ```console
   open "$(lucida generate "dawn over the mountains" -o /tmp/dawn.png)"
   ```
-* **Extension correction:** If output format differs from the requested extension (e.g. JPEG bytes returned for `.png`), Lucida corrects the filename extension and reports it on stderr.
+* **Extension correction:** If output format differs from the requested extension (e.g. JPEG bytes returned for `.png`), Lucida corrects the filename extension and reports it on stderr. Only a known format extension (`png`, `jpg`, `jpeg`, `webp`, `mp4`, any case) is replaced; any other suffix is kept as part of the name and the extension is appended, so `-o hero.v1` is written as `hero.v1.png` and never collides with `hero.v2`.
 
 ### Custom ComfyUI workflows
 
@@ -223,6 +223,10 @@ Workflows use parameter replacement tokens:
 | `%seed%`, `%steps%`, `%cfg%` | `--seed`, `--steps`, `--guidance` |
 
 Tokens must exist in the workflow file for corresponding CLI flags to be applied.
+
+A workflow with no `%seed%` renders with the seed its own graph names, so Lucida reports and records no seed for it.
+
+A workflow names its own checkpoints and inputs, so it cannot be combined with `--model`, reference images or `--mask`; each combination is refused (exit 2) before anything is sent.
 
 ## MCP server
 
@@ -259,6 +263,8 @@ For other MCP clients, configure `lucida mcp` as a stdio server:
 | `check_video` | Polls render status and retrieves completed video |
 | `list_operations` | Lists tracked in-flight video operations |
 
+A call that names an argument its tool does not declare (`reference_image` for `reference_images`, say) is refused with a tool-level error that names the key and lists the accepted ones; nothing is run or billed. Every tool's `inputSchema` carries `"additionalProperties": false` to say so up front. Protocol-level failures use the standard JSON-RPC codes: `-32700` for a line that is not JSON (with `"id": null`), `-32601` for an unknown method, `-32602` for an unknown tool name, `-32600` for a request id reused while its call is still running.
+
 ### Scripting and exit codes
 
 The `--json` flag emits a single JSON response object to stdout. Exit codes indicate operation status:
@@ -274,7 +280,7 @@ The `--json` flag emits a single JSON response object to stdout. Exit codes indi
 
 * **Budget enforcement:** `LUCIDA_BUDGET` sets a rolling 24-hour spending cap in USD. Requests exceeding the cap fail immediately with exit code `2`.
   The value must be a plain number (`5`, `2.50`). One that is not (`$5`, `5 USD`), or a budget set together with `LUCIDA_NO_LEDGER` or where the ledger has nowhere to live (no home or config directory — the ledger is where spend is counted), refuses every paid render with exit code `2` rather than being ignored. Free renders are never refused. The cap is enforced across concurrent MCP calls in one process, but not between separate `lucida` processes.
-* **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance.
+* **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance. With `--json` the plan lists every resolved request field the render would send (for images: prompt, aspect, size, seed, references, negative prompt, mask, workflow, steps, guidance; for video: aspect, resolution, negative prompt, duration, mode, seed, image), `null` where unset.
 * **Ledger tracking:** Completed and pending operations are recorded to a JSON ledger adjacent to the configuration file. Inspected via `lucida history` or `lucida ops`. Set `LUCIDA_NO_LEDGER=1` to disable recording.
 
 ### Agent skill

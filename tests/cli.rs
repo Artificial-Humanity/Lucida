@@ -612,6 +612,87 @@ fn json_writes_json_alone_to_stdout() {
     );
 }
 
+// --- `--json` on a command with no document is refused -----------------------
+//
+// `out.rs` promises one JSON object on stdout whatever happens. These five print
+// prose with `println!`, so `--json` used to produce a stream that was not JSON
+// at all and a caller's parser failed on the first word. A flag that cannot be
+// honoured is refused, and before any work: `config --init` writes a file, and
+// `update` goes to the network.
+
+#[test]
+fn json_is_refused_by_a_command_with_no_json_document() {
+    let sandbox = Sandbox::new("json-refused");
+    for (command, extra) in [
+        ("models", &["--provider", "comfyui"][..]),
+        ("config", &[][..]),
+        ("skill", &[][..]),
+        ("setup", &["--dry-run"][..]),
+        ("update", &["--check"][..]),
+    ] {
+        let mut args = vec!["--json", command];
+        args.extend_from_slice(extra);
+        let out = run(lucida(&sandbox).args(&args));
+        out.exits(2);
+
+        let doc: serde_json::Value = serde_json::from_str(out.stdout.trim())
+            .unwrap_or_else(|e| panic!("`{}` wrote no JSON document ({e}):\n{}", out.argv, out.stdout));
+        assert_eq!(doc["ok"], false, "{}", out.argv);
+        assert_eq!(doc["refused"], true, "{}", out.argv);
+        assert_eq!(doc["exit_code"], 2, "{}", out.argv);
+        let message = doc["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(&format!("`lucida {command}`")),
+            "the refusal does not name the command: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_json_command_does_none_of_its_work() {
+    // `config --init` writes the config file; if the refusal came after it, the
+    // caller would be told "refused, nothing done" about a file that now exists.
+    let sandbox = Sandbox::new("json-no-work");
+    run(lucida(&sandbox).args(["--json", "config", "--init"])).exits(2);
+    assert!(
+        !sandbox.config_file().exists(),
+        "`config --init --json` was refused after writing the config file"
+    );
+}
+
+#[test]
+fn json_still_works_where_there_is_a_document() {
+    // The refusal is a list of the five that have none, not a rule against the
+    // flag: the commands that do have a document must keep it.
+    let sandbox = Sandbox::new("json-kept");
+    for command in [&["ops"][..], &["history"][..]] {
+        let mut args = vec!["--json"];
+        args.extend_from_slice(command);
+        run(lucida(&sandbox).args(&args)).exits(0);
+    }
+}
+
+// --- a closed pipe is not a crash ---------------------------------------------
+
+#[test]
+fn skill_into_a_closed_pipe_is_not_a_panic() {
+    // `lucida skill | head -1` closes the pipe after one line. The reader is
+    // dropped before the child can write, so the write fails with a broken pipe;
+    // the old `print!` turned that into a panic and exit 101.
+    let sandbox = Sandbox::new("skill-pipe");
+    let mut child = lucida(&sandbox)
+        .arg("skill")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("could not run lucida");
+    drop(child.stdout.take());
+    let done = child.wait_with_output().expect("the process never finished");
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert_eq!(done.status.code(), Some(0), "a closed pipe ended it:\n{stderr}");
+    assert!(!stderr.contains("panicked"), "a closed pipe panicked:\n{stderr}");
+}
+
 // --- a dry run sends nothing ------------------------------------------------
 
 #[test]
@@ -628,6 +709,94 @@ fn a_dry_run_reports_its_plan() {
         "--json",
     ]))
     .says("\"status\":\"dry-run\"");
+}
+
+#[test]
+fn a_dry_run_reports_every_resolved_image_parameter() {
+    // "Every resolved parameter" is what the flag's help promises, and a field
+    // missing here is a parameter a caller cannot confirm before paying.
+    let sandbox = Sandbox::new("dry-image-fields");
+    let out = run(lucida(&sandbox).args([
+        "generate",
+        "x",
+        "--provider",
+        "comfyui",
+        "--negative",
+        "blurry",
+        "--steps",
+        "12",
+        "--guidance",
+        "4.5",
+        "--workflow",
+        "graph.json",
+        "--dry-run",
+        "--json",
+    ]));
+    out.exits(0);
+    let doc: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(doc["negative_prompt"], "blurry");
+    assert_eq!(doc["steps"], 12);
+    assert_eq!(doc["guidance"], 4.5);
+    assert_eq!(doc["workflow"], "graph.json");
+
+    // A mask only means something on an edit, so it is checked on one.
+    let edit = run(lucida(&sandbox).args([
+        "edit",
+        "photo.png",
+        "x",
+        "--provider",
+        "comfyui",
+        "--mask",
+        "mask.png",
+        "--dry-run",
+        "--json",
+    ]));
+    edit.exits(0);
+    let doc: serde_json::Value = serde_json::from_str(edit.stdout.trim()).unwrap();
+    assert_eq!(doc["mask"], "mask.png");
+    assert_eq!(doc["references"], serde_json::json!(["photo.png"]));
+
+    // And a field nobody set is present and null, so the document has one shape.
+    let bare = run(lucida(&sandbox).args(["generate", "x", "--provider", "comfyui", "--dry-run", "--json"]));
+    let doc: serde_json::Value = serde_json::from_str(bare.stdout.trim()).unwrap();
+    for field in ["negative_prompt", "mask", "workflow", "steps", "guidance"] {
+        assert!(doc.get(field).is_some_and(|v| v.is_null()), "`{field}` is absent or set: {doc}");
+    }
+}
+
+/// `--guidance 7.1` is reported as 7.1, not as the f64 its f32 widens to.
+///
+/// `json!` on an `f32` widens it first, and the widened value is
+/// 7.099999904632568 — true to the bits and not what anyone typed, in the one
+/// document whose job is to show a caller what they asked for.
+#[test]
+fn a_dry_run_reports_guidance_as_it_was_written() {
+    let sandbox = Sandbox::new("dry-guidance");
+    let out = run(lucida(&sandbox).args([
+        "generate", "x", "--provider", "comfyui", "--guidance", "7.1", "--dry-run", "--json",
+    ]));
+    out.exits(0).says("\"guidance\":7.1").never_says("7.0999");
+}
+
+#[test]
+fn a_dry_run_reports_a_video_resolution_and_negative_prompt() {
+    let sandbox = Sandbox::new("dry-video-fields");
+    let out = run(lucida(&sandbox).args([
+        "video",
+        "x",
+        "--provider",
+        "google",
+        "--resolution",
+        "720p",
+        "--negative",
+        "text",
+        "--dry-run",
+        "--json",
+    ]));
+    out.exits(0);
+    let doc: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(doc["resolution"], "720p");
+    assert_eq!(doc["negative_prompt"], "text");
 }
 
 #[test]
@@ -1013,6 +1182,128 @@ fn lucida_config_names_the_file_in_use() {
         .says("set (config file)");
 }
 
+/// The replies of one `lucida mcp` session, one JSON document per line.
+///
+/// Waits for `expected` replies before hanging up. A `tools/call` runs on a
+/// worker, and closing stdin discards calls that have not started — so the
+/// plain `mcp` helper, which closes it at once, would race the very call under
+/// test. Bounded, so a missing reply fails the assertion rather than hanging.
+fn mcp_replies(sandbox: &Sandbox, script: &str, expected: usize) -> Vec<serde_json::Value> {
+    use std::io::BufRead;
+
+    let mut child = lucida(sandbox)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("could not start `lucida mcp`");
+
+    let mut pipe = child.stdin.take().unwrap();
+    pipe.write_all(script.as_bytes()).expect("could not write stdin");
+
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut replies = Vec::new();
+    while replies.len() < expected {
+        match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(line) => replies
+                .push(serde_json::from_str(&line).expect("the server wrote a line that is not JSON")),
+            Err(_) => break,
+        }
+    }
+
+    drop(pipe);
+    child.wait().expect("`lucida mcp` did not exit after its input closed");
+    replies
+}
+
+#[test]
+fn a_line_that_is_not_json_gets_a_parse_error_with_a_null_id() {
+    // The line used to be logged to stderr and dropped, so a client that sent
+    // one malformed request waited for an answer for as long as it cared to.
+    let sandbox = Sandbox::new("mcp-parse-error");
+    let replies = mcp_replies(&sandbox, "this is not json\n", 1);
+
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["error"]["code"], -32700, "{}", replies[0]);
+    assert!(replies[0]["id"].is_null(), "{}", replies[0]);
+    assert!(replies[0].get("id").is_some(), "the id must be present, as null: {}", replies[0]);
+}
+
+#[test]
+fn the_error_code_says_what_was_wrong() {
+    let sandbox = Sandbox::new("mcp-codes");
+    let replies = mcp_replies(
+        &sandbox,
+        concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"paint_a_fresco","arguments":{}}}"#, "\n",
+        ),
+        2,
+    );
+
+    let code_of = |id: u64| {
+        replies
+            .iter()
+            .find(|reply| reply["id"] == id)
+            .unwrap_or_else(|| panic!("no reply to {id}: {replies:?}"))["error"]["code"]
+            .clone()
+    };
+    assert_eq!(code_of(1), -32601, "an unknown method is method-not-found");
+    assert_eq!(code_of(2), -32602, "an unknown tool is invalid params");
+}
+
+#[test]
+fn a_misspelt_argument_is_refused_and_nothing_runs() {
+    // `reference_image`, singular, used to be ignored: the call rendered a
+    // fresh generation and reported success. The output path is absolute and
+    // inside the sandbox so the test can see whether anything was written.
+    let sandbox = Sandbox::new("mcp-unknown-argument");
+    let output = sandbox.dir.join("fox.png");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "generate_image", "arguments": {
+            "prompt": "a fox",
+            "output_path": output,
+            "reference_image": "photo.png"
+        } }
+    });
+    let replies = mcp_replies(&sandbox, &format!("{call}\n"), 1);
+
+    let result = &replies[0]["result"];
+    assert_eq!(result["isError"], true, "{}", replies[0]);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("`reference_image`"), "must name the key: {text}");
+    assert!(text.contains("`reference_images`"), "must list what is accepted: {text}");
+    assert!(text.contains("nothing has been run"), "{text}");
+    assert!(!output.exists(), "a refused call must not write an image");
+}
+
+#[test]
+fn every_tool_schema_closes_its_properties() {
+    let sandbox = Sandbox::new("mcp-closed-schemas");
+    let replies = mcp_replies(&sandbox, &format!("{TOOLS_LIST}\n"), 1);
+
+    let tools = replies[0]["result"]["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    for tool in tools {
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"], false,
+            "{} does not say it refuses unknown arguments",
+            tool["name"]
+        );
+    }
+}
+
 // --- the file this replaced -------------------------------------------------
 
 #[test]
@@ -1092,23 +1383,63 @@ fn a_preference_refuses_rather_than_falling_back_to_an_unlisted_provider() {
         .says("You do have credentials for google")
         // and did not quietly render there.
         .never_says("\"provider\":\"google\"");
-    assert_ne!(out.code, 0, "an unusable preference must not exit 0");
+    // A refusal, not a failure: nothing was sent, and retrying cannot succeed
+    // until the configuration changes — which is what exit 2 tells a wrapper.
+    out.exits(2);
 }
 
 #[test]
 fn an_unknown_name_in_the_preference_refuses_rather_than_being_skipped() {
-    let sandbox = Sandbox::new("pref-typo");
-    let out = run(lucida(&sandbox)
-        .env("BFL_API_KEY", "k")
-        .env("LUCIDA_IMAGE_PROVIDERS", "bflx,bfl")
-        .args(["generate", "x", "--dry-run"]));
-
     // Skipping a typo would hand the render to whatever came next — which here
-    // is a real provider, so it would have looked like it worked.
-    out.says("LUCIDA_IMAGE_PROVIDERS lists `bflx`")
-        .says("not a provider")
-        .never_says("\"provider\":\"bfl\"");
-    assert_ne!(out.code, 0, "an unparseable preference must not exit 0");
+    // is a real provider, so it would have looked like it worked. Exit 2,
+    // because nothing was sent and the list has to change before a retry can
+    // succeed; both media share the function, so both are driven.
+    for (setting, key, list, command) in [
+        ("LUCIDA_IMAGE_PROVIDERS", "BFL_API_KEY", "bflx,bfl", &["generate", "x", "--dry-run", "--json"][..]),
+        ("LUCIDA_VIDEO_PROVIDERS", "RUNWAY_API_KEY", "runwayx,runway", &["video", "x", "--dry-run", "--json"][..]),
+    ] {
+        let sandbox = Sandbox::new("pref-typo");
+        let out = run(lucida(&sandbox).env(key, "k").env(setting, list).args(command));
+        let typo = list.split(',').next().unwrap();
+        out.exits(2)
+            .says(&format!("{setting} lists `{typo}`"))
+            .says("not a provider")
+            .never_says("\"provider\":\"bfl\"")
+            .never_says("\"provider\":\"runway\"");
+    }
+}
+
+#[test]
+fn a_preference_with_no_entries_is_refused_rather_than_read_as_unset() {
+    // `, ,` is set, and says nothing. Reading it as unset sent the render to the
+    // built-in default and reported "no preference set" about a setting that was
+    // set — the substitution the preference exists to prevent, one step earlier.
+    for (setting, command) in [
+        ("LUCIDA_IMAGE_PROVIDERS", &["generate", "x", "--dry-run"][..]),
+        ("LUCIDA_VIDEO_PROVIDERS", &["video", "x", "--dry-run"][..]),
+    ] {
+        let sandbox = Sandbox::new("pref-empty");
+        let out = run(lucida(&sandbox).env(setting, ", ,").args(command));
+        out.exits(2).says(setting).says("no provider").never_says("no preference set");
+    }
+}
+
+/// Blank is unset, and only blank: the line between this and the refusal above.
+///
+/// `config::var` drops an empty or whitespace-only value before the preference
+/// is ever parsed, so `"  "` is the built-in default and says so. `", ,"` is
+/// not blank — it holds commas — and is refused. A change to either side moves
+/// the line, which is why both are pinned here and in README.md.
+#[test]
+fn a_blank_preference_counts_as_unset() {
+    for (setting, key, command) in [
+        ("LUCIDA_IMAGE_PROVIDERS", "GEMINI_API_KEY", &["generate", "x", "--dry-run"][..]),
+        ("LUCIDA_VIDEO_PROVIDERS", "GEMINI_API_KEY", &["video", "x", "--dry-run"][..]),
+    ] {
+        let sandbox = Sandbox::new("pref-blank");
+        let out = run(lucida(&sandbox).env(key, "g").env(setting, "  ").args(command));
+        out.exits(0).says("no preference set");
+    }
 }
 
 #[test]

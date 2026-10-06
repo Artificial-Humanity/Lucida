@@ -41,9 +41,69 @@ pub const DEFAULT_MODEL: &str = "flux-2-pro";
 const PIXEL_GRID: u32 = 32;
 const DEFAULT_DIMENSIONS: (u32, u32) = (1024, 1024);
 
-/// The most reference images any FLUX.2 endpoint takes. The klein variants stop
-/// at four, so this is a ceiling rather than a promise.
-const MAX_REFERENCES: usize = 8;
+/// The most reference images an edit model takes, per model.
+///
+/// One ceiling of 8 used to cover the family, with a note that klein stopped at
+/// four — and the body builder numbered fields up to `input_image_8` for every
+/// model. Kontext and klein have no field past `input_image_4`, so the extra
+/// images were dropped by BFL without an error and the edit came back as a
+/// success built from half of what was asked for.
+///
+/// Read 2026-10-04 from `https://api.bfl.ai/openapi.json`: `Flux2Inputs`
+/// (`/v1/flux-2-pro`, `/v1/flux-2-max`) and `Flux2FlexInputs` (`/v1/flux-2-flex`)
+/// define `input_image` through `input_image_8`; `Flux2KleinInputs`
+/// (`/v1/flux-2-klein-9b`, `/v1/flux-2-klein-4b`) and `FluxKontextProInputs`
+/// (`/v1/flux-kontext-pro`, `/v1/flux-kontext-max`) stop at `input_image_4`.
+/// `None` for a model that takes no reference images at all, and for an
+/// unknown `flux-2-*` id, which keeps the family's largest figure.
+fn reference_ceiling(id: &str) -> Option<usize> {
+    if id.starts_with("flux-kontext") || id.starts_with("flux-2-klein") {
+        Some(4)
+    } else if id.starts_with("flux-2") {
+        Some(8)
+    } else {
+        None
+    }
+}
+
+/// The ratios offered on the endpoints that take an `aspect_ratio` string and
+/// no pixel dimensions.
+///
+/// BFL documents a *range* for these, 21:9 to 9:21 (the Kontext pages spell the
+/// same bounds 7:3 and 3:7), not a list. `AspectSupport::Named` can only say
+/// "these exact strings", so this is the conventional set inside that range,
+/// written the way the OpenAPI spells its bounds. A ratio inside the range that
+/// is not named here is refused rather than passed on: an offer cannot claim
+/// more than the table can hold, and the other BFL models still take any ratio.
+///
+/// Read 2026-10-04 from `https://api.bfl.ai/openapi.json`, schemas
+/// `FluxKontextProInputs` (`/v1/flux-kontext-pro` and `/v1/flux-kontext-max`)
+/// and `FluxUltraInput` (`/v1/flux-pro-1.1-ultra`), where `aspect_ratio` is
+/// "Aspect ratio of the image between 21:9 and 9:21" and `width`/`height` do not
+/// exist.
+const RATIO_ONLY_ASPECTS: &[&str] = &[
+    "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21",
+];
+
+/// Whether the endpoint takes an `aspect_ratio` string in place of `width` and
+/// `height`. Sending the pixel fields there is not an error from BFL: they are
+/// simply not part of the schema, so the render comes back at the model's own
+/// shape and the geometry that was asked for is lost without a word.
+fn takes_aspect_ratio_only(id: &str) -> bool {
+    id.starts_with("flux-kontext") || id == "flux-pro-1.1-ultra"
+}
+
+/// The known models that take only a ratio from a short list and no size, read
+/// off [`capabilities`] so that every sentence naming them (the MCP schema, the
+/// `--size` refusal, `lucida models`) is generated and cannot drift from it.
+pub fn ratio_only_models() -> Vec<&'static str> {
+    KNOWN_MODELS.iter().copied().filter(|m| !capabilities(m).size).collect()
+}
+
+/// The known models that take pixel dimensions: any ratio, and `--size`.
+pub fn sized_models() -> Vec<&'static str> {
+    KNOWN_MODELS.iter().copied().filter(|m| capabilities(m).size).collect()
+}
 
 /// Friendly names for the endpoints, which are the model ids here.
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
@@ -87,17 +147,28 @@ pub fn capabilities(model: &str) -> Capabilities {
     // quietly became a loosely-inspired generation.
     let edits = id.starts_with("flux-2") || id.starts_with("flux-kontext");
 
+    // The same per-model disagreement, for geometry: the FLUX.2 and FLUX.1.1
+    // endpoints take pixels, Kontext and Ultra take only a ratio.
+    let ratio_only = takes_aspect_ratio_only(&id);
+
     Capabilities {
         provider: "bfl",
-        tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone.",
-        aspect: AspectSupport::Free {
-            multiple_of: PIXEL_GRID,
+        // Names models by hand, because a tagline is a `&'static str`; held
+        // against this table by `the_tagline_names_exactly_the_models_the_table_does`.
+        tagline: "Hosted FLUX. Paid, fast, edits well. The only provider whose capabilities differ per MODEL: steps and guidance exist on flux-2-flex and flux-dev alone, and flux-kontext-* and flux-pro-1.1-ultra take a ratio from a short list instead of a size.",
+        aspect: if ratio_only {
+            AspectSupport::Named(RATIO_ONLY_ASPECTS)
+        } else {
+            AspectSupport::Free {
+                multiple_of: PIXEL_GRID,
+            }
         },
-        size: true,
+        size: !ratio_only,
         seed: true,
         // Measured, not assumed: no FLUX endpoint takes one.
         negative_prompt: false,
         references: edits,
+        max_references: reference_ceiling(&id),
         mask: MaskSupport::No,
         workflow: false,
         steps: tunable,
@@ -110,6 +181,31 @@ pub fn capabilities(model: &str) -> Capabilities {
         needs_reference: false,
         foreign_model: None,
     }
+}
+
+/// Whether a polling URL may be sent the API key.
+///
+/// The docs say to follow the returned `polling_url` rather than build one,
+/// because the global endpoint hands work to a regional one — so the host is not
+/// fixed, only its family is: the configured base URL's own host, or any
+/// `*.bfl.ai`, and the latter only over https. The base's exact origin is also
+/// accepted whatever its scheme, which is what keeps a recorded-response server
+/// on `http://127.0.0.1` working; production's base is https, so it admits
+/// nothing plaintext. Parsed rather than prefix-matched, so
+/// `https://api.bfl.ai@evil.example/` and `https://evilbfl.ai/` are refused.
+fn trusted_polling_url(base: &str, url: &str) -> bool {
+    let (Ok(url), Ok(base)) = (reqwest::Url::parse(url), reqwest::Url::parse(base)) else {
+        return false;
+    };
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if url.origin() == base.origin() {
+        return true;
+    }
+    url.scheme() == "https"
+        && (base.host_str().is_some_and(|b| b.eq_ignore_ascii_case(&host))
+            || host.ends_with(".bfl.ai"))
 }
 
 pub struct Client {
@@ -162,8 +258,25 @@ impl Client {
         // reframed the picture to square: the edit itself was right and the
         // composition was destroyed. Omitting the fields lets the API derive
         // them from the input image, which is what its `default: 0` means.
+        //
+        // Kontext and Ultra have no pixel fields at all, only `aspect_ratio`, so
+        // for them the same rule is spelled with the ratio: stated, or the
+        // square default when there is no source to take a shape from. Kontext
+        // is 1:1 by BFL's own default; Ultra's is 16:9, which would break the
+        // square every other lane renders, so it is always sent. `check` has
+        // already refused a `--size` and any ratio outside the list, so what
+        // arrives here is passed on as written.
         let asked_for_dimensions = req.aspect.is_some() || req.size.is_some();
-        if asked_for_dimensions || req.references.is_empty() {
+        if takes_aspect_ratio_only(model) {
+            let ratio = match req.aspect {
+                Some(aspect) => Some(aspect.to_string()),
+                None if req.references.is_empty() => Some("1:1".to_string()),
+                None => None,
+            };
+            if let Some(ratio) = ratio {
+                body.insert("aspect_ratio".into(), json!(ratio));
+            }
+        } else if asked_for_dimensions || req.references.is_empty() {
             let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
             body.insert("width".into(), json!(width));
             body.insert("height".into(), json!(height));
@@ -179,23 +292,24 @@ impl Client {
             body.insert("steps".into(), json!(steps));
         }
         if let Some(guidance) = req.guidance {
-            body.insert("guidance".into(), json!(guidance));
+            body.insert("guidance".into(), json!(crate::provider::guidance_as_written(guidance)));
         }
 
-        // Checked before the loop, not after: base64-encoding nine images and
-        // then rejecting the request would read every file for nothing.
-        if req.references.len() > MAX_REFERENCES {
-            bail!(
-                "`{model}` accepts at most {MAX_REFERENCES} reference images; {} were \
-                 given.\n\n\
-                 Note the FLUX.2 klein endpoints accept only 4, so a request the \
-                 limit here allows may still be rejected by those.",
-                req.references.len()
-            );
+        // `Capabilities::check` has already refused a count over this model's
+        // ceiling, as exit 2. Held here too because a field past the ceiling is
+        // not an error at BFL — it is ignored — so a path that skipped the check
+        // must still never number one. Before the loop, so nothing is read.
+        if let Some(most) = reference_ceiling(model) {
+            if req.references.len() > most {
+                bail!(
+                    "`{model}` accepts at most {most} reference images; {} were given.",
+                    req.references.len()
+                );
+            }
         }
 
         // Reference images are numbered fields rather than an array:
-        // input_image, input_image_2, … input_image_8.
+        // input_image, input_image_2, … up to the model's ceiling.
         for (index, reference) in req.references.iter().enumerate() {
             let field = match index {
                 0 => "input_image".to_string(),
@@ -254,6 +368,21 @@ impl Client {
         let mut interval = Duration::from_millis(1000);
         let mut announced = String::new();
         let billed = |error: anyhow::Error| abandoned(polling_url, error);
+
+        // The polling URL arrives in the submit response and every poll carries
+        // the API key to it, so a response that named some other host would be
+        // handed the key. Checked before the first poll, and marked abandoned
+        // like every other way out of the wait: the submit was billed, and the
+        // URL named here is the one handle left on what was paid for.
+        if !trusted_polling_url(&self.base, polling_url) {
+            return Err(billed(anyhow!(
+                "the API named a polling URL Lucida will not send the key to: \
+                 {polling_url}\n\n\
+                 Polling is limited to the API's own host (or a `*.bfl.ai` regional \
+                 one, over https), because each poll carries `x-key`. The render \
+                 was submitted and may be billed; nothing was polled."
+            )));
+        }
 
         loop {
             // Checked before the first poll as well as between the rest, so a
@@ -401,7 +530,13 @@ impl ImageProvider for Client {
         let model = resolve_model(&req.model);
 
         let stated = req.aspect.is_some() || req.size.is_some();
-        let shape = if stated || req.references.is_empty() {
+        let shape = if takes_aspect_ratio_only(&model)
+            && (req.aspect.is_some() || req.references.is_empty())
+        {
+            // No pixel count to print: the endpoint takes a ratio and chooses
+            // the size itself.
+            req.aspect.map_or_else(|| "1:1".to_string(), |a| a.to_string())
+        } else if stated || req.references.is_empty() {
             let (width, height) = req.pixels(DEFAULT_DIMENSIONS, PIXEL_GRID);
             format!("{width}x{height}")
         } else {
@@ -451,10 +586,10 @@ impl ImageProvider for Client {
             bail!("{}", explain_error(status.as_u16(), &text, "credits"));
         }
 
-        if let Ok(payload) = response.json::<Value>()
-            && let Some(credits) = payload["credits"].as_f64()
-        {
-            eprintln!("Key is valid. Remaining credits: {credits}");
+        if let Ok(payload) = response.json::<Value>() {
+            if let Some(credits) = payload["credits"].as_f64() {
+                eprintln!("Key is valid. Remaining credits: {credits}");
+            }
         }
 
         Ok(KNOWN_MODELS.iter().map(|m| (*m).to_string()).collect())
@@ -607,6 +742,23 @@ mod tests {
     /// reframes the picture to a square default. Measured the hard way: a 16:9
     /// source came back 1024x1024 with the composition destroyed, while the edit
     /// itself was perfectly good.
+    /// The guidance sent is the one written: 7.1, not the 7.099999904632568
+    /// an `f32` widens to through `json!`.
+    #[test]
+    fn guidance_is_sent_as_written() {
+        let client = Client {
+            key: "x".into(),
+            http: reqwest::blocking::Client::new(),
+            base: API_ROOT.into(),
+        };
+        let req = ImageRequest {
+            guidance: Some(7.1),
+            ..Default::default()
+        };
+        let body = client.body(&req, "flux-2-flex").unwrap();
+        assert_eq!(body["guidance"].to_string(), "7.1");
+    }
+
     #[test]
     fn an_edit_sends_no_dimensions_unless_asked() {
         let client = Client {
@@ -633,6 +785,219 @@ mod tests {
         // Generation always carries dimensions; there is no source to infer from.
         let fresh = ImageRequest::default();
         assert_eq!(client.body(&fresh, "flux-2-pro").unwrap()["width"], 1024);
+    }
+
+    /// BFL's OpenAPI gives `flux-kontext-*` and `flux-pro-1.1-ultra` an
+    /// `aspect_ratio` string and no `width`/`height`. They used to be declared
+    /// free-form and sent pixels the endpoint does not read, so a requested
+    /// shape came back as the model's own, with nothing said.
+    #[test]
+    fn kontext_and_ultra_take_a_ratio_and_no_size() {
+        for model in ["flux-kontext-pro", "flux-kontext-max", "flux-pro-1.1-ultra"] {
+            let caps = capabilities(model);
+            assert!(!caps.size, "{model} has no pixel fields");
+            let AspectSupport::Named(ratios) = caps.aspect else {
+                panic!("{model} must offer named ratios");
+            };
+            assert!(ratios.contains(&"16:9") && ratios.contains(&"21:9") && ratios.contains(&"9:21"));
+        }
+        // Every other endpoint, pixels included, is unchanged.
+        for model in ["flux-2-pro", "flux-2-flex", "flux-pro-1.1", "flux-dev"] {
+            let caps = capabilities(model);
+            assert!(caps.size, "{model}");
+            assert!(matches!(caps.aspect, AspectSupport::Free { .. }), "{model}");
+        }
+    }
+
+    /// The partition the MCP schema, `lucida models` and the `--size` refusal
+    /// are generated from.
+    #[test]
+    fn the_known_models_partition_by_whether_they_take_a_size() {
+        let ratio_only = ratio_only_models();
+        let sized = sized_models();
+        assert_eq!(ratio_only, ["flux-pro-1.1-ultra", "flux-kontext-pro", "flux-kontext-max"]);
+        assert_eq!(ratio_only.len() + sized.len(), KNOWN_MODELS.len());
+        assert!(sized.contains(&"flux-2-pro") && sized.contains(&"flux-dev"));
+    }
+
+    #[test]
+    fn kontext_and_ultra_send_aspect_ratio_instead_of_pixels() {
+        let client = Client {
+            key: "x".into(),
+            http: reqwest::blocking::Client::new(),
+            base: API_ROOT.into(),
+        };
+        for model in ["flux-kontext-pro", "flux-kontext-max", "flux-pro-1.1-ultra"] {
+            let asked = ImageRequest {
+                aspect: Some(Aspect::parse("16:9").unwrap()),
+                ..Default::default()
+            };
+            let body = client.body(&asked, model).unwrap();
+            assert_eq!(body["aspect_ratio"], "16:9", "{model}");
+            assert!(body.get("width").is_none() && body.get("height").is_none(), "{model}");
+
+            // Nothing stated, nothing to take a shape from: the square default,
+            // sent explicitly because Ultra would otherwise choose 16:9.
+            let fresh = client.body(&ImageRequest::default(), model).unwrap();
+            assert_eq!(fresh["aspect_ratio"], "1:1", "{model}");
+            assert!(fresh.get("width").is_none(), "{model}");
+        }
+
+        // An edit with no stated shape keeps its source's, as on the pixel models.
+        let edit = ImageRequest {
+            references: vec!["https://example.com/a.png".into()],
+            ..Default::default()
+        };
+        let body = client.body(&edit, "flux-kontext-pro").unwrap();
+        assert!(body.get("aspect_ratio").is_none() && body.get("width").is_none());
+        assert_eq!(body["input_image"], "https://example.com/a.png");
+
+        // The pixel models are untouched.
+        let body = client.body(&ImageRequest::default(), "flux-2-pro").unwrap();
+        assert_eq!(body["width"], 1024);
+        assert!(body.get("aspect_ratio").is_none());
+    }
+
+    #[test]
+    fn what_kontext_and_ultra_cannot_take_is_refused() {
+        for model in ["flux-kontext-pro", "flux-pro-1.1-ultra"] {
+            let caps = capabilities(model);
+            let sized = ImageRequest {
+                size: Some(crate::provider::Size(2048)),
+                model: model.into(),
+                ..Default::default()
+            };
+            let error = caps.check(&sized).unwrap_err().to_string();
+            assert!(error.contains("--size"), "{model}: {error}");
+            // It points at the BFL models that do take a size, not at "bfl"
+            // wholesale, which is where this refusal came from.
+            for sized in sized_models() {
+                assert!(error.contains(sized), "{model}: {error}");
+            }
+            assert!(!error.contains("`bfl` if"), "{model}: {error}");
+
+            // Inside BFL's range, but not a ratio the table names.
+            let odd = ImageRequest {
+                aspect: Some(Aspect::parse("17:10").unwrap()),
+                model: model.into(),
+                ..Default::default()
+            };
+            assert!(caps.check(&odd).is_err(), "{model}");
+
+            let fine = ImageRequest {
+                aspect: Some(Aspect::parse("3:2").unwrap()),
+                model: model.into(),
+                ..Default::default()
+            };
+            caps.check(&fine).unwrap();
+        }
+        // The pixel models still take a size and any ratio.
+        let caps = capabilities("flux-2-pro");
+        caps.check(&ImageRequest {
+            size: Some(crate::provider::Size(2048)),
+            aspect: Some(Aspect::parse("17:10").unwrap()),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    /// The tagline names models by hand, so it is held against the table.
+    ///
+    /// It is a `&'static str` beside the measured capabilities, which is where
+    /// a tagline stays true — but this one lists which models take steps and
+    /// which take only a ratio, and those lists are the capabilities restated.
+    /// Each clause is read back, its names (a trailing `*` is a prefix) expanded
+    /// against `KNOWN_MODELS`, and compared with what `capabilities` says. A
+    /// model added to either group, or a sentence rewritten so its clause can no
+    /// longer be found, fails here rather than in front of an agent.
+    #[test]
+    fn the_tagline_names_exactly_the_models_the_table_does() {
+        fn expand(clause: &str) -> Vec<&'static str> {
+            let mut named: Vec<&'static str> = clause
+                .split(" and ")
+                .flat_map(|part| part.split(", "))
+                .flat_map(|name| {
+                    let name = name.trim();
+                    let hits: Vec<&'static str> = match name.strip_suffix('*') {
+                        Some(prefix) => {
+                            KNOWN_MODELS.iter().copied().filter(|m| m.starts_with(prefix)).collect()
+                        }
+                        None => KNOWN_MODELS.iter().copied().filter(|m| *m == name).collect(),
+                    };
+                    assert!(!hits.is_empty(), "the tagline names `{name}`, which is no known model");
+                    hits
+                })
+                .collect();
+            named.sort_unstable();
+            named
+        }
+        let sorted = |mut v: Vec<&'static str>| {
+            v.sort_unstable();
+            v
+        };
+
+        let tagline = capabilities(DEFAULT_MODEL).tagline;
+
+        let steps = tagline
+            .split_once("steps and guidance exist on ")
+            .and_then(|(_, rest)| rest.split_once(" alone"))
+            .map(|(clause, _)| clause)
+            .unwrap_or_else(|| panic!("no steps clause in the tagline: {tagline}"));
+        let tunable = KNOWN_MODELS.iter().copied().filter(|m| capabilities(m).steps).collect();
+        assert_eq!(expand(steps), sorted(tunable), "{tagline}");
+
+        let ratio = tagline
+            .split_once(" take a ratio")
+            .and_then(|(before, _)| before.rsplit_once(", and "))
+            .map(|(_, clause)| clause)
+            .unwrap_or_else(|| panic!("no ratio clause in the tagline: {tagline}"));
+        assert_eq!(expand(ratio), sorted(ratio_only_models()), "{tagline}");
+    }
+
+    /// Each edit model's reference ceiling is its own, and a request over it is
+    /// refused before anything is read or sent.
+    ///
+    /// One ceiling of 8 covered the family, and the body builder numbered
+    /// fields up to `input_image_8` for every model — but Kontext and klein
+    /// have no field past `input_image_4`, so images five to eight were dropped
+    /// by BFL without a word and the edit came back as a success built from
+    /// half of what was asked for. The figures are BFL's schemas, read from
+    /// `https://api.bfl.ai/openapi.json`.
+    #[test]
+    fn each_edit_model_refuses_references_past_its_own_ceiling() {
+        let refs = |n: usize| -> Vec<String> {
+            (0..n).map(|i| format!("https://example.com/{i}.png")).collect()
+        };
+        for (model, most) in [
+            ("flux-2-pro", 8),
+            ("flux-2-max", 8),
+            ("flux-2-flex", 8),
+            ("flux-2-klein-9b", 4),
+            ("flux-2-klein-4b", 4),
+            ("flux-kontext-pro", 4),
+            ("flux-kontext-max", 4),
+        ] {
+            let caps = capabilities(model);
+            caps.check(&ImageRequest {
+                references: refs(most),
+                model: model.into(),
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{model} refused {most}: {e:#}"));
+
+            let error = caps
+                .check(&ImageRequest {
+                    references: refs(most + 1),
+                    model: model.into(),
+                    ..Default::default()
+                })
+                .expect_err(&format!("{model} accepted {} references", most + 1));
+            assert_eq!(crate::out::code_for(&error), crate::out::REFUSED, "{model}");
+            let text = format!("{error:#}");
+            assert!(text.contains(&format!("at most {most} reference")), "{model}: {text}");
+            assert!(text.contains(model), "{model}: {text}");
+        }
     }
 
     #[test]
@@ -863,5 +1228,78 @@ mod tests {
         assert!(format!("{error:#}").contains("out of credits"), "{error:#}");
         assert!(entries.is_empty(), "an unbilled submit was counted: {entries:?}");
         server.finish();
+    }
+
+    #[test]
+    fn only_the_apis_own_hosts_are_trusted_with_the_key() {
+        let base = "https://api.bfl.ai/v1";
+        for trusted in [
+            "https://api.bfl.ai/v1/get_result?id=a",
+            "https://api.eu1.bfl.ai/v1/get_result?id=a",
+            "https://API.BFL.AI/v1/get_result?id=a",
+        ] {
+            assert!(trusted_polling_url(base, trusted), "{trusted}");
+        }
+        for untrusted in [
+            "http://api.bfl.ai/v1/get_result?id=a",       // plaintext
+            "https://evil.example/v1/get_result?id=a",    // another host
+            "https://evilbfl.ai/v1/get_result?id=a",      // suffix without the dot
+            "https://api.bfl.ai@evil.example/get_result", // userinfo trick
+            "https://bfl.ai.evil.example/get_result",
+            "not a url",
+        ] {
+            assert!(!trusted_polling_url(base, untrusted), "{untrusted}");
+        }
+        // A recorded-response server is its own base, whatever its scheme.
+        assert!(trusted_polling_url("http://127.0.0.1:9/", "http://127.0.0.1:9/get_result"));
+        assert!(!trusted_polling_url("http://127.0.0.1:9/", "http://127.0.0.1:10/get_result"));
+    }
+
+    /// The key is never sent to a host the submit response invented, and the
+    /// refusal is still an abandoned render — it was billed — naming the URL.
+    ///
+    /// The "foreign" host is a second local server on another port: a different
+    /// origin, over plain http, which the check must reject. Local so that a
+    /// build with the check missing makes no outbound request — and so that the
+    /// request it *would* make is recorded and counted rather than lost to DNS.
+    #[test]
+    fn a_foreign_polling_url_is_never_sent_the_key() {
+        // Answers terminally if it is ever asked, so a missing check ends this
+        // test quickly instead of polling on.
+        let foreign = serve(vec![Reply::json(r#"{"status":"Request Moderated"}"#)]);
+        let polling_url = format!("{}/v1/get_result?id=abc", foreign.url());
+        let submit = format!(r#"{{"id":"abc","polling_url":"{polling_url}"}}"#);
+        let server = serve(vec![Reply::json(&submit)]);
+
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "flux-2-pro".into(),
+            ..Default::default()
+        };
+        let error = wired(&server).generate(&request).unwrap_err();
+        let abandoned = error
+            .downcast_ref::<crate::provider::Abandoned>()
+            .expect("a billed submit's failure is marked abandoned");
+        assert_eq!(abandoned.handle, polling_url);
+        let message = error.to_string();
+        assert!(message.contains("will not send the key to"), "{message}");
+        assert!(message.contains(&polling_url), "{message}");
+
+        assert_eq!(server.finish().len(), 1, "nothing but the submit went to the API");
+
+        // The test server only stops listening once its script is used up, and
+        // would otherwise hold `finish` for its whole 15 s deadline. So the test
+        // makes the one request itself: what the foreign host recorded must be
+        // that probe and nothing before it.
+        use std::io::{Read, Write};
+        let addr = foreign.url().trim_start_matches("http://").to_string();
+        if let Ok(mut probe) = std::net::TcpStream::connect(&addr) {
+            let _ = probe.write_all(b"GET /probe HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            let _ = probe.read_to_end(&mut Vec::new());
+        }
+        let received = foreign.finish();
+        let paths: Vec<&str> = received.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["/probe"], "the foreign host was sent a request by the client");
+        assert_eq!(received[0].header("x-key"), None);
     }
 }

@@ -47,8 +47,8 @@ use video::VideoRequest;
     version,
     about = "Generate images and video with Google Gemini, Veo, Runway, Kling, a local ComfyUI, FLUX, Stability AI or OpenAI",
     long_about = "Generate and edit images with Google Gemini, a local ComfyUI, \
-                  hosted FLUX from Black Forest Labs, Stability AI, or OpenAI, \
-                  and video with Veo, Runway or Kling.\n\n\
+                  hosted FLUX from Black Forest Labs, Stability AI, OpenAI or \
+                  Runway, and video with Veo, Runway or Kling.\n\n\
                   Google reads GEMINI_API_KEY — one key for both images and Veo \
                   video. Image generation requires billing to be enabled on the \
                   project behind the key; free-tier keys report a quota of \
@@ -59,6 +59,9 @@ use video::VideoRequest;
                   capabilities differ per model — run `lucida models --provider bfl`.\n\n\
                   Stability reads STABILITY_API_KEY; OpenAI reads OPENAI_API_KEY, \
                   and model access there is granted per project.\n\n\
+                  Runway reads RUNWAY_API_KEY, one key for both its images and \
+                  its video. Kling reads KLINGAI_API_KEY; every Kling render \
+                  costs credits.\n\n\
                   Any of these can live in a config file; see `lucida config`.",
     disable_version_flag = true
 )]
@@ -245,8 +248,8 @@ enum Command {
         #[arg(short, long)]
         model: Option<String>,
 
-        /// Which provider to use: google or runway. Inferred from the model when
-        /// omitted.
+        /// Which provider to use: google, runway or kling. Inferred from the model
+        /// when omitted.
         #[arg(long)]
         provider: Option<String>,
 
@@ -398,10 +401,45 @@ fn main() {
     }
 }
 
+/// Refuses `--json` on a command that has no JSON document to give.
+///
+/// `out.rs` promises one JSON object on stdout whatever happens, and `--json` is
+/// global so that a caller never has to remember which subcommands take it. These
+/// five print prose with `println!`, so honouring the flag would mean a stream
+/// that is not JSON under a flag that says it is — and ignoring it, which is what
+/// they did, made the parser on the other end fail on the first word. The flag is
+/// refused instead, by the same rule as any parameter that cannot be honoured.
+///
+/// Listed by the commands that *lack* a document, not by those that have one, so a
+/// new command inherits the promise until someone says it cannot keep it. `mcp` is
+/// in neither list: its stdout is JSON-RPC framing, a stream of documents the
+/// protocol defines, and the flag changes nothing about it.
+fn refuse_json_without_a_document(command: &Command) -> Result<()> {
+    let name = match command {
+        Command::Models { .. } => "models",
+        Command::Config { .. } => "config",
+        Command::Skill => "skill",
+        Command::Setup { .. } => "setup",
+        Command::Update { .. } => "update",
+        _ => return Ok(()),
+    };
+    Err(anyhow::Error::new(out::Refused(format!(
+        "`lucida {name}` prints text and has no JSON document, so `--json` cannot \
+         be honoured. Run it without `--json`; nothing was done."
+    ))))
+}
+
 /// Returns the exit code rather than `()`, because "still working" is an
 /// outcome and not an error — `lucida check` has to be able to say so without
 /// pretending something went wrong.
 fn run(cli: Cli) -> Result<i32> {
+    // Before any command runs: `config --init` writes a file and `update` goes to
+    // the network, and a refusal reported after either would be a lie about
+    // "nothing was done".
+    if cli.json {
+        refuse_json_without_a_document(&cli.command)?;
+    }
+
     match cli.command {
         Command::Mcp => mcp::serve().map(|()| out::OK),
 
@@ -450,10 +488,7 @@ fn run(cli: Cli) -> Result<i32> {
             setup::run(scope, dry_run, yes).map(|()| out::OK)
         }
 
-        Command::Skill => {
-            skill::print();
-            Ok(out::OK)
-        }
+        Command::Skill => skill::print().map(|()| out::OK),
 
         Command::Update { check, yes } => {
             let mode = match (check, yes) {
@@ -647,6 +682,10 @@ fn run(cli: Cli) -> Result<i32> {
                     "model": resolved,
                     "prompt": request.prompt,
                     "aspect": request.aspect.map(|a| a.to_string()),
+                    // Resolution and the negative prompt are sent too; they
+                    // were the two fields of the request this left out.
+                    "resolution": request.resolution,
+                    "negative_prompt": request.negative_prompt,
                     "duration": request.duration,
                     "mode": request.mode,
                     "seed": request.seed,
@@ -931,13 +970,15 @@ impl ImageOptions {
         // has nowhere to go — the same reasoning that refuses `--ref` with a
         // workflow. Caught here rather than in the provider because only the
         // entry point still knows the model was typed rather than defaulted.
+        // A refusal (exit 2): nothing has been sent.
         if self.workflow.is_some() && self.model.is_some() {
-            anyhow::bail!(
+            return Err(anyhow::Error::new(out::Refused(
                 "a workflow and an explicit `--model` cannot be combined.\n\n\
                  A supplied workflow names its own checkpoints, so there is \
                  nowhere to put a model id. Name the model inside the workflow \
                  file, or drop `--workflow` to use the built-in graph."
-            );
+                    .to_string(),
+            )));
         }
 
         // Nothing named: this is the only branch a preference may answer, and
@@ -1113,6 +1154,25 @@ fn assigns(line: &str, name: &str) -> bool {
     bare.split_once('=').is_some_and(|(key, _)| key.trim() == name)
 }
 
+/// Stops a config writer before it resolves a path, when running under test.
+///
+/// `config` seals what a unit test can *read* (`files_to_load` and
+/// `from_environment` answer nothing under `cfg(test)`), but `preferred_path`
+/// still resolves the real `HOME`, because a test of the search needs it to.
+/// The file it names is the developer's own `config.env`, which holds real
+/// provider keys, so `init`, `set` and `remove` would write to it from any unit
+/// test that called them. Each calls this first — `set` before it reads stdin
+/// — so the seal covers writing too.
+fn refuse_config_writes_under_test() -> Result<()> {
+    if cfg!(test) {
+        anyhow::bail!(
+            "config writes are refused under cfg(test): the path they resolve is \
+             the developer's real config.env, which holds real keys."
+        );
+    }
+    Ok(())
+}
+
 /// Removes one setting from the config file.
 ///
 /// The counterpart to `--set`, and the reason it exists is that changing a key
@@ -1122,6 +1182,7 @@ fn assigns(line: &str, name: &str) -> bool {
 /// search order, or in one named by `LUCIDA_CONFIG`. Removing from anywhere else
 /// would report success and change nothing.
 fn remove_config(name: &str) -> Result<()> {
+    refuse_config_writes_under_test()?;
     let name = name.trim();
     validate_setting_name(name)?;
 
@@ -1171,6 +1232,7 @@ fn remove_config(name: &str) -> Result<()> {
 }
 
 fn set_config(name: &str) -> Result<()> {
+    refuse_config_writes_under_test()?;
     let name = name.trim();
     validate_setting_name(name)?;
 
@@ -1280,6 +1342,7 @@ fn set_config(name: &str) -> Result<()> {
 }
 
 fn init_config() -> Result<()> {
+    refuse_config_writes_under_test()?;
     let path = config::preferred_path()
         .context(
             "could not determine a config location: none of XDG_CONFIG_HOME, HOME or \
@@ -1566,15 +1629,7 @@ fn list_models(backend: Backend) -> Result<()> {
             // listed per model rather than once for the provider. Anything else
             // would send someone to the wrong endpoint for `--steps`.
             if backend == Backend::Bfl {
-                let per_model = provider::capabilities_for(backend, model);
-                if per_model.steps {
-                    notes.push("steps + guidance".into());
-                }
-                notes.push(if per_model.references {
-                    "edits".into()
-                } else {
-                    "generate only".into()
-                });
+                notes.extend(bfl_model_notes(model));
             }
             let suffix = if notes.is_empty() {
                 String::new()
@@ -1616,6 +1671,29 @@ fn list_models(backend: Backend) -> Result<()> {
     println!("  output carries  {}", caps.provenance.describe());
 
     Ok(())
+}
+
+/// What differs per BFL model, as the notes beside it in `lucida models`.
+/// Generated from the capabilities, so a note cannot outlive the table.
+fn bfl_model_notes(model: &str) -> Vec<String> {
+    let per_model = provider::capabilities_for(Backend::Bfl, model);
+    let mut notes = Vec::new();
+    if per_model.steps {
+        notes.push("steps + guidance".to_string());
+    }
+    // The ceiling is said here because the over-ceiling refusal points here
+    // for a model that takes more.
+    notes.push(match (per_model.references, per_model.max_references) {
+        (true, Some(most)) => format!("edits, up to {most} references"),
+        (true, None) => "edits".to_string(),
+        (false, _) => "generate only".to_string(),
+    });
+    // Geometry differs per model too: Kontext and Ultra take a ratio from a
+    // list and no `--size`.
+    if !per_model.size {
+        notes.push("aspect ratio from a list, no --size".to_string());
+    }
+    notes
 }
 
 fn yes_no(supported: bool) -> &'static str {
@@ -1720,6 +1798,15 @@ fn execute(
             "size": request.size.map(|s| s.0),
             "seed": request.seed,
             "references": request.references,
+            // Everything else the render would send, so the plan answers
+            // "what would you send?" in full. These five used to be resolved,
+            // validated and then left out of the document that claims to list
+            // every resolved parameter.
+            "negative_prompt": request.negative_prompt,
+            "mask": request.mask,
+            "workflow": request.workflow,
+            "steps": request.steps,
+            "guidance": request.guidance.map(provider::guidance_as_written),
             "estimated_usd": price.against_budget() * count as f64,
             "exit_code": out::OK,
         }))?;
@@ -1838,10 +1925,10 @@ fn render_one(
         );
     })?;
 
-    if let Some(commentary) = &image.commentary
-        && !commentary.is_empty()
-    {
-        eprintln!("{commentary}");
+    if let Some(commentary) = &image.commentary {
+        if !commentary.is_empty() {
+            eprintln!("{commentary}");
+        }
     }
     if let Some(seed) = image.seed {
         eprintln!("Seed {seed} — pass `--seed {seed}` to render this again.");
@@ -2001,7 +2088,16 @@ pub fn image_dimensions(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
 /// asked for — so `-o icon.png` would otherwise leave a file named `.png` holding
 /// JPEG bytes. That passes unnoticed until some downstream tool rejects it. The
 /// real path is what goes to stdout, so scripts capturing it stay correct.
+///
+/// Only an extension that is *a known image or video extension* is replaced. Any
+/// other suffix is part of the name, not a format: `-o hero.v1` and `-o hero.v2`
+/// both went through `with_extension` and became `hero.png`, so the second render
+/// silently overwrote the first. Those get the extension appended instead
+/// (`hero.v1.png`). The list is the formats Lucida itself writes, which is also the
+/// set a person might plausibly have meant as a mismatched format.
 pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
+    const FORMATS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "mp4"];
+
     let expected = match mime {
         "image/jpeg" => "jpg",
         "image/png" => "png",
@@ -2022,10 +2118,25 @@ pub fn correct_extension(path: &Path, mime: &str) -> PathBuf {
     };
 
     if matches {
-        path.to_path_buf()
-    } else {
-        path.with_extension(expected)
+        return path.to_path_buf();
     }
+    if actual.as_deref().is_some_and(|e| FORMATS.contains(&e)) {
+        return path.with_extension(expected);
+    }
+
+    // Appended, to the file name alone so the directory is untouched. A path with
+    // no file name at all (`..`, or empty) has nothing to append to; the old
+    // behaviour is the best of the bad options there.
+    let Some(name) = path.file_name() else {
+        return path.with_extension(expected);
+    };
+    let mut name = name.to_os_string();
+    // `hero.` already has its dot.
+    if !name.to_string_lossy().ends_with('.') {
+        name.push(".");
+    }
+    name.push(expected);
+    path.with_file_name(name)
 }
 
 /// Writes `bytes` to `path` without ever leaving it truncated.
@@ -2217,11 +2328,11 @@ pub fn write_billed(
 pub fn write_image(path: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
     let path = path.as_ref();
 
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
     }
 
     write_atomically(path, bytes, false)?;
@@ -2246,6 +2357,72 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `lucida models --provider bfl` annotated Kontext and Ultra exactly like
+    /// the pixel models, though they take a ratio from a list and no `--size`.
+    #[test]
+    fn bfl_models_are_annotated_with_their_geometry() {
+        for model in bfl::ratio_only_models() {
+            let notes = bfl_model_notes(model).join("; ");
+            assert!(notes.contains("no --size"), "{model}: {notes}");
+        }
+        for model in bfl::sized_models() {
+            let notes = bfl_model_notes(model).join("; ");
+            assert!(!notes.contains("--size"), "{model}: {notes}");
+        }
+        // The notes that were already there survive.
+        assert!(bfl_model_notes("flux-2-flex").join("; ").contains("steps + guidance"));
+        assert!(bfl_model_notes("flux-dev").contains(&"generate only".to_string()));
+        // And each edit model's reference ceiling, which the over-ceiling
+        // refusal sends a caller here to compare.
+        assert!(bfl_model_notes("flux-kontext-pro").join("; ").contains("up to 4 references"));
+        assert!(bfl_model_notes("flux-2-pro").join("; ").contains("up to 8 references"));
+    }
+
+    /// A suffix that is not a format is part of the name, so two renders that
+    /// differ only in it must not land on one file.
+    ///
+    /// This was `with_extension`, which replaces whatever follows the last dot:
+    /// `hero.v1` and `hero.v2` both became `hero.png`, and the second render
+    /// overwrote the first without a word.
+    #[test]
+    fn an_unknown_suffix_is_kept_and_the_extension_appended() {
+        let png = |p: &str| correct_extension(Path::new(p), "image/png");
+
+        assert_eq!(png("hero.v1"), PathBuf::from("hero.v1.png"));
+        assert_eq!(png("hero.v2"), PathBuf::from("hero.v2.png"));
+        assert_ne!(png("hero.v1"), png("hero.v2"), "two names collapsed into one file");
+
+        // No extension at all, and the directory untouched.
+        assert_eq!(png("out/hero"), PathBuf::from("out/hero.png"));
+        assert_eq!(png("out.v1/hero.v1"), PathBuf::from("out.v1/hero.v1.png"));
+        assert_eq!(png("hero."), PathBuf::from("hero.png"));
+    }
+
+    /// A known format that disagrees with the bytes is replaced, which is the
+    /// whole reason the function exists — in either case, and for video.
+    #[test]
+    fn a_known_extension_that_disagrees_with_the_bytes_is_replaced() {
+        let fix = |p: &str, mime: &str| correct_extension(Path::new(p), mime);
+
+        assert_eq!(fix("icon.png", "image/jpeg"), PathBuf::from("icon.jpg"));
+        assert_eq!(fix("icon.PNG", "image/webp"), PathBuf::from("icon.webp"));
+        assert_eq!(fix("icon.webp", "image/png"), PathBuf::from("icon.png"));
+        assert_eq!(fix("clip.jpg", "video/mp4"), PathBuf::from("clip.mp4"));
+        assert_eq!(fix("clip.mp4", "image/png"), PathBuf::from("clip.png"));
+        assert_eq!(fix("a.v1/icon.jpeg", "image/png"), PathBuf::from("a.v1/icon.png"));
+    }
+
+    /// An extension that already agrees is left exactly as written, including its
+    /// case and `jpeg` for JPEG, and an unknown mime type changes nothing.
+    #[test]
+    fn an_agreeing_extension_is_left_alone() {
+        let fix = |p: &str, mime: &str| correct_extension(Path::new(p), mime);
+
+        assert_eq!(fix("icon.PNG", "image/png"), PathBuf::from("icon.PNG"));
+        assert_eq!(fix("icon.jpeg", "image/jpeg"), PathBuf::from("icon.jpeg"));
+        assert_eq!(fix("icon.v1", "application/octet-stream"), PathBuf::from("icon.v1"));
+    }
 
     /// The shopfront surfaces — the package description and the `--help` banner
     /// — are the first and often only thing anyone reads, and they are pure
@@ -2280,6 +2457,71 @@ mod tests {
                     "`{name}` is missing from a surface someone reads before installing: {surface}"
                 );
             }
+        }
+    }
+
+    /// `--help` is the long form of the shopfront, and the one a person reads
+    /// when they are deciding which key to export — so it has to name every
+    /// provider and every credential, not only the ones that existed when it was
+    /// written. It named five of six image providers and no Runway or Kling key.
+    ///
+    /// Both lists come from the same tables the code routes by. A provider whose
+    /// credential is `None` (the local one) has nothing to name.
+    #[test]
+    fn the_long_help_names_every_provider_and_every_key() {
+        use clap::CommandFactory;
+
+        let long = Cli::command()
+            .get_long_about()
+            .map(|a| a.to_string())
+            .expect("the CLI has no long description");
+
+        for backend in Backend::ALL {
+            assert!(
+                long.contains(backend.product_name()),
+                "`{}` is missing from the long help: {long}",
+                backend.product_name()
+            );
+            if let Some(key) = backend.credential() {
+                assert!(long.contains(key), "{key} is missing from the long help: {long}");
+            }
+        }
+        for backend in provider::VideoBackend::ALL {
+            let name = Backend::video_product_name(*backend);
+            assert!(long.contains(name), "`{name}` is missing from the long help: {long}");
+            if let Some(key) = backend.credential() {
+                assert!(long.contains(key), "{key} is missing from the long help: {long}");
+            }
+        }
+    }
+
+    /// `video --provider` is a hand-written clap string, and it listed two of
+    /// three providers. The image flag's list is held against the MCP enum in
+    /// `tests/cli.rs`; this holds the video one against `VideoBackend::ALL`
+    /// directly, which is visible from here.
+    #[test]
+    fn the_video_provider_help_names_every_video_provider() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let video = command
+            .get_subcommands()
+            .find(|c| c.get_name() == "video")
+            .expect("no `video` subcommand");
+        let help = video
+            .get_arguments()
+            .find(|a| a.get_id() == "provider")
+            .expect("no `--provider` argument")
+            .get_help()
+            .expect("`video --provider` has no help")
+            .to_string();
+
+        for backend in provider::VideoBackend::ALL {
+            assert!(
+                help.contains(backend.name()),
+                "`{}` is a video provider but the `video --provider` help omits it: {help}",
+                backend.name()
+            );
         }
     }
 
@@ -2330,11 +2572,11 @@ mod tests {
             }
             // An explicit id wins, and is how a duplicate heading name is made
             // linkable at all.
-            if let Some(at) = line.find("<h")
-                && let Some(start) = line[at..].find("id=\"")
-            {
-                let rest = &line[at + start + 4..];
-                anchors.push(rest[..rest.find('"').unwrap()].to_string());
+            if let Some(at) = line.find("<h") {
+                if let Some(start) = line[at..].find("id=\"") {
+                    let rest = &line[at + start + 4..];
+                    anchors.push(rest[..rest.find('"').unwrap()].to_string());
+                }
             }
         }
 
@@ -2737,6 +2979,25 @@ mod tests {
         assert_eq!(image_dimensions(&vp8l, "image/webp"), Some((1024, 576)));
     }
 
+    /// None of the config writers can reach a file from a unit test.
+    ///
+    /// `config::preferred_path` reads the real `HOME` even under `cfg(test)`,
+    /// and the file it names is the developer's own `config.env`, which holds
+    /// real provider keys. Each writer must refuse before resolving a path —
+    /// and `set_config` before reading stdin — so a future test that calls one
+    /// cannot overwrite that file.
+    #[test]
+    fn the_config_writers_refuse_under_test() {
+        for (what, result) in [
+            ("init", init_config()),
+            ("set", set_config("GEMINI_API_KEY")),
+            ("remove", remove_config("GEMINI_API_KEY")),
+        ] {
+            let error = result.expect_err(&format!("config --{what} ran under test"));
+            assert!(format!("{error:#}").contains("under cfg(test)"), "{what}: {error:#}");
+        }
+    }
+
     /// The last silent drop from the review: `--workflow` ignored an explicit
     /// `--model` without a word, because the provider cannot tell "typed" from
     /// "defaulted" once into_request fills the default in. So it is refused
@@ -2749,10 +3010,9 @@ mod tests {
             model: Some("klein".into()),
             ..Default::default()
         };
-        let error = opts
-            .into_request("x".into(), Vec::new())
-            .unwrap_err()
-            .to_string();
+        let error = opts.into_request("x".into(), Vec::new()).unwrap_err();
+        assert_eq!(out::code_for(&error), out::REFUSED, "{error:#}");
+        let error = error.to_string();
         assert!(error.contains("--workflow"), "must name the conflict: {error}");
         assert!(error.contains("--model"));
 

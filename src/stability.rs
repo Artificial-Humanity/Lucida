@@ -100,6 +100,18 @@ pub fn capabilities(_model: &str) -> Capabilities {
         seed: true,
         // Verified by rendering, not by the absence of a validation error —
         // unknown fields here are silently dropped, so absence proves nothing.
+        //
+        // Declared for every model, `_model` ignored, and that is what the
+        // documentation says rather than an oversight. Read 2026-10-04 from the
+        // API reference's own spec, `https://api.stability.ai/v2alpha/openapi`
+        // (the URL the docs site at platform.stability.ai loads it from):
+        // `/v2beta/stable-image/generate/sd3` lists `negative_prompt` under
+        // "Both modes support the following optional parameters", beside
+        // `model` naming all four variants, with no per-variant exception, and
+        // the only per-variant remark in the request is that `cfg_scale`
+        // defaults to 1 on Turbo and Flash. Whether a turbo model makes the field
+        // pointless at its default guidance is a claim to test by render, not a
+        // documented refusal to encode.
         negative_prompt: true,
         // Deliberately false for now. The generate endpoints take no reference
         // image; editing lives on separate endpoints (edit/inpaint, edit/erase,
@@ -107,6 +119,7 @@ pub fn capabilities(_model: &str) -> Capabilities {
         // a *mask* — which `ImageRequest` cannot express. Claiming support here
         // would silently turn an edit into a fresh generation.
         references: false,
+        max_references: None,
     mask: MaskSupport::No,
     workflow: false,
         // Not exposed on core/ultra/sd3.
@@ -268,6 +281,32 @@ impl ImageProvider for Client {
             .get("seed")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
+
+        // With `Accept: image/*` the verdict rides in a `finish-reason` header
+        // on a 200, and `CONTENT_FILTERED` means the bytes are a *blurred*
+        // image — a success status wrapped around something other than what was
+        // asked for. Anything but `SUCCESS` is therefore an error naming the
+        // reason; a missing header is accepted, as it was before this was read.
+        if let Some(reason) = response
+            .headers()
+            .get("finish-reason")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|reason| !reason.eq_ignore_ascii_case("SUCCESS"))
+        {
+            bail!(
+                "Stability did not return the image that was asked for: \
+                 finish-reason {reason}.\n\n\
+                 {}",
+                if reason.eq_ignore_ascii_case("CONTENT_FILTERED") {
+                    "Its safety filter blurred the result, so nothing was kept. \
+                     Rephrase the prompt; the same request will be filtered again."
+                } else {
+                    "The result was not written, because it may not be the render \
+                     the request describes."
+                }
+            );
+        }
 
         let bytes = response.bytes().context("reading image bytes")?.to_vec();
 
@@ -510,5 +549,40 @@ mod tests {
         let body = requests[0].body_text();
         assert!(body.contains("name=\"model\""));
         assert!(body.contains("sd3.5-flash"));
+    }
+
+    /// Stability answers 200 with a blurred image when its filter fires, and says
+    /// so only in a header. That is an error, not a render.
+    #[test]
+    fn a_filtered_image_is_an_error_naming_the_reason() {
+        for reason in ["CONTENT_FILTERED", "ERROR"] {
+            let server = serve(vec![
+                Reply::bytes("image/png", b"blurred").with_header("finish-reason", reason),
+            ]);
+            let request = ImageRequest {
+                prompt: "a fox".into(),
+                model: "core".into(),
+                ..Default::default()
+            };
+            let error = wired(&server).generate(&request).unwrap_err().to_string();
+            assert!(error.contains(reason), "{error}");
+            server.finish();
+        }
+    }
+
+    /// `SUCCESS` passes, and so does a reply with no header at all — every
+    /// recording above this one has none.
+    #[test]
+    fn a_success_finish_reason_is_accepted() {
+        let server = serve(vec![
+            Reply::bytes("image/png", b"fine").with_header("finish-reason", "SUCCESS"),
+        ]);
+        let request = ImageRequest {
+            prompt: "a fox".into(),
+            model: "core".into(),
+            ..Default::default()
+        };
+        assert_eq!(wired(&server).generate(&request).unwrap().bytes, b"fine");
+        server.finish();
     }
 }

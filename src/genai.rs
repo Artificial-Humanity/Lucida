@@ -182,6 +182,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     // Veo takes one; the image models do not.
     negative_prompt: false,
     references: true,
+    // No ceiling recorded here.
+    max_references: None,
     mask: MaskSupport::No,
     workflow: false,
     steps: false,
@@ -293,17 +295,17 @@ fn no_key() -> anyhow::Error {
     // Someone holding the old name has a key that is present and correct, so
     // "no API key found" would send them to check the one thing that is not
     // wrong. Diagnose the rename instead, and say nothing about shells.
-    if let Some(replacement) = crate::config::replacement_for("GOOGLE_API_KEY")
-        && crate::config::origin("GOOGLE_API_KEY").is_some()
-    {
-        return anyhow!(
-            "GOOGLE_API_KEY is set, but Lucida no longer reads it — the setting \
-             was renamed to {replacement}.\n\n\
-             Rename it in your shell profile, or file it with:\n  \
-             lucida config --set {replacement}\n\n\
-             Everything Lucida reaches on Google is the Gemini API, so one name \
-             covers images and Veo alike."
-        );
+    if let Some(replacement) = crate::config::replacement_for("GOOGLE_API_KEY") {
+        if crate::config::origin("GOOGLE_API_KEY").is_some() {
+            return anyhow!(
+                "GOOGLE_API_KEY is set, but Lucida no longer reads it — the setting \
+                 was renamed to {replacement}.\n\n\
+                 Rename it in your shell profile, or file it with:\n  \
+                 lucida config --set {replacement}\n\n\
+                 Everything Lucida reaches on Google is the Gemini API, so one name \
+                 covers images and Veo alike."
+            );
+        }
     }
 
     anyhow!(
@@ -380,6 +382,14 @@ fn extract_image(payload: &Value) -> Result<GeneratedImage> {
 
     let mut commentary = None;
     for part in parts {
+        // A thinking model interleaves its reasoning with the answer: thought
+        // parts carry `"thought": true`, and their `inlineData` is a *draft*
+        // image the model is still working on. Taking the first inlineData
+        // returned the draft as the result, and their text became the
+        // commentary. Only the non-thought parts are the answer.
+        if part["thought"].as_bool() == Some(true) {
+            continue;
+        }
         if let Some(text) = part["text"].as_str() {
             commentary = Some(text.trim().to_string());
         }
@@ -532,5 +542,37 @@ mod tests {
         });
         let error = extract_image(&payload).unwrap_err().to_string();
         assert!(error.contains("I can't draw that."));
+    }
+
+    /// A thought part's image is a draft, and its text is reasoning: neither is
+    /// the answer, wherever they fall among the parts.
+    #[test]
+    fn thought_parts_are_neither_the_image_nor_the_commentary() {
+        let payload = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "text": "Considering the composition", "thought": true },
+                { "inlineData": { "mimeType": "image/png",
+                                  "data": STANDARD.encode(b"draft") }, "thought": true },
+                { "text": "Here you go" },
+                { "inlineData": { "mimeType": "image/jpeg",
+                                  "data": STANDARD.encode(b"final") } }
+            ]}}]
+        });
+        let image = extract_image(&payload).unwrap();
+        assert_eq!(image.bytes, b"final");
+        assert_eq!(image.mime_type, "image/jpeg");
+        assert_eq!(image.commentary.as_deref(), Some("Here you go"));
+
+        // Nothing but thoughts is not an image, and the reasoning is not offered
+        // as the model's reply.
+        let only_thoughts = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "text": "hmm", "thought": true },
+                { "inlineData": { "mimeType": "image/png",
+                                  "data": STANDARD.encode(b"draft") }, "thought": true }
+            ]}}]
+        });
+        let error = extract_image(&only_thoughts).unwrap_err().to_string();
+        assert!(error.contains("no image data"), "{error}");
     }
 }

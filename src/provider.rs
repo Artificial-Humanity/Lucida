@@ -22,6 +22,18 @@
 use anyhow::{Result, bail};
 use std::fmt;
 
+/// A guidance scale as the number a JSON document should carry: the shortest
+/// decimal that reads back as the same `f32`.
+///
+/// `json!` on an `f32` widens it to `f64` first, and `7.1f32` widened is
+/// 7.099999904632568 — exact to the bits and not what anyone typed. It reached
+/// the dry-run plan, which exists to show a caller what they asked for, and the
+/// bodies sent to BFL and ComfyUI, so the plan and the wire now both go
+/// through here. `f32`'s `Display` is already the shortest round-trip form.
+pub fn guidance_as_written(guidance: f32) -> f64 {
+    guidance.to_string().parse().unwrap_or(f64::from(guidance))
+}
+
 /// An image request, in terms every provider can be asked to interpret.
 ///
 /// Fields past `references` are the ones providers disagree about. Each is
@@ -509,13 +521,13 @@ impl VideoCapabilities {
             );
         }
 
-        if let Some(seconds) = req.duration
-            && !self.duration.accepts(seconds)
-        {
-            bail!(
-                "`{me}` cannot render {seconds} seconds. It offers {}.",
-                self.duration.describe()
-            );
+        if let Some(seconds) = req.duration {
+            if !self.duration.accepts(seconds) {
+                bail!(
+                    "`{me}` cannot render {seconds} seconds. It offers {}.",
+                    self.duration.describe()
+                );
+            }
         }
 
         if req.negative_prompt.is_some() && !self.negative_prompt {
@@ -810,6 +822,14 @@ pub struct Capabilities {
     pub seed: bool,
     pub negative_prompt: bool,
     pub references: bool,
+    /// The most reference images this model takes, when Lucida knows a figure.
+    ///
+    /// Per model because BFL's endpoints disagree: FLUX.2 pro, max and flex
+    /// take eight, while Kontext and klein have no field past the fourth. A
+    /// body that numbered fields up to eight for all of them had BFL drop the
+    /// rest silently and return the edit as a success. `None` means no ceiling
+    /// is recorded here, not that there is none.
+    pub max_references: Option<usize>,
     /// Whether the provider accepts a mask naming where to concentrate an edit,
     /// and what that mask guarantees.
     ///
@@ -895,8 +915,9 @@ impl Capabilities {
                  The size is fixed by the provider and follows from the shape you \
                  ask for — `--aspect 16:9` on stability returns 2016x1152, for \
                  instance. Use `--aspect` to control the shape, and `comfyui` or \
-                 `bfl` if the pixel count itself matters. Lucida reports the size \
-                 it actually wrote."
+                 one of bfl's {} if the pixel count itself matters. Lucida reports \
+                 the size it actually wrote.",
+                join_and(&crate::bfl::sized_models())
             );
         }
 
@@ -991,6 +1012,21 @@ impl Capabilities {
             );
         }
 
+        if let Some(most) = self.max_references {
+            if req.references.len() > most {
+                bail!(
+                    "`{model}` on `{me}` accepts at most {most} reference images; {given} \
+                     were given.\n\n\
+                     The ones past {most} would not be sent anywhere the model reads, \
+                     so the edit would come back built from part of what was asked \
+                     for. Send at most {most}, or use a model that takes more \
+                     (`lucida models` lists them).",
+                    model = req.model,
+                    given = req.references.len()
+                );
+            }
+        }
+
         if let (Some(aspect), AspectSupport::Named(allowed)) = (req.aspect, self.aspect) {
             let asked = aspect.to_string();
             if !allowed.contains(&asked.as_str()) {
@@ -1003,16 +1039,16 @@ impl Capabilities {
             }
         }
 
-        if let (Some(aspect), AspectSupport::Pixels(pairs)) = (req.aspect, self.aspect)
-            && !pixel_pair_matches(pairs, aspect)
-        {
-            bail!(
-                "`{me}` offers only these shapes, as pixel pairs: {}.\n\n\
-                 None of them is {aspect}. A ratio such as `16:9` is accepted \
-                 wherever one of these has that shape. Pick one of them, or use \
-                 the `comfyui` provider, which takes free dimensions.",
-                pairs.join(", ")
-            );
+        if let (Some(aspect), AspectSupport::Pixels(pairs)) = (req.aspect, self.aspect) {
+            if !pixel_pair_matches(pairs, aspect) {
+                bail!(
+                    "`{me}` offers only these shapes, as pixel pairs: {}.\n\n\
+                     None of them is {aspect}. A ratio such as `16:9` is accepted \
+                     wherever one of these has that shape. Pick one of them, or use \
+                     the `comfyui` provider, which takes free dimensions.",
+                    pairs.join(", ")
+                );
+            }
         }
 
         Ok(())
@@ -1410,7 +1446,8 @@ impl Preferred for VideoBackend {
 /// The ordered preference list as written, or `None` if the setting is unset.
 ///
 /// Empty entries are skipped so a trailing comma is not an error worth
-/// stopping for, but an unrecognised name is: a typo that silently dropped an
+/// stopping for, but a list with *nothing but* empty entries is refused, and so
+/// is an unrecognised name: a typo that silently dropped an
 /// entry would move the render to the next provider, which is precisely the
 /// substitution this design exists to avoid.
 fn preference_list<T: Preferred>() -> Result<Option<Vec<T>>> {
@@ -1424,20 +1461,39 @@ fn preference_list<T: Preferred>() -> Result<Option<Vec<T>>> {
         if entry.is_empty() {
             continue;
         }
+        // A refusal (exit 2) rather than an error: nothing has been sent, and a
+        // retry cannot succeed until the list changes.
         let parsed = T::parse_name(entry).map_err(|e| {
-            anyhow::anyhow!(
+            anyhow::Error::new(crate::out::Refused(format!(
                 "{setting} lists `{entry}`, which is not a provider.\n\n{e}\n\n\
                  Fix the list rather than leaving it: a name nothing recognises \
                  would otherwise hand the render to whichever provider came \
                  next, which is not what you wrote down.",
                 setting = T::SETTING,
-            )
+            )))
         })?;
         chain.push(parsed);
     }
 
+    // Set, and names nothing (`", ,"`). Reading that as unset would send the render
+    // to the built-in default and report "no preference set" about a setting that
+    // is set — the substitution this design exists to avoid, reached by a list
+    // with nothing in it rather than a list with a typo. A setting that is truly
+    // unset, or empty, never gets here: `config::var` drops those.
     if chain.is_empty() {
-        return Ok(None);
+        return Err(anyhow::Error::new(crate::out::Refused(format!(
+            "{setting} is set to `{raw}`, which names no provider.\n\n\
+             List at least one ({every}), or unset {setting} to use the built-in \
+             default ({built_in}). Leaving it set and empty is refused rather than \
+             read as unset, because the list is a statement of where renders may go.",
+            setting = T::SETTING,
+            every = T::every()
+                .iter()
+                .map(|c| c.provider_name())
+                .collect::<Vec<_>>()
+                .join(", "),
+            built_in = T::BUILT_IN.provider_name(),
+        ))));
     }
     Ok(Some(chain))
 }
@@ -1473,7 +1529,8 @@ pub fn resolve_default<T: Preferred>() -> Result<(T, DefaultSource)> {
 
     // Every entry named, none usable. Falling through to the built-in here
     // would route to a provider the user deliberately left off their list, so
-    // this refuses and says exactly which credential would settle it.
+    // this refuses — exit 2, since nothing was sent and only a key or the list
+    // can change the answer — and says exactly which credential would settle it.
     let missing = chain
         .iter()
         .map(|c| match c.credential_setting() {
@@ -1502,13 +1559,13 @@ pub fn resolve_default<T: Preferred>() -> Result<(T, DefaultSource)> {
         )
     };
 
-    bail!(
+    Err(anyhow::Error::new(crate::out::Refused(format!(
         "no provider in {setting} has a credential configured.\n\n{missing}{aside}\n\n\
          Set one of those keys, name a provider explicitly, or clear {setting} to \
          return to the built-in default ({built_in}).",
         setting = T::SETTING,
         built_in = T::BUILT_IN.provider_name(),
-    )
+    ))))
 }
 
 #[cfg(test)]
@@ -1546,6 +1603,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A preference that is set but names nothing is refused, not read as unset.
+    ///
+    /// Driven through `resolve_default`, the way a render reaches it, and for both
+    /// media: the two settings share one function and should share its answer.
+    #[test]
+    fn a_preference_with_no_entries_is_refused_naming_the_setting() {
+        fn refusal<T: Preferred + std::fmt::Debug>(raw: &str) -> anyhow::Error {
+            crate::config::with_injected(&[(T::SETTING, raw)], || {
+                resolve_default::<T>().expect_err("an empty list was accepted")
+            })
+        }
+
+        for raw in [",", ", ,", " , , "] {
+            let image = refusal::<Backend>(raw);
+            assert_eq!(crate::out::code_for(&image), crate::out::REFUSED, "{raw:?}");
+            assert!(format!("{image:#}").contains("LUCIDA_IMAGE_PROVIDERS"), "{image:#}");
+
+            let video = refusal::<VideoBackend>(raw);
+            assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{raw:?}");
+            assert!(format!("{video:#}").contains("LUCIDA_VIDEO_PROVIDERS"), "{video:#}");
+        }
+    }
+
+    /// The other two ways a set preference can fail are refusals too.
+    ///
+    /// Both used to leave as plain errors (exit 1) while the generated schema
+    /// prose called them refused. A wrapper retries on 1, and a retry cannot
+    /// succeed here: nothing was sent, and the list or a key has to change
+    /// first — which is exactly what exit 2 says.
+    #[test]
+    fn an_unknown_name_or_an_unusable_list_is_refused() {
+        fn refusal<T: Preferred + std::fmt::Debug>(raw: &str) -> anyhow::Error {
+            crate::config::with_injected(&[(T::SETTING, raw)], || {
+                resolve_default::<T>().expect_err("the preference was accepted")
+            })
+        }
+
+        // A name nothing recognises.
+        let image = refusal::<Backend>("bflx,comfyui");
+        assert_eq!(crate::out::code_for(&image), crate::out::REFUSED, "{image:#}");
+        assert!(format!("{image:#}").contains("lists `bflx`"), "{image:#}");
+        let video = refusal::<VideoBackend>("veox,runway");
+        assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{video:#}");
+        assert!(format!("{video:#}").contains("lists `veox`"), "{video:#}");
+
+        // Every name real, none usable: nothing is injected, so no key is held.
+        let image = refusal::<Backend>("openai,stability");
+        assert_eq!(crate::out::code_for(&image), crate::out::REFUSED, "{image:#}");
+        assert!(format!("{image:#}").contains("has a credential configured"), "{image:#}");
+        let video = refusal::<VideoBackend>("runway,kling");
+        assert_eq!(crate::out::code_for(&video), crate::out::REFUSED, "{video:#}");
+        assert!(format!("{video:#}").contains("has a credential configured"), "{video:#}");
+    }
+
+    /// An unset preference is the built-in default, and says so — the sentence
+    /// the generated help text now promises ("when that setting is unset").
+    #[test]
+    fn an_unset_preference_resolves_to_the_built_in_default() {
+        let (backend, source) = resolve_default::<Backend>().unwrap();
+        assert_eq!(backend, Backend::BUILT_IN);
+        assert!(matches!(source, DefaultSource::BuiltIn));
     }
 
     /// The preference settings are themselves configurable settings.
