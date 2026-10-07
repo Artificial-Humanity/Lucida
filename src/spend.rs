@@ -149,7 +149,7 @@ pub fn price_for(backend: Backend, model: &str, size: Option<Size>) -> Price {
     let per_image = |usd: f64, verified: &'static str| Price::PerImage { usd, verified };
 
     match backend {
-        Backend::ComfyUi => Price::Free,
+        Backend::ComfyUi | Backend::Lemonade => Price::Free,
         Backend::Google => {
             // Resolved first, because the model reaching here is whatever the
             // caller typed and that is usually an alias. Matching the raw string
@@ -172,6 +172,18 @@ pub fn price_for(backend: Backend, model: &str, size: Option<Size>) -> Price {
         // Runway bills its own credits, as with its video lane.
         Backend::Bfl | Backend::Stability | Backend::OpenAi | Backend::Runway => Price::Unverified,
     }
+}
+
+/// The image providers that cost nothing, as a sentence lists them — the remedy
+/// every budget refusal names. Generated: it said `comfyui` alone after a second
+/// free lane existed.
+fn free_lanes() -> String {
+    let names: Vec<&str> = Backend::ALL
+        .iter()
+        .filter(|b| price_for(**b, b.default_model(), None) == Price::Free)
+        .map(|b| b.name())
+        .collect();
+    crate::provider::join_and(&names)
 }
 
 /// Video, per second of output, by provider and tier.
@@ -456,6 +468,7 @@ fn reserve(
     // for it, so a wrapper that retries on failure does not retry something
     // that cannot succeed.
     let refuse = |message: String| Err(anyhow::Error::new(crate::out::Refused(message)));
+    let free = free_lanes();
 
     let budget = match budget {
         Budget::Unset => return Ok(nothing()),
@@ -466,7 +479,7 @@ fn reserve(
                 "LUCIDA_BUDGET is {problem}. A cap that cannot be read is not \
                  treated as no cap, so this {what} is refused rather than sent.\n\n\
                  Fix the value, or unset LUCIDA_BUDGET to run without a cap. \
-                 comfyui renders locally, costs nothing, and is never refused. \
+                 {free} cost nothing and are never refused. \
                  `lucida config` shows where the setting comes from."
             ));
         }
@@ -484,8 +497,8 @@ fn reserve(
                  off nothing spent is ever counted and the cap cannot hold — this \
                  {what} is refused rather than sent unmetered.\n\n\
                  Unset LUCIDA_NO_LEDGER to keep the budget (the ledger records your \
-                 prompts), or unset LUCIDA_BUDGET to run without a cap. comfyui \
-                 renders locally, costs nothing, and is never refused."
+                 prompts), or unset LUCIDA_BUDGET to run without a cap. {free} \
+                 cost nothing and are never refused."
             ));
         }
         Ledger::Nowhere => {
@@ -498,7 +511,7 @@ fn reserve(
                  hold — this {what} is refused rather than sent unmetered.\n\n\
                  Set HOME, or LUCIDA_CONFIG to a config file whose directory can \
                  hold the ledger, or unset LUCIDA_BUDGET to run without a cap. \
-                 comfyui renders locally, costs nothing, and is never refused."
+                 {free} cost nothing and are never refused."
             ));
         }
     }
@@ -537,7 +550,7 @@ fn reserve(
          ${spent:.2} of that is already spent{running}. This {what} would add \
          roughly ${estimate:.2}.{assumption}\n\n\
          Raise or unset LUCIDA_BUDGET, wait for the window to roll, or use \
-         comfyui, which renders locally and costs nothing. `lucida history` \
+         a free lane — {free} — which costs nothing. `lucida history` \
          shows what the estimate is made of."
     ))
 }
@@ -545,6 +558,30 @@ fn reserve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every budget refusal sends the reader to a lane that costs nothing — all
+    /// of them. It said `comfyui` alone after a second free lane existed.
+    #[test]
+    fn every_budget_refusal_points_at_every_free_lane() {
+        static TABLE: Held = Held::new();
+        let free: Vec<&str> = Backend::ALL
+            .iter()
+            .filter(|b| price_for(**b, b.default_model(), None) == Price::Free)
+            .map(|b| b.name())
+            .collect();
+        assert!(free.len() >= 2, "{free:?}");
+        let refusals = [
+            refusal(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Unreadable("$5".into()), Ledger::Kept, || 0.0)),
+            refusal(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(5.0), Ledger::SwitchedOff, || 0.0)),
+            refusal(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(5.0), Ledger::Nowhere, || 0.0)),
+            refusal(reserve(&TABLE, Price::Unverified, 1, "render", Budget::Cap(0.01), Ledger::Kept, || 100.0)),
+        ];
+        for message in refusals {
+            for name in &free {
+                assert!(message.contains(name), "a budget refusal omits the free lane `{name}`: {message}");
+            }
+        }
+    }
 
     /// The one property the table must never lose: a number here is a *verified*
     /// number, and everything else admits it is not. A plausible guess would be
@@ -634,6 +671,10 @@ mod tests {
     fn the_local_lane_is_free_and_the_hosted_ones_are_not() {
         assert_eq!(price_for(Backend::ComfyUi, "klein", None), Price::Free);
         assert_eq!(price_for(Backend::ComfyUi, "klein", None).against_budget(), 0.0);
+        assert_eq!(
+            price_for(Backend::Lemonade, crate::lemonade::PLACEHOLDER_MODEL, None),
+            Price::Free
+        );
 
         for backend in [Backend::Google, Backend::Bfl, Backend::Stability, Backend::OpenAi] {
             let price = price_for(backend, backend.default_model(), None);

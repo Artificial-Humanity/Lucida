@@ -15,14 +15,15 @@ published — so it is named here rather than linked. Read it before starting wo
   no-new-dependency posture is deliberate and extends to test infrastructure: JSON-RPC is
   hand-rolled in `src/mcp.rs`, and wire behaviour is pinned by the recorded-response test
   server in `src/testserver.rs` (scripted replies transcribed from real provider sessions).
-* **Image providers (six):** Google Gemini (`genai.rs`), local ComfyUI (`comfy.rs`), Black
+* **Image providers (seven):** Google Gemini (`genai.rs`), local ComfyUI (`comfy.rs`), Black
   Forest Labs hosted FLUX (`bfl.rs`), Stability AI (`stability.rs`), OpenAI (`openai.rs`),
-  Runway (`runway.rs`, beside its video lane). Video is Veo (`video.rs`, sharing genai's
+  Runway (`runway.rs`, beside its video lane), and a Lemonade server's image models
+  (`lemonade.rs`, reached only by name). Video is Veo (`video.rs`, sharing genai's
   client), Runway and Kling (`kling.rs`).
 * **Capability truth lives in code, not prose.** `Backend::ALL` and the capabilities tables
   generate provider lists wherever the shape allows. The 2026-08-02 review's headline
   finding: every generated list stayed true while every hand-written one rotted. When
-  provider six lands, start from the known hand-written drift surfaces recorded in that
+  a new provider lands, start from the known hand-written drift surfaces recorded in that
   review (§5.1) — clap help strings, MCP parameter prose, `README.md`, remedy texts.
   The MCP `provider` enums came off that list on 2026-08-09: all three were literals, and an
   `enum` is the worst place for one, because a well-behaved client *validates against it* — a
@@ -43,8 +44,10 @@ published — so it is named here rather than linked. Read it before starting wo
   (`the_shopfront_names_every_provider_and_video`) holds that one and the `--help`
   banner against `Backend::ALL` — but the GitHub copy is updated by hand, with
   `gh repo edit`, and nothing will remind you.
-* **Provenance:** hosted-provider output carries SynthID and/or C2PA marks; local ComfyUI is
-  the only unmarked lane.
+* **Provenance:** hosted-provider output carries SynthID and/or C2PA marks; local ComfyUI and
+  Lemonade are the unmarked lanes. Unmarked means no watermark and no C2PA manifest — a
+  Lemonade PNG still carries its prompt and seed in text chunks. A test holds this line
+  against each provider's declared provenance.
 * **Width is per-provider too** (owner, 2026-08-09). Lucida covers image generation *and*
   video generation, and **each provider should be as completely represented as possible across
   both**. A provider present for one medium and absent for the other is a coverage gap, not a

@@ -107,15 +107,30 @@ mod tests {
     #[test]
     fn the_skill_names_no_provider_or_model_family() {
         let lower = SKILL.to_lowercase();
-        for name in [
-            "google", "comfyui", "bfl", "stability", "openai", "gemini", "flux", "gpt-image",
-            "veo", "banana", "imagen", "black forest", "runway", "kling",
-        ] {
+        // Every provider by both of its names, from the table the code routes by,
+        // so the next one is banned the day it lands; then the model families and
+        // video lanes no image table lists.
+        let providers = crate::provider::Backend::ALL
+            .iter()
+            .flat_map(|b| [b.name().to_string(), b.product_name().to_lowercase()]);
+        let families = ["gemini", "flux", "gpt-image", "veo", "banana", "imagen", "black forest", "kling"]
+            .map(String::from);
+        for name in providers.chain(families) {
             assert!(
-                !lower.contains(name),
+                !lower.contains(&name),
                 "the skill names `{name}` — capabilities belong in image_providers, \
                  which is current, not here, which is a snapshot"
             );
+        }
+    }
+
+    /// "One is free" was a count, in a sentence that named nothing — and the
+    /// day a second free lane landed it went false.
+    #[test]
+    fn the_skill_counts_no_free_lane() {
+        let lower = SKILL.to_lowercase();
+        for claim in ["one is free", "the local lane", "one lane is local"] {
+            assert!(!lower.contains(claim), "the skill counts free lanes: `{claim}`");
         }
     }
 

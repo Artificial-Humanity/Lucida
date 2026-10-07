@@ -21,6 +21,7 @@
 
 use anyhow::{Result, bail};
 use std::fmt;
+use std::io::Read;
 
 /// A guidance scale as the number a JSON document should carry: the shortest
 /// decimal that reads back as the same `f32`.
@@ -782,6 +783,49 @@ fn past(date: &str) -> bool {
     crate::clock::unix_time(date).is_some_and(|midnight| crate::clock::now() >= midnight)
 }
 
+/// Which lanes a seed is verified to repeat the picture on, in the one wording
+/// every surface uses: the MCP `seed` description, the CLI's `--seed` help and
+/// the README. Generated from [`Backend::seed_verified`]; the two literals are
+/// held to it by tests.
+pub fn seed_verified_sentence() -> String {
+    let names: Vec<&str> = Backend::ALL
+        .iter()
+        .filter(|b| b.seed_verified())
+        .map(|b| b.name())
+        .collect();
+    format!(
+        "A seed has been verified to give the same picture again only on {}.",
+        join_and(&names)
+    )
+}
+
+/// The sentence that follows a render which used a seed, for the CLI and the
+/// MCP result alike.
+///
+/// Neutral on purpose. A seed is reported for every lane that has one, but only
+/// some have been shown to give the same image from it again (see
+/// [`Backend::seed_verified`]); Lemonade's
+/// server reports none, so the one in use is the one Lucida chose and sent.
+/// "Render it again" promised a picture on lanes where that is unverified.
+/// `flag` is how the caller spells the parameter.
+pub fn seed_note(seed: u64, flag: &str) -> String {
+    format!(
+        "Seed {seed}. It can be passed back as {flag} with the same prompt and \
+         model. Whether that gives the same picture again depends on the provider."
+    )
+}
+
+/// The providers whose default model satisfies `predicate`, each in backticks,
+/// as a sentence lists them — the generated half of every remedy below.
+fn named_where(predicate: impl Fn(&Capabilities) -> bool) -> String {
+    let names: Vec<String> = Backend::ALL
+        .iter()
+        .filter(|b| predicate(&capabilities_for(**b, b.default_model())))
+        .map(|b| format!("`{}`", b.name()))
+        .collect();
+    join_and(&names.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 /// `a`, `a and b`, `a, b and c` — the form a sentence needs rather than a table.
 pub fn join_and(names: &[&str]) -> String {
     match names.split_last() {
@@ -789,6 +833,21 @@ pub fn join_and(names: &[&str]) -> String {
         Some((last, [])) => (*last).to_string(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
+}
+
+/// A MIME type as a person names the format.
+pub fn format_name(mime: &str) -> &str {
+    match mime {
+        "image/png" => "PNG",
+        "image/jpeg" => "JPEG",
+        "image/webp" => "WebP",
+        other => other,
+    }
+}
+
+/// Several formats, as a sentence names them: `PNG and JPEG`.
+pub fn format_names(formats: &[&str]) -> String {
+    join_and(&formats.iter().map(|mime| format_name(mime)).collect::<Vec<_>>())
 }
 
 /// What a provider can actually be asked for.
@@ -851,6 +910,21 @@ pub struct Capabilities {
     /// other companies' models — Runway — so naming one with `--provider`
     /// explicit is refused rather than billed and recorded as this provider's.
     pub foreign_model: Option<&'static [&'static str]>,
+    /// The formats a reference image may be in, as the MIME types
+    /// [`crate::sniff_mime`] names, when this provider decodes only some.
+    ///
+    /// Read from the bytes before anything is sent, so `--dry-run` refuses what
+    /// a render would. `None` means Lucida checks nothing here and the provider
+    /// is trusted to refuse what it cannot read, out loud.
+    pub reference_formats: Option<&'static [&'static str]>,
+    /// The longest edge, in pixels, Lucida will ask this provider for. `None`
+    /// means no ceiling is recorded here, not that there is none.
+    pub max_long_edge: Option<u32>,
+    /// Seeds this provider takes are `0..seed_limit`. A larger one would be
+    /// wrapped or rejected by the server rather than honoured, which is the
+    /// silent substitution this module exists to refuse. `None`: no range is
+    /// recorded here, and the provider is trusted to say.
+    pub seed_limit: Option<u64>,
 }
 
 impl Capabilities {
@@ -914,21 +988,48 @@ impl Capabilities {
                  be honoured.\n\n\
                  The size is fixed by the provider and follows from the shape you \
                  ask for — `--aspect 16:9` on stability returns 2016x1152, for \
-                 instance. Use `--aspect` to control the shape, and `comfyui` or \
-                 one of bfl's {} if the pixel count itself matters. Lucida reports \
-                 the size it actually wrote.",
+                 instance. Use `--aspect` to control the shape — or, if the pixel \
+                 count itself matters, one that takes a size: {}, or one of bfl's {}. \
+                 Lucida reports the size it actually wrote.",
+                named_where(|c| c.size
+                    && matches!(c.aspect, AspectSupport::Free { .. })
+                    && c.provider != "bfl"),
                 join_and(&crate::bfl::sized_models())
             );
+        }
+
+        if let (Some(most), Some(size)) = (self.max_long_edge, req.size) {
+            if size.0 > most {
+                bail!(
+                    "`{me}` renders a long edge of at most {most} pixels here, and \
+                     `--size` asks for {}.\n\n\
+                     Ask for {most} or less. Lucida holds this lane to that ceiling \
+                     until a larger size has been measured on it.",
+                    size.0
+                );
+            }
         }
 
         if req.seed.is_some() && !self.seed {
             bail!(
                 "`{me}` has no concept of a seed, so `--seed` cannot be honoured.\n\n\
                  Google never exposes one, which means results there are not \
-                 reproducible by any means. Use `comfyui` (a local model, e.g. \
-                 `--model klein`) or `bfl` when you need to render the same image \
-                 twice."
+                 reproducible by any means. Use one that takes a seed when you need \
+                 to choose it: {}.",
+                named_where(|c| c.seed)
             );
+        }
+
+        if let (Some(limit), Some(seed)) = (self.seed_limit, req.seed) {
+            if seed >= limit {
+                bail!(
+                    "`{me}` takes seeds from 0 to {}, and {seed} is outside that \
+                     range.\n\n\
+                     The server would wrap or reject it rather than render the seed you \
+                     named, so it is refused here. Pick one below {limit}.",
+                    limit.saturating_sub(1)
+                );
+            }
         }
 
         if req.negative_prompt.is_some() && !self.negative_prompt {
@@ -950,8 +1051,8 @@ impl Capabilities {
             };
             bail!(
                 "`{me}` does not accept a negative prompt for images.\n\n{remedy}\n\n\
-                 Use the `comfyui` provider if you need one — there it is a real \
-                 conditioning input."
+                 Use one that takes one if you need it: {}.",
+                named_where(|c| c.negative_prompt)
             );
         }
 
@@ -1027,6 +1128,30 @@ impl Capabilities {
             }
         }
 
+        if let Some(formats) = self.reference_formats {
+            for path in &req.references {
+                // Only the signature is needed, so only its bytes are read.
+                let mut head = Vec::with_capacity(16);
+                std::fs::File::open(path)
+                    .and_then(|file| file.take(16).read_to_end(&mut head))
+                    .map_err(|e| anyhow::anyhow!("reading the reference image {path}: {e}"))?;
+                let found = crate::sniff_mime(&head);
+                if !found.is_some_and(|mime| formats.contains(&mime)) {
+                    let what = match found {
+                        Some(mime) => format_name(mime).to_string(),
+                        None => "not an image Lucida recognises".to_string(),
+                    };
+                    bail!(
+                        "`{me}` reads only {} reference images, and {path} is {what}.\n\n\
+                         The format is read from the file's bytes, not its name. Convert \
+                         it to {} first, or edit with a provider that takes it.",
+                        format_names(formats),
+                        format_names(formats)
+                    );
+                }
+            }
+        }
+
         if let (Some(aspect), AspectSupport::Named(allowed)) = (req.aspect, self.aspect) {
             let asked = aspect.to_string();
             if !allowed.contains(&asked.as_str()) {
@@ -1054,6 +1179,24 @@ impl Capabilities {
         Ok(())
     }
 
+    /// The reference formats as a phrase, `PNG only`. `None` when none is
+    /// recorded: that is the absence of a claim, so nothing is printed for it.
+    pub fn describe_reference_formats(&self) -> Option<String> {
+        self.reference_formats
+            .map(|formats| format!("{} only", format_names(formats)))
+    }
+
+    /// The long-edge ceiling as a phrase. `None` when none is recorded.
+    pub fn describe_long_edge(&self) -> Option<String> {
+        self.max_long_edge
+            .map(|most| format!("at most {most} pixels"))
+    }
+
+    /// The seed range as a phrase, `below 2147483648`. `None` when none is recorded.
+    pub fn describe_seed_limit(&self) -> Option<String> {
+        self.seed_limit.map(|limit| format!("below {limit}"))
+    }
+
     /// The message for a sampler control this provider will not accept.
     ///
     /// Split out because BFL made it a per-*model* fact rather than a
@@ -1071,8 +1214,9 @@ impl Capabilities {
             ),
             "google" => format!(
                 "`google` does not expose {what}; the model decides how to sample.\n\n\
-                 `{flag}` applies to `comfyui`, and to `bfl` on `flux-2-flex` or \
-                 `flux-dev`."
+                 `{flag}` applies to {}, and to `bfl` on `flux-2-flex` or \
+                 `flux-dev`.",
+                named_where(|c| c.steps)
             ),
             other => format!("`{other}` does not expose {what}, so `{flag}` cannot be honoured."),
         }
@@ -1155,6 +1299,7 @@ pub fn capabilities_for(backend: Backend, model: &str) -> Capabilities {
         Backend::Stability => crate::stability::capabilities(model),
         Backend::OpenAi => crate::openai::capabilities(model),
         Backend::Runway => crate::runway::image_capabilities(model),
+        Backend::Lemonade => crate::lemonade::CAPABILITIES,
     }
 }
 
@@ -1167,6 +1312,7 @@ pub enum Backend {
     Stability,
     OpenAi,
     Runway,
+    Lemonade,
 }
 
 impl Backend {
@@ -1178,6 +1324,7 @@ impl Backend {
             "stability" | "stabilityai" | "sai" => Ok(Self::Stability),
             "openai" | "oai" | "gpt" => Ok(Self::OpenAi),
             "runway" | "runwayml" => Ok(Self::Runway),
+            "lemonade" => Ok(Self::Lemonade),
             other => bail!(
                 "unknown provider `{other}`. Known providers: {}",
                 // Generated, so a sixth provider cannot be missing from it —
@@ -1199,6 +1346,7 @@ impl Backend {
             Self::Stability => "stability",
             Self::OpenAi => "openai",
             Self::Runway => "runway",
+            Self::Lemonade => "lemonade",
         }
     }
 
@@ -1228,6 +1376,7 @@ impl Backend {
             Self::Stability => "Stability",
             Self::OpenAi => "OpenAI",
             Self::Runway => "Runway",
+            Self::Lemonade => "Lemonade",
         }
     }
 
@@ -1242,6 +1391,23 @@ impl Backend {
         }
     }
 
+    /// Whether re-rendering with a seed this lane reported has been shown to
+    /// give the same picture again, byte for byte — the one place that says so.
+    ///
+    /// comfyui: pixel-identical across runs. stability: a re-render pinned to
+    /// the seed from its `seed` response header reproduced the pixels exactly
+    /// (`stability.rs`, ROADMAP). The other seeded lanes take or report a seed
+    /// that nobody has rendered from twice, so it is reported, not promised.
+    pub fn seed_verified(self) -> bool {
+        matches!(self, Self::ComfyUi | Self::Stability)
+    }
+
+    /// Whether this provider is reached only when named — never inferred from a
+    /// model id. Lemonade's ids look like other lanes' (see `infer_backend`).
+    pub fn reached_only_by_name(self) -> bool {
+        matches!(self, Self::Lemonade)
+    }
+
     /// The model used when none is named. Lives here rather than in `main` so
     /// anything asking "what can this provider do" gets the same answer the CLI
     /// would give — asking BFL with an empty model reports no editing, because
@@ -1254,6 +1420,23 @@ impl Backend {
             Self::Stability => crate::stability::DEFAULT_MODEL,
             Self::OpenAi => crate::openai::DEFAULT_MODEL,
             Self::Runway => crate::runway::DEFAULT_IMAGE_MODEL,
+            Self::Lemonade => crate::lemonade::PLACEHOLDER_MODEL,
+        }
+    }
+
+    /// The default model as a person should read it.
+    ///
+    /// The id itself, except for a lane with no built-in model, where it says
+    /// where one comes from. `default_model` is for capability lookups; this is
+    /// for every surface that prints a default — the MCP schema and the server
+    /// banner would otherwise print Lemonade's placeholder as if it were a model.
+    pub fn default_model_description(self) -> String {
+        match self {
+            Self::Lemonade => match crate::config::var("LUCIDA_LEMONADE_MODEL") {
+                Some(model) => format!("{} (from LUCIDA_LEMONADE_MODEL)", model.trim()),
+                None => "none built in — name one, or set LUCIDA_LEMONADE_MODEL".to_string(),
+            },
+            other => other.default_model().to_string(),
         }
     }
 
@@ -1264,6 +1447,7 @@ impl Backend {
         Backend::Stability,
         Backend::OpenAi,
         Backend::Runway,
+        Backend::Lemonade,
     ];
 
     /// The setting that has to be present before this provider can be *chosen
@@ -1271,8 +1455,9 @@ impl Backend {
     ///
     /// This is deliberately not "can this provider work". It is "did the user
     /// tell us they have an account here", which is the only question a default
-    /// may answer on its own. ComfyUI is the `None`: it runs locally and falls
-    /// back to a built-in localhost URL, so listing it is itself the decision.
+    /// may answer on its own. ComfyUI and Lemonade are the `None`s: each runs on
+    /// hardware the user controls and falls back to a built-in loopback URL, so
+    /// listing it is itself the decision.
     pub fn credential(self) -> Option<&'static str> {
         match self {
             Self::Google => Some("GEMINI_API_KEY"),
@@ -1281,6 +1466,7 @@ impl Backend {
             Self::Stability => Some("STABILITY_API_KEY"),
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::Runway => Some("RUNWAY_API_KEY"),
+            Self::Lemonade => None,
         }
     }
 
@@ -1300,6 +1486,10 @@ impl Backend {
 /// checked before any pattern, and a filename extension decides before a name
 /// does. An unrecognised id falls to Google, which keeps every existing
 /// invocation working and means a Gemini model released tomorrow works today.
+///
+/// Lemonade is never inferred: its ids look like other lanes' (`Flux-2-Klein-4B`,
+/// `SDXL-Turbo`), so it is reached only by name. [`refuse_misrouted_model`]
+/// stops the one collision that would cost money.
 pub fn infer_backend(model: &str) -> Backend {
     let key = model.trim().to_ascii_lowercase();
 
@@ -1336,6 +1526,54 @@ pub fn infer_backend(model: &str) -> Backend {
     }
 
     Backend::Google
+}
+
+/// The model a render uses: the one named, or the provider's default.
+///
+/// Lemonade has no built-in default — its models are whatever the server holds —
+/// so with none named it takes `LUCIDA_LEMONADE_MODEL`, and with neither it is
+/// refused here, before any client exists. That is what keeps `--dry-run` off
+/// the network for this lane.
+pub fn model_for(backend: Backend, named: Option<&str>) -> Result<String> {
+    if let Some(model) = named {
+        return Ok(model.to_string());
+    }
+    if backend != Backend::Lemonade {
+        return Ok(backend.default_model().to_string());
+    }
+    match crate::config::var("LUCIDA_LEMONADE_MODEL") {
+        Some(model) => Ok(model.trim().to_string()),
+        None => Err(anyhow::Error::new(crate::out::Refused(
+            "`lemonade` has no built-in default model: its models are whatever the \
+             server holds.\n\n\
+             Name one with `--model` (MCP: `model`), or set LUCIDA_LEMONADE_MODEL. \
+             `lucida models --provider lemonade` lists the image models the server \
+             offers."
+                .to_string(),
+        ))),
+    }
+}
+
+/// Refuses a model id written in Lemonade's casing that inference would bill at BFL.
+///
+/// `infer_backend` lowercases, so `Flux-2-Klein-4B` reads as BFL's
+/// `flux-2-klein-4b`. Every BFL id is lower-case, so a capital letter in an id
+/// inferred to BFL is a strong sign of the wrong lane — and the cost of guessing
+/// wrong is a paid render. Only the inferred route is guarded: `--provider bfl`
+/// is a decision, and is honoured.
+pub fn refuse_misrouted_model(model: &str) -> Result<()> {
+    if model.chars().any(|c| c.is_ascii_uppercase()) && infer_backend(model) == Backend::Bfl {
+        return Err(anyhow::Error::new(crate::out::Refused(format!(
+            "`{model}` would be read as Black Forest Labs' `{}` and billed there — but \
+             every BFL model id is lower-case, so written this way it looks like a \
+             Lemonade model.\n\n\
+             Lemonade is never inferred from a model id: pass `--provider lemonade` (MCP: \
+             `provider: \"lemonade\"`). If you did mean BFL, write the id in lower case \
+             or pass `--provider bfl`.",
+            crate::bfl::resolve_model(model)
+        ))));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1571,6 +1809,87 @@ pub fn resolve_default<T: Preferred>() -> Result<(T, DefaultSource)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI and the MCP result say the same thing after a seeded render, and
+    /// neither promises the picture: only some lanes are verified to repeat.
+    #[test]
+    fn the_seed_note_promises_no_repeat_of_the_picture() {
+        for flag in ["`--seed 42`", "`seed`"] {
+            let note = seed_note(42, flag);
+            assert!(note.contains("42") && note.contains(flag), "{note}");
+            for promise in ["render this again", "render it again", "same image", "reproduc", "identical"] {
+                assert!(!note.to_lowercase().contains(promise), "the seed note promises `{promise}`: {note}");
+            }
+        }
+    }
+
+    /// The verified lanes are the two whose repeat was measured, each of them a
+    /// lane that takes a seed, and the shared sentence names exactly them.
+    #[test]
+    fn the_seed_is_verified_on_comfyui_and_stability_and_the_sentence_says_so() {
+        let verified: Vec<Backend> = Backend::ALL.iter().copied().filter(|b| b.seed_verified()).collect();
+        assert_eq!(verified, [Backend::ComfyUi, Backend::Stability]);
+        let sentence = seed_verified_sentence();
+        for backend in Backend::ALL {
+            let caps = capabilities_for(*backend, backend.default_model());
+            if backend.seed_verified() {
+                assert!(caps.seed, "{} is verified to repeat a seed it does not take", backend.name());
+            }
+            assert_eq!(
+                sentence.contains(backend.name()),
+                backend.seed_verified(),
+                "{}: {sentence}",
+                backend.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_negative_prompt_remedy_names_every_provider_that_takes_one() {
+        let err = capabilities_for(Backend::Google, "")
+            .check(&ImageRequest { negative_prompt: Some("x".into()), ..Default::default() })
+            .unwrap_err();
+        for backend in Backend::ALL {
+            if capabilities_for(*backend, backend.default_model()).negative_prompt {
+                assert!(format!("{err:#}").contains(&format!("`{}`", backend.name())), "{err:#}");
+            }
+        }
+    }
+
+    /// A refusal's remedy names every provider that could do what was refused —
+    /// generated, because the hand-written ones named comfyui and bfl and
+    /// nothing after them.
+    #[test]
+    fn the_remedies_name_every_provider_that_can_do_what_was_refused() {
+        let google = capabilities_for(Backend::Google, "");
+        let seed = google.check(&ImageRequest { seed: Some(1), ..Default::default() }).unwrap_err();
+        let steps = google.check(&ImageRequest { steps: Some(4), ..Default::default() }).unwrap_err();
+        let size = capabilities_for(Backend::Stability, "core")
+            .check(&ImageRequest { size: Some(Size::ONE_K), ..Default::default() })
+            .unwrap_err();
+        for backend in Backend::ALL {
+            let caps = capabilities_for(*backend, backend.default_model());
+            let named = format!("`{}`", backend.name());
+            if caps.seed {
+                assert!(format!("{seed:#}").contains(&named), "seed remedy omits {named}: {seed:#}");
+            }
+            if caps.steps {
+                assert!(format!("{steps:#}").contains(&named), "steps remedy omits {named}: {steps:#}");
+            }
+            if caps.size && matches!(caps.aspect, AspectSupport::Free { .. }) {
+                assert!(format!("{size:#}").contains(backend.name()), "size remedy omits {}: {size:#}", backend.name());
+            }
+        }
+    }
+
+    #[test]
+    fn a_lane_reached_only_by_name_is_never_inferred() {
+        let named: Vec<Backend> = Backend::ALL.iter().copied().filter(|b| b.reached_only_by_name()).collect();
+        assert_eq!(named, [Backend::Lemonade]);
+        for id in ["Flux-2-Klein-4B", "SDXL-Turbo", "custom-image-model-a", "Anima-Turbo", "custom-image-model-b"] {
+            assert!(!infer_backend(id).reached_only_by_name(), "{id}");
+        }
+    }
 
     /// Every provider's credential names a setting Lucida actually reads.
     ///
@@ -2063,5 +2382,238 @@ mod tests {
         assert_eq!(infer_backend("flux-2-klein-9b"), Backend::Bfl);
         // A file is always local, whatever it is called.
         assert_eq!(infer_backend("flux-2-pro.safetensors"), Backend::ComfyUi);
+    }
+
+    /// A scratch file holding `bytes`, for the checks that read a reference.
+    fn scratch_reference(name: &str, bytes: &[u8]) -> String {
+        let dir = std::env::temp_dir().join(format!("lucida-provider-refs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    const PNG_SIGNATURE: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    const JPEG_SIGNATURE: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
+    const WEBP_SIGNATURE: &[u8] = b"RIFF\0\0\0\0WEBPVP8 ";
+
+    /// The bytes decide, not the name: a PNG called `.jpg` is a PNG, and a JPEG
+    /// called `.png` is refused as the JPEG it is — before anything is sent, so
+    /// `--dry-run` refuses it too.
+    #[test]
+    fn a_reference_in_a_format_the_provider_cannot_read_is_refused_by_its_bytes() {
+        let caps = Capabilities {
+            reference_formats: Some(&["image/png"]),
+            ..crate::comfy::CAPABILITIES
+        };
+        let edit = |path: String| ImageRequest {
+            references: vec![path],
+            ..Default::default()
+        };
+
+        assert!(caps.check(&edit(scratch_reference("really-a-png.jpg", PNG_SIGNATURE))).is_ok());
+
+        for (name, bytes, called) in [
+            ("really-a-jpeg.png", JPEG_SIGNATURE, "JPEG"),
+            ("sticker.webp", WEBP_SIGNATURE, "WebP"),
+        ] {
+            let error = caps.check(&edit(scratch_reference(name, bytes))).unwrap_err();
+            assert_eq!(crate::out::code_for(&error), crate::out::REFUSED, "{name}");
+            let text = format!("{error:#}");
+            assert!(text.contains("reads only PNG"), "{text}");
+            assert!(text.contains(called), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_size_over_the_recorded_ceiling_is_refused_and_one_at_it_is_not() {
+        let caps = Capabilities {
+            max_long_edge: Some(2048),
+            ..crate::comfy::CAPABILITIES
+        };
+        let sized = |px| ImageRequest {
+            size: Some(Size(px)),
+            ..Default::default()
+        };
+        assert!(caps.check(&sized(2048)).is_ok());
+        let error = caps.check(&sized(4096)).unwrap_err();
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED);
+        assert!(format!("{error:#}").contains("at most 2048"), "{error:#}");
+    }
+
+    #[test]
+    fn a_seed_outside_the_recorded_range_is_refused_rather_than_wrapped() {
+        let caps = Capabilities {
+            seed_limit: Some(1 << 31),
+            ..crate::comfy::CAPABILITIES
+        };
+        let seeded = |seed| ImageRequest {
+            seed: Some(seed),
+            ..Default::default()
+        };
+        assert!(caps.check(&seeded(2_147_483_647)).is_ok());
+        let error = caps.check(&seeded(2_147_483_648)).unwrap_err();
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED);
+        assert!(format!("{error:#}").contains("0 to 2147483647"), "{error:#}");
+    }
+
+    /// The six providers that predate these fields keep exactly the behaviour
+    /// they had: no limit recorded, so nothing new is refused.
+    #[test]
+    fn the_providers_that_predate_the_new_limits_record_none() {
+        for backend in [
+            Backend::Google,
+            Backend::ComfyUi,
+            Backend::Bfl,
+            Backend::Stability,
+            Backend::OpenAi,
+            Backend::Runway,
+        ] {
+            for model in ["", backend.default_model()] {
+                let caps = capabilities_for(backend, model);
+                assert!(
+                    caps.reference_formats.is_none()
+                        && caps.max_long_edge.is_none()
+                        && caps.seed_limit.is_none(),
+                    "{} gained a limit it never had",
+                    backend.name()
+                );
+            }
+        }
+        for model in crate::bfl::KNOWN_MODELS {
+            let caps = capabilities_for(Backend::Bfl, model);
+            assert!(caps.reference_formats.is_none() && caps.max_long_edge.is_none(), "{model}");
+        }
+    }
+
+    #[test]
+    fn the_new_limits_read_as_phrases() {
+        let caps = Capabilities {
+            reference_formats: Some(&["image/png", "image/jpeg"]),
+            max_long_edge: Some(2048),
+            ..crate::comfy::CAPABILITIES
+        };
+        assert_eq!(caps.describe_reference_formats().as_deref(), Some("PNG and JPEG only"));
+        assert_eq!(caps.describe_long_edge().as_deref(), Some("at most 2048 pixels"));
+        // No limit recorded is no claim, so there is no phrase to print.
+        assert_eq!(crate::comfy::CAPABILITIES.describe_reference_formats(), None);
+        assert_eq!(crate::comfy::CAPABILITIES.describe_long_edge(), None);
+        assert_eq!(crate::comfy::CAPABILITIES.describe_seed_limit(), None);
+    }
+
+    /// A file that is no image Lucida recognises is refused as such, by its bytes.
+    #[test]
+    fn a_reference_that_is_no_recognised_image_is_refused_as_such() {
+        let caps = Capabilities {
+            reference_formats: Some(&["image/png"]),
+            ..crate::comfy::CAPABILITIES
+        };
+        let req = ImageRequest {
+            references: vec![scratch_reference("notes.png", b"just some text, not a picture")],
+            ..Default::default()
+        };
+        let error = caps.check(&req).unwrap_err();
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED);
+        let text = format!("{error:#}");
+        assert!(text.contains("not an image Lucida recognises"), "{text}");
+        assert!(text.contains("reads only PNG"), "{text}");
+    }
+
+    /// A reference that cannot be read is refused rather than passed on, and the
+    /// message names the file.
+    #[test]
+    fn an_unreadable_reference_is_refused_naming_the_file() {
+        let caps = Capabilities {
+            reference_formats: Some(&["image/png"]),
+            ..crate::comfy::CAPABILITIES
+        };
+        let missing = std::env::temp_dir()
+            .join(format!("lucida-provider-refs-{}", std::process::id()))
+            .join("does-not-exist.png")
+            .to_string_lossy()
+            .into_owned();
+        let req = ImageRequest {
+            references: vec![missing.clone()],
+            ..Default::default()
+        };
+        let error = caps.check(&req).unwrap_err();
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED);
+        let text = format!("{error:#}");
+        assert!(text.contains("reading the reference image"), "{text}");
+        assert!(text.contains(&missing), "{text}");
+    }
+
+    /// A zero range holds no seed at all; the refusal must not underflow.
+    #[test]
+    fn a_seed_limit_of_zero_refuses_every_seed_without_underflow() {
+        let caps = Capabilities {
+            seed_limit: Some(0),
+            ..crate::comfy::CAPABILITIES
+        };
+        let req = ImageRequest {
+            seed: Some(0),
+            ..Default::default()
+        };
+        assert!(caps.check(&req).is_err());
+    }
+
+    #[test]
+    fn lemonade_takes_the_named_model_then_the_setting_then_refuses() {
+        assert_eq!(model_for(Backend::Lemonade, Some("SDXL-Turbo")).unwrap(), "SDXL-Turbo");
+
+        let configured = crate::config::with_injected(&[("LUCIDA_LEMONADE_MODEL", "Flux-2-Klein-4B")], || {
+            model_for(Backend::Lemonade, None)
+        });
+        assert_eq!(configured.unwrap(), "Flux-2-Klein-4B");
+
+        // Neither: refused here, with no client and no network — which is what
+        // keeps `--dry-run` off the network.
+        let error = model_for(Backend::Lemonade, None).unwrap_err();
+        assert_eq!(crate::out::code_for(&error), crate::out::REFUSED);
+        let text = format!("{error:#}");
+        assert!(text.contains("LUCIDA_LEMONADE_MODEL"), "{text}");
+        assert!(text.contains("lucida models --provider lemonade"), "{text}");
+    }
+
+    #[test]
+    fn every_other_provider_still_defaults_to_its_own_model() {
+        for backend in Backend::ALL.iter().filter(|b| **b != Backend::Lemonade) {
+            assert_eq!(model_for(*backend, None).unwrap(), backend.default_model());
+        }
+    }
+
+    /// The placeholder exists for capability lookups only. A surface that prints
+    /// a default model must never print it as if it were one.
+    #[test]
+    fn the_placeholder_model_is_never_described_as_a_model() {
+        let text = Backend::Lemonade.default_model_description();
+        assert!(!text.contains(crate::lemonade::PLACEHOLDER_MODEL), "{text}");
+        assert!(text.contains("LUCIDA_LEMONADE_MODEL"), "{text}");
+        for backend in Backend::ALL.iter().filter(|b| **b != Backend::Lemonade) {
+            assert_eq!(backend.default_model_description(), backend.default_model());
+        }
+    }
+
+    #[test]
+    fn lemonade_is_a_provider_by_name_and_needs_no_credential() {
+        assert_eq!(Backend::parse("lemonade").unwrap(), Backend::Lemonade);
+        assert_eq!(Backend::Lemonade.credential(), None);
+        assert!(Backend::Lemonade.is_available());
+        assert_eq!(capabilities_for(Backend::Lemonade, "").provider, "lemonade");
+    }
+
+    /// Every BFL id is lower-case. An id in Lemonade's casing that inference
+    /// would send to BFL is refused, because guessing wrong there is a paid render.
+    #[test]
+    fn a_lemonade_cased_id_is_never_billed_at_bfl() {
+        for id in ["Flux-2-Klein-4B", "Flux-2-Klein-4B-TheNoise", "FLUX-2-PRO"] {
+            let error = refuse_misrouted_model(id).unwrap_err();
+            assert_eq!(crate::out::code_for(&error), crate::out::REFUSED, "{id}");
+            assert!(format!("{error:#}").contains("--provider lemonade"), "{id}: {error:#}");
+        }
+        // BFL's own spelling, and ids no inference sends to BFL, pass untouched.
+        for id in ["flux-2-klein-4b", "flux-2-pro", "SDXL-Turbo", "Anima-Turbo", "GEMINI-3.1-FLASH-IMAGE"] {
+            assert!(refuse_misrouted_model(id).is_ok(), "{id}");
+        }
     }
 }

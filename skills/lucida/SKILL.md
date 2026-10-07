@@ -46,25 +46,32 @@ decides the answer:
 
 1. **Must the same picture be reproducible?** Then you need a provider with a
    seed, and you must record the seed you were given — every render reports the
-   one it used, including when you did not pin one.
+   one it used, including when you did not pin one. A seed on offer is not a
+   promise of the same picture: the `seed` parameter's description says which
+   providers have been verified to repeat one.
 2. **Is this running unattended, or is someone waiting?** Providers differ by
-   roughly two orders of magnitude in latency. One lane is local and slow enough
-   that a caller will assume it has hung; the hosted ones return in seconds. If
-   you start a slow render on someone's behalf, say so up front.
-3. **Does it cost money?** Most providers bill per render; one is free at the
-   margin because it runs locally. A retry loop against a paid provider spends
-   real money each turn — decide the parameters before iterating, not during.
-   Every render now reports its expected cost, so this is a number you can act
-   on rather than a rule of thumb. If a budget is set, a render that would
-   exceed it is refused before anything is sent; switch to the local lane rather
-   than retrying, since retrying cannot succeed.
+   roughly two orders of magnitude in latency. The lanes on the user's own
+   hardware are the slow end, and the first render after a quiet spell can
+   include loading the model — minutes, not seconds — so a caller will assume
+   it has hung; the hosted ones return in seconds. If you start a slow render
+   on someone's behalf, say so up front.
+3. **Does it cost money?** Most providers bill per render; the lanes on the
+   user's own hardware are free at the margin. A retry loop against a paid
+   provider spends real money each turn — decide the parameters before
+   iterating, not during. Every render now reports its expected cost, so this is
+   a number you can act on rather than a rule of thumb. If a budget is set, a
+   render that would exceed it is refused before anything is sent; switch to a
+   free lane rather than retrying, since retrying cannot succeed.
 4. **Does the output need to be free of provenance marking, or carry it?**
    Providers differ, and Lucida reports what each render carried.
 
 `--provider` picks one explicitly; otherwise it is inferred from the model id,
-and naming a provider without a model gets that provider's own default. Naming
-neither consults the user's ordered preference, if they set one, and takes the
-first provider they hold a credential for — **a preference, never a fallback**:
+and naming a provider without a model gets that provider's own default. Some
+providers are never inferred from a model id: they are used when named, or when
+the user's preference lists them; the provider parameter's description says
+which. Naming neither consults the user's ordered preference, if they set one,
+and takes the first provider they hold a credential for — **a preference, never
+a fallback**:
 if that provider then refuses a parameter, the answer is the refusal, not a
 quiet hop to the next name on the list. A preference that names no provider,
 names one that does not exist, or lists none the user holds a key for is
@@ -119,7 +126,10 @@ that costs nothing is usually fine to make and mention.
 provider, model, every parameter and the estimated cost, having applied every
 refusal a real run would. Use it to check a call you are unsure of, and to show
 someone the plan and its price before asking them to approve it. It spends
-nothing, so there is no reason to guess.
+nothing, so there is no reason to guess. It asks no server anything, though: a
+size the provider's server decides, or a seed Lucida chooses at render time,
+shows as empty in the plan although the render sends one, and whether that
+server holds the model is learned only by rendering.
 
 ## Iterating on an image
 

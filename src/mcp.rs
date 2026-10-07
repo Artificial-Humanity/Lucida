@@ -109,7 +109,7 @@ pub fn serve() -> Result<()> {
     // therefore the model, and this banner is the operator's first look at
     // which one the session will actually use.
     let (default_provider, default_model) = match crate::provider::resolve_default::<Backend>() {
-        Ok((backend, _)) => (backend.name().to_string(), backend.default_model().to_string()),
+        Ok((backend, _)) => (backend.name().to_string(), backend.default_model_description()),
         // A preference nothing satisfies is reported by the first render, in
         // full. Saying so here too, briefly, beats naming a default that the
         // very next call is going to refuse.
@@ -499,6 +499,55 @@ fn providers_where(predicate: fn(&crate::provider::Capabilities) -> bool) -> Str
     crate::provider::join_and(&names)
 }
 
+/// Each provider's recorded seed range, as sentences — empty when none records one.
+fn seed_ranges() -> String {
+    Backend::ALL
+        .iter()
+        .filter_map(|b| {
+            capabilities_for(*b, b.default_model())
+                .seed_limit
+                .map(|limit| format!(" {} takes seeds below {limit}.", b.name()))
+        })
+        .collect()
+}
+
+/// Each provider's recorded reference format and count, as sentences.
+fn reference_limits() -> String {
+    Backend::ALL
+        .iter()
+        .filter_map(|b| {
+            let caps = capabilities_for(*b, b.default_model());
+            caps.reference_formats.map(|formats| {
+                format!(
+                    " {} reads only {} references{}.",
+                    b.name(),
+                    crate::provider::format_names(formats),
+                    caps.max_references.map(|n| format!(", at most {n}")).unwrap_or_default()
+                )
+            })
+        })
+        .collect()
+}
+
+/// The providers no model id reaches, as a sentence lists them.
+fn named_only() -> String {
+    let names: Vec<&str> = Backend::ALL
+        .iter()
+        .filter(|b| b.reached_only_by_name())
+        .map(|b| b.name())
+        .collect();
+    crate::provider::join_and(&names)
+}
+
+/// The sentence that follows a render which used a seed — the CLI's, with the
+/// pointer to where an agent reads which lanes are verified.
+fn seed_note(seed: u64) -> String {
+    format!(
+        "{} The `seed` parameter says which are verified.",
+        crate::provider::seed_note(seed, "`seed`")
+    )
+}
+
 /// The `provider` enum an agent selects from.
 ///
 /// Generated, as of 2026-08-09. It was a literal `["google", "comfyui", "bfl",
@@ -562,7 +611,12 @@ fn image_schema() -> Value {
                 "provider": {
                     "type": "string",
                     "enum": provider_enum(),
-                    "description": format!("Which backend to use. {}", default_provider_note::<Backend>())
+                    "description": format!(
+                        "Which backend to use. {} Never inferred from a model id, so name it here or list it in {} to use it: {}.",
+                        default_provider_note::<Backend>(),
+                        <Backend as crate::provider::Preferred>::SETTING,
+                        named_only()
+                    )
                 },
                 "model": {
                     "type": "string",
@@ -571,7 +625,7 @@ fn image_schema() -> Value {
                         // Generated: the hand-written list omitted openai.
                         Backend::ALL
                             .iter()
-                            .map(|b| format!("{} → {}", b.name(), b.default_model()))
+                            .map(|b| format!("{} → {}", b.name(), b.default_model_description()))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
@@ -586,14 +640,17 @@ fn image_schema() -> Value {
                          except {}, which take only: {}. On \
                          openai, gpt-image-2 takes any ratio and its siblings only \
                          1:1, 2:3 and 3:2. runway names its shapes as pixel pairs, \
-                         which are also the output size: {}.",
+                         which are also the output size: {}. lemonade takes {}, with a long \
+                         edge of {} unless size says otherwise.",
                         genai::ASPECT_RATIOS.join(", "),
                         crate::stability::ASPECT_RATIOS.join(", "),
                         crate::provider::join_and(&crate::bfl::ratio_only_models()),
                         ratio_only_bfl_ratios(),
                         describe_aspect(
                             capabilities_for(Backend::Runway, crate::runway::DEFAULT_IMAGE_MODEL).aspect
-                        )
+                        ),
+                        describe_aspect(crate::lemonade::CAPABILITIES.aspect),
+                        crate::lemonade::ASPECT_LONG_EDGE
                     )
                 },
                 "size": {
@@ -604,26 +661,45 @@ fn image_schema() -> Value {
                          scales its pixel budget by it. NOT supported by stability, runway \
                          (whose pixel-pair aspect ratio is the size), bfl's {} (which take \
                          an aspect ratio from a list instead) or the other openai models, \
-                         which render fixed sizes — passing it there is an error.",
+                         which render fixed sizes — passing it there is an error. lemonade \
+                         uses the number up to {}.",
                         crate::provider::join_and(&crate::bfl::sized_models()),
-                        crate::provider::join_and(&crate::bfl::ratio_only_models())
+                        crate::provider::join_and(&crate::bfl::ratio_only_models()),
+                        crate::lemonade::CAPABILITIES.max_long_edge.unwrap_or_default()
                     )
                 },
                 "negative_prompt": {
                     "type": "string",
-                    "description": "What to keep out of the picture. comfyui and stability only — google's image models, runway and every FLUX endpoint lack the concept, so passing it there is an error rather than a no-op."
+                    "description": format!(
+                        "What to keep out of the picture. Supported by {} — the others lack the concept, so passing it there is an error rather than a no-op.",
+                        providers_where(|c| c.negative_prompt)
+                    )
                 },
                 "seed": {
                     "type": "integer",
-                    "description": "Renders the same image again. comfyui, bfl, stability and runway; google and openai expose none, so results there cannot be reproduced. comfyui is verified pixel-identical across runs."
+                    "description": format!(
+                        "Chooses the seed. Supported by {}; {} expose none, so results there cannot be reproduced. \
+                         {} On lemonade the server reports no seed, so Lucida always chooses one, sends it and \
+                         reports it — omit this and Lucida chooses one.{}",
+                        providers_where(|c| c.seed),
+                        providers_where(|c| !c.seed),
+                        crate::provider::seed_verified_sentence(),
+                        seed_ranges()
+                    )
                 },
                 "steps": {
                     "type": "integer",
-                    "description": "Sampling steps. comfyui, and on bfl only flux-2-flex and flux-dev."
+                    "description": format!(
+                        "Sampling steps. {}, and on bfl only flux-2-flex and flux-dev.",
+                        providers_where(|c| c.steps)
+                    )
                 },
                 "guidance": {
                     "type": "number",
-                    "description": "How closely to follow the prompt. comfyui, and on bfl only flux-2-flex and flux-dev."
+                    "description": format!(
+                        "How closely to follow the prompt. {}, and on bfl only flux-2-flex and flux-dev.",
+                        providers_where(|c| c.guidance)
+                    )
                 },
                 "workflow": {
                     "type": "string",
@@ -651,8 +727,9 @@ fn image_schema() -> Value {
                         "Paths to existing images to condition on, for editing or \
                          style matching. Supported by {}. On comfyui the result \
                          keeps the first image's aspect ratio unless aspect_ratio \
-                         or size is given.",
-                        providers_where(|c| c.references)
+                         or size is given.{}",
+                        providers_where(|c| c.references),
+                        reference_limits()
                     )
                 }
             },
@@ -1204,6 +1281,7 @@ fn open(backend: Backend) -> Result<Box<dyn ImageProvider>> {
         Backend::Stability => Box::new(stability::Client::from_env()?),
         Backend::OpenAi => Box::new(openai::Client::from_env()?),
         Backend::Runway => Box::new(crate::runway::Client::from_env()?),
+        Backend::Lemonade => Box::new(crate::lemonade::Client::from_env()?),
     })
 }
 
@@ -1304,7 +1382,7 @@ fn generate_image(args: &Value) -> Result<String> {
     let prompt = req_str(args, "prompt")?;
     let output_path = req_str(args, "output_path")?;
     let workflow = opt_str(args, "workflow")?;
-    let requested_model = opt_str(args, "model")?;
+    let requested_model = requested_model(args)?;
 
     // A supplied workflow names its own checkpoints, so an explicit model has
     // nowhere to go. Refused here rather than in the provider because by the
@@ -1324,7 +1402,10 @@ fn generate_image(args: &Value) -> Result<String> {
     let (backend, default_source) = match opt_str(args, "provider")? {
         Some(name) => (Backend::parse(name)?, None),
         None => match requested_model {
-            Some(model) => (infer_backend(model), None),
+            Some(model) => {
+                crate::provider::refuse_misrouted_model(model)?;
+                (infer_backend(model), None)
+            }
             None => {
                 let (backend, source) = crate::provider::resolve_default::<Backend>()?;
                 (backend, Some(source))
@@ -1332,9 +1413,7 @@ fn generate_image(args: &Value) -> Result<String> {
         },
     };
 
-    let model = requested_model
-        .unwrap_or_else(|| backend.default_model())
-        .to_string();
+    let model = crate::provider::model_for(backend, requested_model)?;
 
     let request = ImageRequest {
         prompt: prompt.to_string(),
@@ -1381,7 +1460,8 @@ fn generate_image(args: &Value) -> Result<String> {
             abandoned,
             price.against_budget(),
         );
-    })?;
+    })
+    .map_err(|error| crate::lemonade::explain_unreachable(error, &default_source))?;
 
     // Providers pick the output format themselves, so the requested extension may
     // not match the bytes. Correct it and say so, rather than handing back a file
@@ -1426,10 +1506,8 @@ fn generate_image(args: &Value) -> Result<String> {
         ));
     }
     if let Some(seed) = image.seed {
-        text.push_str(&format!(
-            "\n\nSeed {seed}. Pass this as `seed` with the same prompt and model to \
-             render it again."
-        ));
+        text.push_str("\n\n");
+        text.push_str(&seed_note(seed));
     }
     text.push_str(&format!(
         "\n\nProvenance: {}.",
@@ -1446,7 +1524,38 @@ fn generate_image(args: &Value) -> Result<String> {
             text.push_str(&format!("\n\nModel commentary: {commentary}"));
         }
     }
+    if let Some(note) = late_cancellation_note(price) {
+        text.push_str(&format!("\n\n{note}"));
+    }
     Ok(text)
+}
+
+/// The `model` argument, trimmed the way `LUCIDA_LEMONADE_MODEL` is.
+///
+/// A padded id would otherwise reach a lane that matches ids exactly (Lemonade's)
+/// with the padding still on it, while the setting form of the same id worked.
+fn requested_model(args: &Value) -> Result<Option<&str>> {
+    Ok(opt_str(args, "model")?.map(str::trim))
+}
+
+/// What a caller that cancelled needs to hear when the render finished anyway.
+///
+/// A provider that renders inside one blocking request cannot be stopped once
+/// it has started: the image comes back and is written. Said, rather than left
+/// for a client to find a file it believes it cancelled.
+fn late_cancellation_note(price: crate::spend::Price) -> Option<String> {
+    if !cancel::cancelled() {
+        return None;
+    }
+    let cost = if price == crate::spend::Price::Free {
+        "this lane is free, so nothing was billed"
+    } else {
+        "it was billed"
+    };
+    Some(format!(
+        "Note: this call was cancelled while the render was already running, too late \
+         to stop it, so the image above was written — {cost}."
+    ))
 }
 
 /// Probes each provider and reports what it can do, or why it cannot be used.
@@ -1490,26 +1599,37 @@ fn describe_providers() -> String {
             },
         }
 
-        let aspect = describe_aspect(caps.aspect);
-        out.push_str(&format!(
-            "aspect ratio: {aspect}\n\
-             seed: {}  |  negative prompt: {}  |  reference images: {}\n\
-             size: {}  |  mask: {}  |  own workflow: {}\n\
-             steps: {}  |  guidance: {}\n\
-             output carries: {}\n\n",
-            caps.seed,
-            caps.negative_prompt,
-            caps.references,
-            caps.size,
-            caps.mask.describe(),
-            caps.workflow,
-            caps.steps,
-            caps.guidance,
-            caps.provenance.describe()
-        ));
+        out.push_str(&capabilities_text(&caps));
     }
 
     out
+}
+
+/// What one provider supports, as the lines `image_providers` prints for it. A
+/// limit with nothing recorded gets no phrase, rather than a phrase saying so.
+fn capabilities_text(caps: &crate::provider::Capabilities) -> String {
+    // ` (below N)`, ` (PNG only)`, ...: present only when something is recorded.
+    let note = |phrase: Option<String>| phrase.map(|p| format!(" ({p})")).unwrap_or_default();
+    format!(
+        "aspect ratio: {}\n\
+         seed: {}{}  |  negative prompt: {}  |  reference images: {}{}\n\
+         size: {}{}  |  mask: {}  |  own workflow: {}\n\
+         steps: {}  |  guidance: {}\n\
+         output carries: {}\n\n",
+        describe_aspect(caps.aspect),
+        caps.seed,
+        note(caps.describe_seed_limit()),
+        caps.negative_prompt,
+        caps.references,
+        note(caps.describe_reference_formats()),
+        caps.size,
+        note(caps.describe_long_edge().map(|edge| format!("long edge: {edge}"))),
+        caps.mask.describe(),
+        caps.workflow,
+        caps.steps,
+        caps.guidance,
+        caps.provenance.describe()
+    )
 }
 
 /// A line naming the resolved provider, for a call that named none.
@@ -1646,6 +1766,131 @@ fn check_video(args: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Generated where it was hand-written: every provider that honours a
+    /// restricted parameter is named in its description.
+    #[test]
+    fn restricted_parameters_name_every_provider_that_honours_them() {
+        let schema = image_schema();
+        let props = &schema["inputSchema"]["properties"];
+        type Honours = fn(&crate::provider::Capabilities) -> bool;
+        let fields: [(&str, Honours); 4] = [
+            ("negative_prompt", |c| c.negative_prompt),
+            ("seed", |c| c.seed),
+            ("steps", |c| c.steps),
+            ("guidance", |c| c.guidance),
+        ];
+        for (field, honours) in fields {
+            let description = props[field]["description"].as_str().unwrap();
+            for backend in Backend::ALL {
+                if honours(&capabilities_for(*backend, backend.default_model())) {
+                    assert!(description.contains(backend.name()), "`{field}` omits {}: {description}", backend.name());
+                }
+            }
+        }
+    }
+
+    /// The per-provider geometry prose names every provider, and states each
+    /// recorded ceiling, seed range and reference format with its number.
+    #[test]
+    fn the_geometry_and_limits_prose_covers_every_provider() {
+        let schema = image_schema();
+        let props = &schema["inputSchema"]["properties"];
+        let aspect = props["aspect_ratio"]["description"].as_str().unwrap();
+        let size = props["size"]["description"].as_str().unwrap();
+        let seed = props["seed"]["description"].as_str().unwrap();
+        let references = props["reference_images"]["description"].as_str().unwrap();
+        let provider = props["provider"]["description"].as_str().unwrap();
+        for backend in Backend::ALL {
+            let caps = capabilities_for(*backend, backend.default_model());
+            assert!(aspect.contains(backend.name()), "aspect_ratio omits {}: {aspect}", backend.name());
+            assert!(size.contains(backend.name()), "size omits {}: {size}", backend.name());
+            if let Some(most) = caps.max_long_edge {
+                assert!(size.contains(&most.to_string()), "{size}");
+            }
+            if let Some(limit) = caps.seed_limit {
+                assert!(seed.contains(&limit.to_string()), "{seed}");
+            }
+            if let Some(formats) = caps.reference_formats {
+                assert!(references.contains(&crate::provider::format_names(formats)), "{references}");
+            }
+            if backend.reached_only_by_name() {
+                assert!(provider.contains(backend.name()), "{provider}");
+            }
+        }
+    }
+
+    /// A seed is reported for every lane that has one, but only some have been
+    /// shown to give the same image from it again (`Backend::seed_verified`). The text that follows a render
+    /// may say the seed can be passed back; it may not promise the picture.
+    #[test]
+    fn the_seed_note_promises_no_repeat_of_the_picture() {
+        let note = seed_note(42);
+        assert!(note.contains("42") && note.contains("`seed`"), "{note}");
+        for promise in ["same image", "render it again", "reproduc", "identical"] {
+            assert!(!note.to_lowercase().contains(promise), "the seed note promises `{promise}`: {note}");
+        }
+    }
+
+    /// The `seed` description names the lanes a seed is verified to repeat on
+    /// in the shared sentence, and claims no other.
+    #[test]
+    fn the_seed_description_names_the_verified_lanes_from_one_place() {
+        let schema = image_schema();
+        let seed = schema["inputSchema"]["properties"]["seed"]["description"].as_str().unwrap();
+        assert!(seed.contains(&crate::provider::seed_verified_sentence()), "{seed}");
+        assert_eq!(seed.matches("verified").count(), 1, "a second claim about verification: {seed}");
+    }
+
+    /// The placeholder is for capability lookups. An agent reading the schema
+    /// must never be offered it as a model id.
+    #[test]
+    fn the_schema_never_offers_the_placeholder_model() {
+        let schemas = serde_json::to_string(&tool_schemas()).unwrap();
+        assert!(!schemas.contains(crate::lemonade::PLACEHOLDER_MODEL), "{schemas}");
+        let model = image_schema()["inputSchema"]["properties"]["model"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(model.contains("lemonade → none built in"), "{model}");
+    }
+
+    /// A provider that records no reference format, long edge or seed range says
+    /// nothing about them: no filler phrase, and no parenthetical contradicting
+    /// "reference images: false". Only a recorded limit is printed.
+    #[test]
+    fn image_providers_prints_a_limit_only_when_one_is_recorded() {
+        let phrases = [
+            "any format the provider accepts",
+            "no ceiling recorded",
+            "long edge",
+            "below",
+            "only)",
+        ];
+        // Lemonade is the provider that records all three, so it is the case
+        // below rather than one of the providers recording none.
+        for backend in Backend::ALL.iter().copied().filter(|b| *b != Backend::Lemonade) {
+            let text = capabilities_text(&capabilities_for(backend, backend.default_model()));
+            for phrase in phrases {
+                assert!(!text.contains(phrase), "{}: `{phrase}` in:\n{text}", backend.name());
+            }
+        }
+        let lemonade = capabilities_text(&crate::lemonade::CAPABILITIES);
+        assert!(lemonade.contains("(PNG and JPEG only)"), "{lemonade}");
+        assert!(lemonade.contains("(long edge: at most 2048 pixels)"), "{lemonade}");
+        assert!(lemonade.contains("(below 4294967296)"), "{lemonade}");
+
+        let limited = crate::provider::Capabilities {
+            reference_formats: Some(&["image/png"]),
+            max_long_edge: Some(2048),
+            seed_limit: Some(1 << 31),
+            ..crate::comfy::CAPABILITIES
+        };
+        let text = capabilities_text(&limited);
+        assert!(text.contains("(PNG only)"), "{text}");
+        assert!(text.contains("(long edge: at most 2048 pixels)"), "{text}");
+        assert!(text.contains("(below 2147483648)"), "{text}");
+    }
 
     /// A tagline may say why to pick a provider. It may not claim a capability
     /// only one provider has, because that is a fact about the *set*, and the set
@@ -2636,5 +2881,26 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("steps"), "must name the parameter: {error}");
+    }
+
+    #[test]
+    fn a_render_that_finished_after_its_cancellation_says_so() {
+        assert_eq!(late_cancellation_note(crate::spend::Price::Free), None);
+
+        let token = cancel::Token::new();
+        token.cancel();
+        cancel::with(token, || {
+            let free = late_cancellation_note(crate::spend::Price::Free).unwrap();
+            assert!(free.contains("too late") && free.contains("nothing was billed"), "{free}");
+            let paid = late_cancellation_note(crate::spend::Price::Unverified).unwrap();
+            assert!(paid.contains("billed") && !paid.contains("nothing was billed"), "{paid}");
+        });
+    }
+
+    #[test]
+    fn a_padded_model_argument_is_trimmed_like_the_setting_is() {
+        assert_eq!(requested_model(&json!({"model": "  SDXL-Turbo \n"})).unwrap(), Some("SDXL-Turbo"));
+        assert_eq!(requested_model(&json!({"model": "flux-2-pro"})).unwrap(), Some("flux-2-pro"));
+        assert_eq!(requested_model(&json!({})).unwrap(), None);
     }
 }

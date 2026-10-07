@@ -123,6 +123,13 @@ fn lucida(sandbox: &Sandbox) -> Command {
     // would pass on one platform for a reason unrelated to what it asserts.
     cmd.env("HOME", &sandbox.dir)
         .env("USERPROFILE", &sandbox.dir);
+
+    // The Lemonade lane needs no credential, and its default address is a
+    // loopback port where a real server may be listening on the machine running
+    // the suite. Pointed at nothing here, in the one constructor every process
+    // test goes through, so no test can open that lane by forgetting a line: a
+    // test that wants a server overrides this with a stand-in of its own.
+    cmd.env("LUCIDA_LEMONADE_URL", NOWHERE);
     cmd
 }
 
@@ -1569,4 +1576,379 @@ fn a_current_video_model_carries_no_such_warning() {
         .says("veo-3.1-fast-generate-preview")
         .never_says("retired")
         .never_says("expect this to fail");
+}
+
+// --- the Lemonade lane ------------------------------------------------------
+//
+// `lucida()` already points LUCIDA_LEMONADE_URL at port 1, where nothing
+// listens; `lemonade()` is the spelling a test of this lane uses, and a test
+// that needs a server overrides the URL with a stand-in this file starts itself.
+// The lane's default is a loopback port where a real Lemonade may be running, so
+// a test that left it unset could render on the machine running the suite. The
+// stand-in is not a provider — nothing leaves this process — which keeps the
+// file's first rule.
+
+/// Nothing listens here.
+const NOWHERE: &str = "http://127.0.0.1:1/v1";
+
+const LEMONADE_MODELS: &str = r#"{"object":"list","data":[{"id":"Flux-2-Klein-4B-TheNoise","object":"model","labels":["image","edit"],"recipe_options":{"cfg_scale":1.0,"height":1024,"steps":4,"width":1024}}]}"#;
+
+/// A 64x64 black PNG.
+const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAIklEQVR4nO3BAQ0AAADCoPdPbQ8HFAAAAAAAAAAAAAAA8G4wQAABiwCo9wAAAABJRU5ErkJggg==";
+
+fn lemonade_image() -> String {
+    format!(r#"{{"created":1,"data":[{{"b64_json":"{TINY_PNG_B64}"}}]}}"#)
+}
+
+/// A command for a test of the Lemonade lane: [`lucida`], with the server
+/// address set explicitly so the test says where it points.
+fn lemonade(sandbox: &Sandbox) -> Command {
+    let mut cmd = lucida(sandbox);
+    cmd.env("LUCIDA_LEMONADE_URL", NOWHERE);
+    cmd
+}
+
+/// A stand-in Lemonade on a loopback port: one scripted JSON reply per
+/// connection, in order. Returns its `/v1` base and a handle that yields each
+/// request as it arrived (head, blank line, body). Gives up on a connection
+/// that does not come within 20 s, so a broken binary fails the test rather
+/// than hanging it.
+fn fake_lemonade(replies: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    fake_lemonade_answering(replies.into_iter().map(|body| (200, body)).collect())
+}
+
+/// [`fake_lemonade`], with each reply's HTTP status scripted too.
+fn fake_lemonade_answering(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{BufRead, BufReader, Read};
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binding the stand-in");
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (status, reply) in replies {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break Some(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some(stream) = stream else { break };
+            stream.set_nonblocking(false).unwrap();
+
+            let mut reader = BufReader::new(stream);
+            let mut head = String::new();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).unwrap();
+            seen.push(format!("{head}\r\n{}", String::from_utf8_lossy(&body)));
+
+            let mut stream = reader.into_inner();
+            write!(
+                stream,
+                "HTTP/1.1 {status} Scripted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+        seen
+    });
+    (base, handle)
+}
+
+#[test]
+fn lemonade_without_a_model_is_refused_before_any_request() {
+    let sandbox = Sandbox::new("lemonade-no-model");
+    run(lemonade(&sandbox).args(["generate", "x", "--provider", "lemonade"]))
+        .exits(2)
+        .says("LUCIDA_LEMONADE_MODEL")
+        .says("lucida models --provider lemonade")
+        .never_says("not reachable");
+}
+
+#[test]
+fn a_lemonade_cased_id_is_refused_rather_than_billed_at_bfl() {
+    let sandbox = Sandbox::new("lemonade-casing");
+    run(lemonade(&sandbox).args(["generate", "x", "--model", "Flux-2-Klein-4B"]))
+        .exits(2)
+        .says("--provider lemonade")
+        .says("--provider bfl")
+        .never_says("BFL_API_KEY");
+}
+
+#[test]
+fn an_explicit_provider_bfl_is_not_refused_for_its_casing() {
+    // `--provider bfl` is a decision, so the casing guard on the inferred route
+    // stays out of it. With no BFL key anywhere the render stops at the
+    // credential — nothing is sent, nothing is spent — and the dry run plans it.
+    let sandbox = Sandbox::new("lemonade-casing-explicit-bfl");
+    let casing = "every BFL model id is lower-case";
+    run(lemonade(&sandbox).args(["generate", "x", "--provider", "bfl", "--model", "Flux-2-Klein-4B"]))
+        .says("BFL_API_KEY")
+        .never_says(casing);
+
+    let out = run(lemonade(&sandbox).args([
+        "generate", "x", "--provider", "bfl", "--model", "Flux-2-Klein-4B", "--dry-run", "--json",
+    ]));
+    out.exits(0).never_says(casing);
+    let plan: serde_json::Value = serde_json::from_str(out.stdout.trim()).expect("one JSON document");
+    assert_eq!(plan["provider"], "bfl");
+}
+
+#[test]
+fn an_mcp_call_with_a_lemonade_cased_id_and_no_provider_is_refused() {
+    let sandbox = Sandbox::new("mcp-lemonade-casing");
+    let output = sandbox.dir.join("klein.png");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "generate_image", "arguments": {
+            "prompt": "a fox",
+            "output_path": output,
+            "model": "Flux-2-Klein-4B"
+        } }
+    });
+    let replies = mcp_replies(&sandbox, &format!("{call}\n"), 1);
+
+    let result = &replies[0]["result"];
+    assert_eq!(result["isError"], true, "{}", replies[0]);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("every BFL model id is lower-case"), "{text}");
+    assert!(text.contains(r#"provider: "lemonade""#), "the MCP spelling of the remedy: {text}");
+    assert!(!text.contains("BFL_API_KEY"), "refused for the key, not the casing: {text}");
+    assert!(!output.exists(), "a refused call must not write an image");
+}
+
+#[test]
+fn a_lemonade_dry_run_touches_no_network_and_costs_nothing() {
+    let sandbox = Sandbox::new("lemonade-dry-run");
+    let out = run(lemonade(&sandbox).args([
+        "generate", "x", "--provider", "lemonade", "--model", "Flux-2-Klein-4B", "--dry-run", "--json",
+    ]));
+    out.exits(0).never_says("not reachable");
+    let plan: serde_json::Value = serde_json::from_str(out.stdout.trim()).expect("one JSON document");
+    assert_eq!(plan["provider"], "lemonade");
+    assert_eq!(plan["model"], "Flux-2-Klein-4B");
+    assert_eq!(plan["estimated_usd"], 0.0);
+}
+
+/// A PNG signature and an IHDR claiming `width` x `height` — all Lucida reads
+/// to learn an image's size.
+fn png_header(path: &Path, width: u32, height: u32) {
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    png.extend_from_slice(&13u32.to_be_bytes());
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&width.to_be_bytes());
+    png.extend_from_slice(&height.to_be_bytes());
+    fs::write(path, png).expect("could not write the source image");
+}
+
+#[test]
+fn a_lemonade_dry_run_refuses_an_edit_whose_source_is_over_the_ceiling() {
+    // The render refuses this before it asks the server anything; a dry run
+    // promises every refusal a real run would make, so it refuses it too.
+    // LUCIDA_LEMONADE_URL is port 1: a request would read "not reachable".
+    let sandbox = Sandbox::new("lemonade-dry-run-ceiling");
+    let huge = sandbox.dir.join("huge.png");
+    png_header(&huge, 4000, 3000);
+    run(lemonade(&sandbox)
+        .args(["edit"])
+        .arg(&huge)
+        .args(["x", "--provider", "lemonade", "--model", "M", "--dry-run"]))
+    .exits(2)
+    .says("4000x3000")
+    .says("--size 2048")
+    .never_says("not reachable")
+    .never_says("Dry run");
+
+    // The remedy it names passes the same dry run.
+    run(lemonade(&sandbox)
+        .args(["edit"])
+        .arg(&huge)
+        .args(["x", "--provider", "lemonade", "--model", "M", "--size", "2048", "--dry-run"]))
+    .exits(0)
+    .never_says("not reachable");
+}
+
+#[test]
+fn a_lemonade_mask_is_refused_naming_the_lane_whose_mask_binds() {
+    let sandbox = Sandbox::new("lemonade-mask");
+    run(lemonade(&sandbox).args([
+        "edit", "in.png", "x", "--provider", "lemonade", "--model", "M", "--mask", "m.png",
+    ]))
+    .exits(2)
+    .says("comfyui")
+    .never_says("not reachable");
+}
+
+#[test]
+fn an_unreachable_lemonade_says_where_it_looked_and_which_setting_chose_it() {
+    let sandbox = Sandbox::new("lemonade-down");
+    run(lemonade(&sandbox).args(["generate", "x", "--provider", "lemonade", "--model", "M"]))
+        .exits(1)
+        .says(&format!("not reachable at {NOWHERE}"))
+        .says("LUCIDA_LEMONADE_URL")
+        .never_says("not a fallback");
+
+    run(lemonade(&sandbox)
+        .env("LUCIDA_IMAGE_PROVIDERS", "lemonade,google")
+        .env("LUCIDA_LEMONADE_MODEL", "M")
+        .args(["generate", "x"]))
+    .exits(1)
+    .says("not reachable")
+    .says("not a fallback");
+}
+
+#[test]
+fn models_for_an_unreachable_lemonade_still_print_what_it_supports() {
+    let sandbox = Sandbox::new("lemonade-models-down");
+    run(lemonade(&sandbox).args(["models", "--provider", "lemonade"]))
+        .exits(0)
+        .says("did not answer")
+        .says("This provider supports:")
+        .says("at most 2048 pixels");
+}
+
+#[test]
+fn a_lemonade_render_is_free_seeded_and_recorded() {
+    let sandbox = Sandbox::new("lemonade-render");
+    let (base, fake) = fake_lemonade(vec![LEMONADE_MODELS.to_string(), lemonade_image()]);
+    let destination = sandbox.dir.join("fox.png");
+
+    let out = run(lemonade(&sandbox)
+        .env("LUCIDA_LEMONADE_URL", &base)
+        .args(["--json", "generate", "a fox", "--provider", "lemonade", "--model", "Flux-2-Klein-4B-TheNoise", "-o"])
+        .arg(&destination));
+    out.exits(0);
+    let seen = fake.join().unwrap();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+
+    let doc: serde_json::Value = serde_json::from_str(out.stdout.trim()).expect("one JSON document");
+    let image = &doc["images"][0];
+    assert_eq!(image["provider"], "lemonade");
+    assert_eq!(image["estimated_usd"], 0.0);
+    let seed = image["seed"].as_u64().expect("a Lemonade render always reports its seed");
+    // The seed reported is the one that went over the wire.
+    assert!(seen[1].contains(&format!("\"seed\":{seed}")), "{}", seen[1]);
+    assert!(fs::read(&destination).unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
+
+    let ledger = fs::read_to_string(sandbox.config_file().with_file_name("renders.jsonl"))
+        .expect("the render left no ledger");
+    let entry: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+    assert_eq!(entry["provider"], "lemonade");
+    assert_eq!(entry["seed"], seed);
+    assert_eq!(entry["estimated_usd"], 0.0);
+}
+
+#[test]
+fn tools_list_offers_lemonade_and_never_its_placeholder() {
+    let sandbox = Sandbox::new("mcp-lemonade");
+    let out = mcp(&sandbox, &format!("{TOOLS_LIST}\n"));
+    assert!(schema_providers(&out).iter().any(|p| p == "lemonade"), "{}", out.stdout);
+    out.never_says("lemonade-model");
+}
+
+#[test]
+fn the_canary_can_tell_a_listening_lemonade_from_a_silent_one() {
+    // scripts/canary.sh passes lemonade on "Image models available to" and
+    // skips it only on the lane's own "Lemonade is not reachable at". Both
+    // sides are pinned on every platform: from a stand-in that answers, and
+    // from port 1, where nothing does. The tests below run the script itself.
+    let sandbox = Sandbox::new("canary-lemonade");
+    let (base, fake) = fake_lemonade(vec![LEMONADE_MODELS.to_string()]);
+    run(lucida(&sandbox)
+        .env("LUCIDA_LEMONADE_URL", &base)
+        .args(["models", "--provider", "lemonade"]))
+    .says("Image models available to the lemonade provider")
+    .says("Flux-2-Klein-4B-TheNoise  (image, edit; 1024x1024; 4 steps; cfg 1)");
+    fake.join().unwrap();
+
+    run(lemonade(&sandbox).args(["models", "--provider", "lemonade"]))
+        .says("did not answer")
+        .says(&format!("Lemonade is not reachable at {NOWHERE}"));
+}
+
+/// The line scripts/canary.sh prints for lemonade, run against `base` with no
+/// credential anywhere: every keyed provider skips, ComfyUI points at port 1,
+/// and nothing but the stand-in at `base` is asked anything. Unix only: the
+/// script is bash, and a Windows runner's `bash` may not be the one it needs.
+#[cfg(unix)]
+fn canary_says_of_lemonade(label: &str, base: &str) -> String {
+    let sandbox = Sandbox::new(label);
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/canary.sh");
+    let mut cmd = Command::new("bash");
+    cmd.env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &sandbox.dir)
+        .env("LUCIDA_LEMONADE_URL", base)
+        .env("LUCIDA_COMFYUI_URL", "http://127.0.0.1:1")
+        .arg(&script)
+        .arg(binary());
+    let out = run(&mut cmd);
+    let lines: Vec<&str> = out.stdout.lines().filter(|l| l.contains(" lemonade — ")).collect();
+    assert_eq!(lines.len(), 1, "one lemonade verdict expected:\n{}", out.stdout);
+    lines[0].to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_canary_skips_lemonade_only_when_it_is_not_reachable() {
+    // Nothing listening.
+    let line = canary_says_of_lemonade("canary-lemonade-refused", NOWHERE);
+    assert!(line.starts_with("  --    lemonade — not listening"), "{line}");
+
+    // A gateway up in front of a Lemonade that is not — once per attempt, as
+    // the listing is retried.
+    let down = r#"{"error":{"message":"Lemonade is not reachable.","type":"invalid_request_error","param":null,"code":"upstream_unreachable"}}"#;
+    let (base, fake) = fake_lemonade_answering(vec![(502, down.to_string()); 3]);
+    let line = canary_says_of_lemonade("canary-lemonade-502", &base);
+    assert_eq!(fake.join().unwrap().len(), 3);
+    assert!(line.starts_with("  --    lemonade — not listening"), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_canary_fails_lemonade_on_any_other_answer_with_the_reason() {
+    // A base without `/v1`: answered, but not by Lemonade's API.
+    let (base, fake) = fake_lemonade_answering(vec![(404, r#"{"detail":"Not Found"}"#.to_string())]);
+    let line = canary_says_of_lemonade("canary-lemonade-404", &base);
+    fake.join().unwrap();
+    assert!(line.starts_with("  DRIFT lemonade — "), "{line}");
+    assert!(line.contains("HTTP 404"), "the reason is missing: {line}");
+
+    // A listing in which nothing is labelled `image` — what a renamed
+    // `labels` field would look like. Not a quiet server: drift.
+    let unlabelled = r#"{"object":"list","data":[{"id":"Flux-2-Klein-4B-TheNoise","object":"model","tags":["image","edit"]}]}"#;
+    let (base, fake) = fake_lemonade(vec![unlabelled.to_string()]);
+    let line = canary_says_of_lemonade("canary-lemonade-unlabelled", &base);
+    fake.join().unwrap();
+    assert!(line.starts_with("  DRIFT lemonade — "), "{line}");
+    assert!(line.contains("No image models visible"), "the reason is missing: {line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_canary_passes_lemonade_on_a_listing_with_an_image_model() {
+    let (base, fake) = fake_lemonade(vec![LEMONADE_MODELS.to_string()]);
+    let line = canary_says_of_lemonade("canary-lemonade-pass", &base);
+    let seen = fake.join().unwrap();
+    assert!(line.starts_with("  ok    lemonade — "), "{line}");
+    // The listing and nothing else: the canary never renders on this lane.
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].starts_with("GET /v1/models "), "{}", seen[0]);
 }

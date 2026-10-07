@@ -54,6 +54,12 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("LUCIDA_COMFYUI_URL", "Where ComfyUI is listening"),
     ("LUCIDA_COMFYUI_AUTH", "ComfyUI credentials, if it is fenced"),
     ("LUCIDA_COMFYUI_CA", "PEM certificate for a private CA"),
+    (
+        "LUCIDA_LEMONADE_URL",
+        "Lemonade server's /v1 base URL (over plain http, a key travels in clear text)",
+    ),
+    ("LEMONADE_API_KEY", "Lemonade API key, sent as a bearer token when set"),
+    ("LUCIDA_LEMONADE_MODEL", "Lemonade image model for a render that names none"),
     // Ordered preference, consulted only when a render names neither provider
     // nor model. ⚠ A preference is not a fallback: the list is walked once,
     // before anything is sent, and the first entry whose credential is present

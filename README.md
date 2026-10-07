@@ -2,7 +2,7 @@
 
 Generate and edit images and video — as a standalone CLI or as a Model Context Protocol (MCP) server for coding agents.
 
-* **Images:** Google Gemini, local ComfyUI, Black Forest Labs (FLUX), Stability AI, OpenAI, Runway.
+* **Images:** Google Gemini, local ComfyUI, a Lemonade server, Black Forest Labs (FLUX), Stability AI, OpenAI, Runway.
 * **Video:** Google Veo, Runway, Kling.
 
 ## Contents
@@ -141,6 +141,9 @@ lucida config                           # displays active configuration sources
 | `LUCIDA_COMFYUI_URL` | URL | ComfyUI base URL (default: `http://127.0.0.1:8188`) |
 | `LUCIDA_COMFYUI_AUTH` | credentials | ComfyUI authentication (`user:password`, `Bearer …`, or `Basic …`) |
 | `LUCIDA_COMFYUI_CA` | path | Path to PEM file for a private CA |
+| `LUCIDA_LEMONADE_URL` | URL | Lemonade server's `/v1` base URL (default: `http://127.0.0.1:13305/v1`). A `user:pass@` in it is never printed. Over plain `http`, a key sent to another machine travels in clear text |
+| `LEMONADE_API_KEY` | key | Sent to Lemonade as a bearer token when set; a server that enforces no key needs none |
+| `LUCIDA_LEMONADE_MODEL` | model id | Lemonade image model for a render that names none. With neither, a Lemonade render is refused (exit `2`) |
 | `LUCIDA_IMAGE_PROVIDERS` | ordered list | Comma-separated image provider preference (e.g. `bfl,google`). An empty or whitespace-only value counts as unset. Set but naming no provider (`,`), naming an unknown one, or listing none you hold a key for is refused (exit 2), never read as unset |
 | `LUCIDA_VIDEO_PROVIDERS` | ordered list | Comma-separated video provider preference (e.g. `runway,google`). An empty or whitespace-only value counts as unset. Set but naming no provider (`,`), naming an unknown one, or listing none you hold a key for is refused (exit 2), never read as unset |
 | `LUCIDA_NO_UPDATE_CHECK` | flag | Set to any non-empty value to disable daily update notices |
@@ -161,12 +164,15 @@ Values defined in a configuration file take precedence over environment variable
 
 | Medium | Supported Providers |
 |---|---|
-| **Images** | `google` (Gemini), `comfyui` (local Flux/SD), `bfl` (FLUX), `stability`, `openai`, `runway` (Gen-4) |
+| **Images** | `google` (Gemini), `comfyui` (local Flux/SD), `lemonade` (a Lemonade server's image models), `bfl` (FLUX), `stability`, `openai`, `runway` (Gen-4) |
 | **Video** | `google` (Veo), `runway`, `kling` |
 
 * **Provider resolution:** Selected with `--provider <name>`. If omitted, Lucida infers the provider from `--model` or falls back to the order defined in `LUCIDA_IMAGE_PROVIDERS` / `LUCIDA_VIDEO_PROVIDERS`.
+* **Lemonade, by name only:** `lemonade` is never inferred from a model id — its ids look like other lanes' (`Flux-2-Klein-4B` would read as a paid BFL endpoint, and an id in that casing with no `--provider` is refused with exit `2` for that reason). Name it with `--provider lemonade` and give it a model with `--model` or `LUCIDA_LEMONADE_MODEL`. It needs no credential, so it always counts as usable in `LUCIDA_IMAGE_PROVIDERS`: on a machine with no Lemonade server, a list that starts with `lemonade` fails every render that names no provider — a preference is not a fallback.
+* **Lemonade renders:** `lucida models --provider lemonade` lists the server's image models with their default sizes and which can edit. Lucida always sends a size — the model's own default (1024x1024 when the server lists none for it), an edit's source size, or a 1024 long edge for `--aspect` alone — rounded to a multiple of 16 pixels, with a long edge of at most 2048. Lemonade reports no seed, so Lucida chooses one, sends it and reports it; that a seed gives the same image again has not been verified for this lane. An edit takes one reference image, PNG or JPEG. No negative prompt and no mask. The first render after a quiet spell (the server unloads idle models) includes loading the model, which can take minutes. A Lemonade PNG carries its prompt, seed and model in PNG text chunks, so a shared file carries its prompt; strip the metadata before publishing if that matters.
+* **Seeds:** `--seed` (MCP: `seed`) is taken by `comfyui`, `bfl`, `stability`, `runway` and `lemonade`. A seed has been verified to give the same picture again only on comfyui and stability.
 * **Capability inspection:** Run `lucida models --provider <name>` to view accessible models, supported parameters, and remaining account balances.
-* **Mask handling:** `comfyui` performs pixel-binding compositing (unmasked pixels remain byte-identical). `openai` treats masks as advisory guidance. On both, transparent pixels mark the region to change; `comfyui` reads the mask's alpha channel and refuses a PNG, WebP or JPEG without one (it would select nothing), and refuses `--aspect` / `--size` together with a mask, because a masked edit keeps the source's shape.
+* **Mask handling:** `comfyui` performs pixel-binding compositing (unmasked pixels remain byte-identical). `openai` treats masks as advisory guidance. On both, transparent pixels mark the region to change; `comfyui` reads the mask's alpha channel and refuses a PNG, WebP or JPEG without one (it would select nothing), and refuses `--aspect` / `--size` together with a mask, because a masked edit keeps the source's shape. Every other provider refuses `--mask`.
 
 ## Commands
 
@@ -263,6 +269,8 @@ For other MCP clients, configure `lucida mcp` as a stdio server:
 | `check_video` | Polls render status and retrieves completed video |
 | `list_operations` | Lists tracked in-flight video operations |
 
+A Lemonade render is one blocking request of up to 15 minutes. A cancellation that arrives while it runs cannot stop it: the image is written and the result says the cancellation came too late. After a client hangs up, the server can take up to 15 minutes to exit while such a render finishes.
+
 A call that names an argument its tool does not declare (`reference_image` for `reference_images`, say) is refused with a tool-level error that names the key and lists the accepted ones; nothing is run or billed. Every tool's `inputSchema` carries `"additionalProperties": false` to say so up front. Protocol-level failures use the standard JSON-RPC codes: `-32700` for a line that is not JSON (with `"id": null`), `-32601` for an unknown method, `-32602` for an unknown tool name, `-32600` for a request id reused while its call is still running.
 
 ### Scripting and exit codes
@@ -280,7 +288,7 @@ The `--json` flag emits a single JSON response object to stdout. Exit codes indi
 
 * **Budget enforcement:** `LUCIDA_BUDGET` sets a rolling 24-hour spending cap in USD. Requests exceeding the cap fail immediately with exit code `2`.
   The value must be a plain number (`5`, `2.50`). One that is not (`$5`, `5 USD`), or a budget set together with `LUCIDA_NO_LEDGER` or where the ledger has nowhere to live (no home or config directory — the ledger is where spend is counted), refuses every paid render with exit code `2` rather than being ignored. Free renders are never refused. The cap is enforced across concurrent MCP calls in one process, but not between separate `lucida` processes.
-* **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance. With `--json` the plan lists every resolved request field the render would send (for images: prompt, aspect, size, seed, references, negative prompt, mask, workflow, steps, guidance; for video: aspect, resolution, negative prompt, duration, mode, seed, image), `null` where unset.
+* **Dry runs:** `--dry-run` performs full pre-flight validation and cost calculation without dispatching requests or spending balance. With `--json` the plan lists every resolved request field the render would send (for images: prompt, aspect, size, seed, references, negative prompt, mask, workflow, steps, guidance; for video: aspect, resolution, negative prompt, duration, mode, seed, image), `null` where unset. A dry run asks no server, so on `lemonade` its `size` and `seed` are `null` unless given although a render always sends both — the size defaults to the model's own, which only the server's listing says, and the seed is chosen at render time — and whether the server holds the model, and whether it can edit, is checked only by the render.
 * **Ledger tracking:** Completed and pending operations are recorded to a JSON ledger adjacent to the configuration file. Inspected via `lucida history` or `lucida ops`. Set `LUCIDA_NO_LEDGER=1` to disable recording.
 
 ### Agent skill
@@ -296,6 +304,7 @@ lucida skill > ~/.claude/skills/lucida/SKILL.md
 * **Missing API keys in GUI clients:** GUI applications do not inherit shell exports. Set keys in the configuration file using `lucida config --set <KEY>`.
 * **MCP tools not detected:** Restart Claude Code or Claude Desktop after running `lucida setup` so server definitions are reloaded.
 * **ComfyUI connection failures:** Verify the server is running and accessible at `http://127.0.0.1:8188` or set `LUCIDA_COMFYUI_URL`.
+* **Lemonade not reachable:** Lucida looks at `http://127.0.0.1:13305/v1` unless `LUCIDA_LEMONADE_URL` says otherwise, and the setting must be the server's `/v1` base. A gateway or proxy in front of Lemonade that answers HTTP 502 is reported the same way.
 * **ComfyUI 401 Unauthorized:** Set `LUCIDA_COMFYUI_AUTH` with appropriate HTTP credentials.
 * **Private TLS failures:** Specify the path to your internal certificate authority bundle via `LUCIDA_COMFYUI_CA`.
 * **Unrecognised configuration keys:** Check `lucida config` output. Unknown variables in the configuration file are ignored.
