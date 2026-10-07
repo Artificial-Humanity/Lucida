@@ -109,7 +109,7 @@ published — so it is named here rather than linked. Read it before starting wo
   a model that cannot exist — or, for Runway, which refuses unknown models locally, a real
   model with an out-of-range seed *and* an over-long prompt: free by measurement rather than
   by construction, since each rests on a limit Runway validates today). **It is run by hand**,
-  with no scheduled job. ai-lab-0 is the natural place, because the provider keys live there.
+  with no scheduled job. The maintainer's machine is the natural place, because the provider keys live there.
   **Run it before every release and after changing a provider lane.** The GitHub workflow is
   `workflow_dispatch` only, deliberately, so the credentials gain no second home. A
   successful render inside the canary is reported as a *failure* — it would mean money was

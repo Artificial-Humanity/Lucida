@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Where ComfyUI is listening. Overridden with `LUCIDA_COMFYUI_URL`.
 ///
 /// Note this is the port, not a hostname — on the machine this was developed
-/// against, `comfyui.ai-lab-0` does not resolve while `localhost:8188` answers,
+/// against, its short `comfyui.<host>` name does not resolve while `localhost:8188` answers,
 /// and a hostname baked in here would have failed confusingly.
 ///
 /// The scheme is used verbatim, so `https://` works, as does a path-prefixed
