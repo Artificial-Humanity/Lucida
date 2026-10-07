@@ -162,8 +162,8 @@ Two choices worth recording:
   than a parameter accepted and ignored.
 - **Results are fetched over `/view`, not read off disk.** A ComfyUI in a
   container or on another host works with no shared mount. Worth noting the
-  hostname trap that prompted it: `comfyui.ai-lab-0` does not resolve on the
-  machine ComfyUI runs on, while `localhost:8188` answers — the short name has no
+  hostname trap that prompted it: the server's short `comfyui.<host>` name does not
+  resolve on the machine ComfyUI runs on, while `localhost:8188` answers — the short name has no
   record at all, only the fully qualified one does.
 
 **Remote servers are supported**, added immediately after the first version

@@ -14,7 +14,7 @@
 # WHERE THIS RUNS: by hand, with no scheduled job. Run it before every release
 # and after changing a provider lane.
 #
-# ai-lab-0 is the natural place to run it, because of credential geography
+# The maintainer's own machine is the natural place to run it, because of credential geography
 # rather than convenience — the provider keys
 # already live on that machine, and putting a second copy into GitHub Actions
 # secrets would double the number of places they exist for no gain. The workflow
