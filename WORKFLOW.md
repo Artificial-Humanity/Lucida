@@ -5,10 +5,14 @@ Follow [AGENTS.md](AGENTS.md) for repository rules.
 ## Branch, review, pull request
 
 1. Branch off an up-to-date `main`. All work happens on a branch.
-2. When the work is complete, use `superpowers:requesting-code-review` to dispatch
-   a review.
-3. Use `superpowers:receiving-code-review` to evaluate the findings. Address them,
-   then commit the fixes.
+2. When the work is complete, dispatch a fresh reviewer subagent with
+   `superpowers:requesting-code-review`. Do not review your own work in place.
+3. Use `superpowers:receiving-code-review` to evaluate the findings. Hand the
+   accepted findings to a fresh fixer subagent. It commits the fixes. Then
+   dispatch a fresh reviewer for the fixes only. Repeat until no Critical or
+   Important finding is left. The session coordinates and does not fix findings
+   itself. Check every report against the branch (commits,
+   files, test output) before you act on it.
 4. Push the branch and open a pull request against `main`, with
    `.github/PULL_REQUEST_TEMPLATE.md` as the body (`gh pr create --body-file`).
    `main` accepts changes only through a pull request with one approving review.
