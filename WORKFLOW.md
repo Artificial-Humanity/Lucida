@@ -10,7 +10,8 @@ Follow [AGENTS.md](AGENTS.md) for repository rules.
 3. Use `superpowers:receiving-code-review` to evaluate the findings. Hand the
    accepted findings to a fresh fixer subagent. It commits the fixes. Then
    dispatch a fresh reviewer for the fixes only. Repeat until no Critical or
-   Important finding is left. Check every report against the branch (commits,
+   Important finding is left. The session coordinates and does not fix findings
+   itself. Check every report against the branch (commits,
    files, test output) before you act on it.
 4. Push the branch and open a pull request against `main`, with
    `.github/PULL_REQUEST_TEMPLATE.md` as the body (`gh pr create --body-file`).
