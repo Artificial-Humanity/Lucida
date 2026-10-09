@@ -58,7 +58,7 @@ decides the answer:
 3. **Does it cost money?** Most providers bill per render; the lanes on the
    user's own hardware are free at the margin. A retry loop against a paid
    provider spends real money each turn — decide the parameters before
-   iterating, not during. Every render now reports its expected cost, so this is
+   iterating, not during. Every render reports its expected cost, so this is
    a number you can act on rather than a rule of thumb. If a budget is set, a
    render that would exceed it is refused before anything is sent; switch to a
    free lane rather than retrying, since retrying cannot succeed.

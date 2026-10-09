@@ -21,26 +21,20 @@ published — so it is named here rather than linked. Read it before starting wo
   (`lemonade.rs`, reached only by name). Video is Veo (`video.rs`, sharing genai's
   client), Runway and Kling (`kling.rs`).
 * **Capability truth lives in code, not prose.** `Backend::ALL` and the capabilities tables
-  generate provider lists wherever the shape allows. The 2026-08-02 review's headline
-  finding: every generated list stayed true while every hand-written one rotted. When
-  a new provider lands, start from the known hand-written drift surfaces recorded in that
-  review (§5.1) — clap help strings, MCP parameter prose, `README.md`, remedy texts.
-  The MCP `provider` enums came off that list on 2026-08-09: all three were literals, and an
-  `enum` is the worst place for one, because a well-behaved client *validates against it* — a
+  generate provider lists wherever the shape allows: a generated list stays true, a
+  hand-written one rots. When a new provider lands, start from the known hand-written drift
+  surfaces recorded in the 2026-08-02 review (§5.1) — clap help strings, MCP parameter
+  prose, `README.md`, remedy texts.
+  The MCP `provider` enums generate from `Backend::ALL` / `VideoBackend::ALL`: an `enum` is
+  the worst place for a literal, because a well-behaved client *validates against it* — a
   provider missing there is unreachable rather than undocumented, the call never arrives, and
-  no refusal message gets the chance to name it. They generate from `Backend::ALL` /
-  `VideoBackend::ALL` now, and `tests/cli.rs` holds the surviving hand-written list (the
-  `--provider` clap doc comment) against the generated set over the wire.
+  no refusal message gets the chance to name it. `tests/cli.rs` holds the remaining
+  hand-written list (the `--provider` clap doc comment) against the generated set over the
+  wire.
   Add to that list the **GitHub repository description and topics**,
-  which live outside the repo entirely and so cannot be tested from it. ⚠ This
-  paragraph asserted in the present tense that they read "Generate and edit images with
-  Google's Gemini models" for four providers and all of video. That was fixed on the
-  GitHub side and the sentence was not: as of 2026-09-26 the live description names
-  Gemini, Veo, Runway, Kling, ComfyUI, FLUX, Stability AI and OpenAI, and the topics
-  carry `runway`, `kling`, `veo`, `openai`, `stability-ai` and `video-generation`. So
-  the surface this paragraph calls untestable went stale in the paragraph itself — check
-  `gh repo view --json description,repositoryTopics` rather than believing this
-  sentence. The description is kept in step with `Cargo.toml`'s, and a test
+  which live outside the repo entirely and so cannot be tested from it — check them with
+  `gh repo view --json description,repositoryTopics`. The description is kept in step with
+  `Cargo.toml`'s, and a test
   (`the_shopfront_names_every_provider_and_video`) holds that one and the `--help`
   banner against `Backend::ALL` — but the GitHub copy is updated by hand, with
   `gh repo edit`, and nothing will remind you.
@@ -48,27 +42,23 @@ published — so it is named here rather than linked. Read it before starting wo
   Lemonade are the unmarked lanes. Unmarked means no watermark and no C2PA manifest — a
   Lemonade PNG still carries its prompt and seed in text chunks. A test holds this line
   against each provider's declared provenance.
-* **Width is per-provider too** (owner, 2026-08-09). Lucida covers image generation *and*
+* **Width is per-provider too.** Lucida covers image generation *and*
   video generation, and **each provider should be as completely represented as possible across
   both**. A provider present for one medium and absent for the other is a coverage gap, not a
-  finished integration: as of v1.2.0, kling is video-only here while it offers image
-  generation, and openai is image-only. The live matrix and the ordered work list are in
+  finished integration. The live matrix and the ordered work list are in
   `docs/ROADMAP.md` § 5. This widens providers that already exist, which is **not** what the
-  2026-08-09 pause on new providers covers — the owner clarified the pause meant new
-  *providers*, not new endpoints.
+  pause on new providers covers: the pause is on new *providers*, not new endpoints.
 
   One caveat that section records and this rule does not override: **an API with a published
   removal date is a countdown, not coverage.** OpenAI's Sora is the live case.
-* **Coverage is per-credential, not global** (owner, 2026-08-09). The point of many providers
+* **Coverage is per-credential, not global.** The point of many providers
   is not one entry per model family — it is that someone holding a *subset* of these
   subscriptions can use the **full width of what they pay for**. So "that model is reachable
   another way" is never on its own a reason to leave a lane unexposed: it is a fact about
   whichever keyring the decision was made on, and a user with only a Runway or only a fal
-  subscription has a different one. This overturns the argument used on 2026-08-09 to restrict
-  Runway to its own `gen4` models and to decline fal — an argument that reasoned from a
-  machine holding every direct key.
+  subscription has a different one.
 
-  What it does **not** overturn is why aggregated lanes are harder: capabilities are not
+  Aggregated lanes are harder: capabilities are not
   knowable per model, provenance passthrough is undocumented, and pricing carries a margin.
   The answer to those is honest labelling rather than exclusion, and the vocabulary already
   exists — `Provenance::Unverified` says nobody has checked, `Price::Unverified` says the rate
@@ -76,22 +66,19 @@ published — so it is named here rather than linked. Read it before starting wo
   it carries are true.
 * **Verification trio:** `cargo test`, `cargo clippy --all-targets` (kept warning-free so
   the next warning is visible), and `scripts/smoke.sh` — all three green before tagging a
-  release. `scripts/canary.sh` is run before every release too (see Integration
-  Dependencies). A release ships three platform assets with checksums (macOS universal,
-  Linux musl-static, Windows); a release missing an asset is the v0.5.0 failure mode. The crate
+  release. A release ships three platform assets with checksums (macOS universal,
+  Linux musl-static, Windows). The crate
   goes to crates.io from the same tag-push run, via trusted publishing (`release.yml`'s
-  `crate` job), first proven by v1.1.1. If it fails, publish by hand from a checkout of the tag,
+  `crate` job). If it fails, publish by hand from a checkout of the tag,
   never `main` — see `docs/ROADMAP.md` § 4.
 * **Two test layers, one place each.** Unit tests live in `#[cfg(test)] mod tests` inside the
   file they test and can reach private functions. Anything that only exists once there is a
   *process* — exit codes, `--json` alone on stdout, the config search path, JSON-RPC framing —
   goes in `tests/cli.rs`, which drives the binary as a black box with `env_clear` and a private
-  `HOME`. Those assertions used to be bash inside `scripts/smoke.sh`, where they could not run
-  before a commit and where one of them had silently stopped asserting: an ordered `case` whose
-  failing arm sat *after* the arm that matched. `smoke.sh` now runs `tests/cli.rs` against the
+  `HOME`. `smoke.sh` runs `tests/cli.rs` against the
   packaged artifact via `LUCIDA_TEST_BIN`, so the musl-static and universal binaries are
   covered to the same depth as the debug build and there is only one copy of each assertion —
-  which a test in that file enforces. **Do not add bash assertions back to `smoke.sh`;** it is
+  which a test in that file enforces. **Do not add bash assertions to `smoke.sh`;** it is
   for what packaging can break (does the artifact load, does it know its version).
 
 ---
@@ -137,14 +124,13 @@ case-insensitive macOS/Windows.
 approved pull request, and commits are authored by the machine account, never the owner. The
 number below is **2** deliberately; there is no §1:
 `docs/ROADMAP.md` and three internal documents — the state snapshot, the code review and the
-product review — all cite "AGENTS.md §2", so the number is an identifier those citations
-depend on rather than a position in a list. Renumbering it would silently falsify every one of
-them, including the ones outside this repo where nothing here can check them.
+product review — all cite "AGENTS.md §2", so the number is an identifier, not a position in a
+list. Do not renumber it: that would silently falsify every citation, including those outside
+this repo.
 
 ### 2. Paid-API Spend Discipline
 
 * Hosted providers bill per render. **Probe with a free validation error before paying for a
   render**: send a deliberately invalid parameter value — the rejection names the parameter
-  and lists its accepted values without rendering or billing (the entire 2026-08-02 probe
-  batch cost about 7 cents this way). Modest verification spend is authorized; bulk renders
+  and lists its accepted values without rendering or billing. Modest verification spend is authorized; bulk renders
   are an owner call.

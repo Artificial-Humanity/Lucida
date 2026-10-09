@@ -49,7 +49,7 @@ From v1.1.0 the macOS binary is signed with an Apple Developer ID and notarized,
 download from that page opens without a Gatekeeper warning. Because a standalone
 executable cannot carry a stapled notarization ticket, macOS checks it with Apple
 **online** on first run — silent with a network, and a machine with none can still
-refuse it. Binaries installed by the script above were never subject to that check:
+refuse it. Binaries installed by the script above are not subject to that check:
 macOS marks quarantine from browsers, not from `curl`.
 
 ### Building from source
