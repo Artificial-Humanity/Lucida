@@ -33,5 +33,7 @@ The repository's ruleset covers `main` only; release tags are not subject to it.
 * `main` cannot be deleted or force-pushed. CI runs on every pull request and on
   `main`, but it is not a required check. `gh pr checks` may be refused by the
   token; `gh run list --branch <branch>` works.
+* `docs/ROADMAP.md` records past decisions and their reasons, so it is exempt from the
+  workspace rule that instruction files state only what is current.
 * Use the workflow stated here. Do not reconstruct additional rules from retired
   workflows or git history; changes to the workflow belong to the owner.
