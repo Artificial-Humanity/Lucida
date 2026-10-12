@@ -1,9 +1,9 @@
 # Roadmap
 
-Lucida speaks to seven providers as of v1.2.0 — **images** from Google Gemini, a
-local ComfyUI, hosted FLUX from Black Forest Labs, Stability AI, OpenAI and Runway;
-**video** from Veo, Runway and Kling. This records where it goes next and, more
-usefully, what has to be true first.
+Lucida speaks to eight providers as of v1.3.0 — **images** from Google Gemini, a
+local ComfyUI, a Lemonade server, hosted FLUX from Black Forest Labs, Stability AI,
+OpenAI and Runway; **video** from Veo, Runway and Kling. This records where it goes
+next and, more usefully, what has to be true first.
 
 Nothing below the "Done" section is committed work. Items are ordered by what
 unblocks what, not by enthusiasm.
@@ -791,7 +791,7 @@ Verified by free probes where marked; see AGENTS.md § 2 for the technique.
 | `openai` | shipped | **missing** — see Sora below |
 | `stability` | shipped | **missing** — `/v2beta/image-to-video` returns 404 today; retired or moved, unverified |
 | `runway` | shipped in v1.2.0 — its own two models | shipped |
-| `lemonade` | shipped — the release after v1.2.0 | n/a — Lemonade serves no video |
+| `lemonade` | shipped in v1.3.0 | n/a — Lemonade serves no video |
 | `kling` | **on hold** — endpoint confirmed, models not enumerable free; no Kling credit | shipped |
 
 ### The items, in the order worth doing them
