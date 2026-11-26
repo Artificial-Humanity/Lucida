@@ -6,8 +6,8 @@ Follow [AGENTS.md](AGENTS.md) for repository rules.
 
 1. Branch off an up-to-date `main`. All work happens on a branch.
 2. When the work is complete, dispatch a fresh reviewer subagent with
-   `superpowers:requesting-code-review`. Do not review your own work in place.
-3. Use `superpowers:receiving-code-review` to evaluate the findings. Hand the
+   the `code-review` skill. Do not review your own work in place.
+3. Use the `code-review` skill to evaluate the findings. Hand the
    accepted findings to a fresh fixer subagent. It commits the fixes. Then
    dispatch a fresh reviewer for the fixes only. Repeat until no Critical or
    Important finding is left. The session coordinates and does not fix findings
